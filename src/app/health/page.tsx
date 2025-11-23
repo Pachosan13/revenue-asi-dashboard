@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useEffect, useMemo, useState } from "react"
+import React, { useCallback, useEffect, useMemo, useState } from "react"
 import { RefreshCw, Shield, Signal } from "lucide-react"
 import { supabaseBrowser } from "@/lib/supabase"
 import { Button, Card, CardContent, CardHeader, StatCard } from "@/components/ui-custom"
@@ -13,55 +13,69 @@ type JobRun = {
   duration_ms?: number | null
 }
 
+type TouchRun = {
+  id: string
+  status?: string | null
+  created_at?: string | null
+}
+
 export default function HealthPage() {
   const supabase = useMemo(() => {
     const hasEnv = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-    if (!hasEnv) return null
-    return supabaseBrowser()
+    return hasEnv ? supabaseBrowser() : null
   }, [])
   const [runs, setRuns] = useState<JobRun[]>([])
   const [loading, setLoading] = useState(true)
+  const [jobCounts, setJobCounts] = useState({ success: 0, failed: 0 })
+  const [touchRun, setTouchRun] = useState<TouchRun | null>(null)
+  const [lastJobRun, setLastJobRun] = useState<JobRun | null>(null)
 
-  useEffect(() => {
-    let alive = true
+  const refreshHealth = useCallback(async () => {
+    if (!supabase) {
+      setLoading(false)
+      return
+    }
 
-    async function loadRuns() {
-      if (!supabase) {
-        setLoading(false)
-        return
-      }
+    setLoading(true)
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
 
-      setLoading(true)
-      const { data, error } = await supabase
+    const [jobResp, touchResp] = await Promise.all([
+      supabase
         .from("job_runs")
         .select("id, job_name, status, created_at, duration_ms")
         .order("created_at", { ascending: false })
-        .limit(6)
+        .limit(20),
+      supabase.from("touch_runs").select("id, status, created_at").order("created_at", { ascending: false }).limit(1),
+    ])
 
-      if (!alive) return
-
-      if (error) {
-        console.error("Failed to load health runs", error)
-        setRuns([])
-      } else {
-        setRuns(data ?? [])
-      }
-      setLoading(false)
+    if (jobResp.error) {
+      console.warn("Failed to load job_runs", jobResp.error)
+      setRuns([])
+      setJobCounts({ success: 0, failed: 0 })
+      setLastJobRun(null)
+    } else {
+      const filtered = (jobResp.data ?? []).filter((run) => (run.created_at ?? "") >= since)
+      const success = filtered.filter((run) => (run.status ?? "").toLowerCase() === "succeeded").length
+      const failed = filtered.filter((run) => (run.status ?? "").toLowerCase() === "failed").length
+      setRuns(jobResp.data ?? [])
+      setJobCounts({ success, failed })
+      setLastJobRun(jobResp.data?.[0] ?? null)
     }
 
-    loadRuns()
-    return () => {
-      alive = false
+    if (touchResp.error) {
+      console.warn("Failed to load touch_runs", touchResp.error)
+      setTouchRun(null)
+    } else {
+      setTouchRun(touchResp.data?.[0] ?? null)
     }
+
+    setLoading(false)
   }, [supabase])
 
-  const uptimes = useMemo(() => {
-    const healthy = runs.filter((run) => (run.status ?? "").toLowerCase() === "succeeded").length
-    return {
-      success: healthy,
-      total: runs.length,
-    }
-  }, [runs])
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refreshHealth()
+  }, [refreshHealth])
 
   return (
     <div className="space-y-6">
@@ -75,7 +89,7 @@ export default function HealthPage() {
           variant="ghost"
           size="sm"
           className="gap-2"
-          onClick={() => window.location.reload()}
+          onClick={refreshHealth}
           aria-label="Refresh health"
         >
           <RefreshCw size={16} />
@@ -86,17 +100,32 @@ export default function HealthPage() {
       <div className="grid gap-4 md:grid-cols-3">
         <StatCard
           label="Jobs"
-          value={`${uptimes.success}/${uptimes.total || 1} succeeded`}
-          helper="Latest job_runs"
-          delta="Live"
+          value={`${jobCounts.success} succeeded / ${jobCounts.failed} failed`}
+          helper="job_runs last 24h"
+          delta={supabase ? "Live" : "Offline"}
         />
         <StatCard
           label="Dispatch"
-          value="dispatch-touch"
-          helper="Watching cadence triggers"
-          delta="Online"
+          value={
+            touchRun
+              ? `${touchRun.status ?? "pending"}`
+              : supabase
+                ? "No dispatch runs"
+                : "Supabase env missing"
+          }
+          helper={
+            touchRun?.created_at
+              ? new Date(touchRun.created_at).toLocaleString()
+              : "Watching cadence triggers"
+          }
+          delta={touchRun ? "Latest" : "Idle"}
         />
-        <StatCard label="Run cadence" value="run-cadence" helper="Cron via SQL" delta="Synced" />
+        <StatCard
+          label="Run cadence"
+          value={lastJobRun ? lastJobRun.status ?? "pending" : "No runs"}
+          helper={lastJobRun?.created_at ? new Date(lastJobRun.created_at).toLocaleString() : "Cron via SQL"}
+          delta={lastJobRun ? "Latest" : "Idle"}
+        />
       </div>
 
       <Card>
