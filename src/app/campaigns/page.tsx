@@ -19,8 +19,31 @@ import {
   Select,
   StatCard,
 } from "@/components/ui-custom"
+import { supabaseBrowser } from "@/lib/supabase"
 import { campaignsMock } from "./mock-data"
 import { CampaignStatus, CampaignType } from "@/types/campaign"
+
+type CampaignRow = {
+  id?: string
+  uuid?: string
+  name?: string
+  type?: CampaignType
+  status?: CampaignStatus
+  leads_count?: number
+  target_leads?: number
+  reply_rate?: number
+  reply_rate_pct?: number
+  meetings_booked?: number
+  meetings?: number
+  conversion?: number
+  conversion_rate?: number
+  created_at?: string
+  inserted_at?: string
+  error_rate?: number
+  daily_throughput?: number
+  leads_contacted?: number
+  contacts_processed?: number
+}
 
 const statusStyles: Record<CampaignStatus, string> = {
   live: "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30",
@@ -38,35 +61,104 @@ const typeCopy: Record<CampaignType, string> = {
 }
 
 export default function CampaignsPage() {
+  const supabase = useMemo(() => {
+    const hasEnv = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    if (!hasEnv) return null
+    return supabaseBrowser()
+  }, [])
   const [type, setType] = useState<CampaignType | "all">("all")
   const [status, setStatus] = useState<CampaignStatus | "all">("all")
   const [query, setQuery] = useState("")
   const [loading, setLoading] = useState(true)
+  const [campaigns, setCampaigns] = useState(campaignsMock)
+  const [runCounts, setRunCounts] = useState({ campaignRuns: 0, touchRuns: 0 })
   const router = useRouter()
 
   useEffect(() => {
-    const timer = setTimeout(() => setLoading(false), 450)
-    return () => clearTimeout(timer)
-  }, [])
+    let alive = true
+
+    async function loadCampaigns() {
+      if (!supabase) {
+        setLoading(false)
+        return
+      }
+
+      setLoading(true)
+      const { data, error } = await supabase
+        .from("campaigns")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(200)
+
+      if (!alive) return
+
+      if (error) {
+        console.error("Failed to load campaigns", error)
+        setCampaigns(campaignsMock)
+      } else {
+        const mapped = (data ?? []).map((row: CampaignRow) => {
+          const fallbackType = (row.type ?? "outbound") as CampaignType
+          return {
+            id: String(row.id ?? row.uuid ?? crypto.randomUUID()),
+            name: row.name ?? "Untitled campaign",
+            type: fallbackType,
+            status: (row.status ?? "draft") as CampaignStatus,
+            leads_count: Number(row.leads_count ?? row.target_leads ?? 0) || 0,
+            reply_rate: Number(row.reply_rate ?? row.reply_rate_pct ?? 0) || 0,
+            meetings_booked: Number(row.meetings_booked ?? row.meetings ?? 0) || 0,
+            conversion: Number(row.conversion ?? row.conversion_rate ?? 0) || 0,
+            created_at: row.created_at ?? row.inserted_at ?? "",
+            error_rate: Number(row.error_rate ?? 0) || undefined,
+            daily_throughput: Number(row.daily_throughput ?? 0) || undefined,
+            leads_contacted: Number(row.leads_contacted ?? row.contacts_processed ?? 0) || undefined,
+          }
+        })
+
+        setCampaigns(mapped.length > 0 ? mapped : campaignsMock)
+      }
+      setLoading(false)
+    }
+
+    async function loadRunCounts() {
+      if (!supabase) return
+      const [{ count: campaignRuns }, { count: touchRuns }] = await Promise.all([
+        supabase.from("campaign_runs").select("id", { head: true, count: "exact" }),
+        supabase.from("touch_runs").select("id", { head: true, count: "exact" }),
+      ])
+
+      if (!alive) return
+      setRunCounts({
+        campaignRuns: campaignRuns ?? 0,
+        touchRuns: touchRuns ?? 0,
+      })
+    }
+
+    loadCampaigns()
+    loadRunCounts()
+
+    return () => {
+      alive = false
+    }
+  }, [supabase])
 
   const filtered = useMemo(() => {
-    return campaignsMock.filter((campaign) => {
+    return campaigns.filter((campaign) => {
       const matchesType = type === "all" || campaign.type === type
       const matchesStatus = status === "all" || campaign.status === status
       const matchesQuery =
         query.trim().length === 0 || campaign.name.toLowerCase().includes(query.toLowerCase())
       return matchesType && matchesStatus && matchesQuery
     })
-  }, [type, status, query])
+  }, [campaigns, type, status, query])
 
   const summary = useMemo(() => {
-    const total = campaignsMock.length
-    const live = campaignsMock.filter((c) => c.status === "live").length
-    const avgReply = Math.round(
-      campaignsMock.reduce((acc, c) => acc + c.reply_rate, 0) / campaignsMock.length,
-    )
+    const total = campaigns.length
+    const live = campaigns.filter((c) => c.status === "live").length
+    const avgReply = campaigns.length
+      ? Math.round(campaigns.reduce((acc, c) => acc + c.reply_rate, 0) / campaigns.length)
+      : 0
     return { total, live, avgReply }
-  }, [])
+  }, [campaigns])
 
   return (
     <div className="space-y-6">
@@ -84,9 +176,19 @@ export default function CampaignsPage() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">
-        <StatCard label="Active" value={`${summary.live} live`} helper="Neon ops online" delta="+3 launched" />
+        <StatCard
+          label="Active"
+          value={`${summary.live} live`}
+          helper={`${runCounts.campaignRuns} recent runs`}
+          delta="Synced"
+        />
         <StatCard label="Reply rate" value={`${summary.avgReply}%`} helper="Rolling 7d across stacks" delta="+1.2%" />
-        <StatCard label="Inventory" value={`${summary.total} programs`} helper="Outbound, nurture, reactivation" delta="Stable" />
+        <StatCard
+          label="Inventory"
+          value={`${summary.total} programs`}
+          helper={`${runCounts.touchRuns} touch runs observed`}
+          delta="Stable"
+        />
       </div>
 
       <Card>
