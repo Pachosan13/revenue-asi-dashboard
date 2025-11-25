@@ -37,9 +37,10 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!supabase) return
+    const client = supabase
     let alive = true
     async function loadSettings() {
-      const { data, error } = await supabase.from("org_settings").select("*").limit(1).maybeSingle()
+      const { data, error } = await client.from("org_settings").select("*").limit(1).maybeSingle()
       if (!alive) return
 
       if (error && error.code !== "PGRST116") {

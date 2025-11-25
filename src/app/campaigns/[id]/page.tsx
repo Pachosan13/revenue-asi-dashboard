@@ -12,6 +12,20 @@ import { CadenceBuilder } from "@/components/campaigns/CadenceBuilder"
 import { MessageEditor } from "@/components/campaigns/MessageEditor"
 import { SystemEventsPanel } from "@/components/campaigns/SystemEventsPanel"
 
+type StartCampaignResponse =
+  | {
+      ok: true
+      version: string
+      selected: number
+      inserted: number
+      dry_run: boolean
+      errors: unknown[]
+    }
+  | {
+      ok: false
+      error: string
+    }
+
 export default function CampaignDetailPage() {
   const params = useParams<{ id: string }>()
   const router = useRouter()
@@ -22,6 +36,14 @@ export default function CampaignDetailPage() {
   }, [params])
 
   const [status, setStatus] = useState<CampaignStatus>(campaign?.status ?? "draft")
+  const [isStarting, setIsStarting] = useState(false)
+  const [startFeedback, setStartFeedback] = useState<
+    | {
+        type: "success" | "error"
+        message: string
+      }
+    | null
+  >(null)
 
   const effectiveCampaign: Campaign = useMemo(() => {
     if (!campaign) {
@@ -58,6 +80,54 @@ export default function CampaignDetailPage() {
   }
 
   const emptyState = !campaign || params?.id === "new"
+
+  const handleStartCampaign = async () => {
+    if (!campaign || !campaign.id || campaign.id === "new") {
+      setStartFeedback({ type: "error", message: "No campaign to start." })
+      return
+    }
+
+    setIsStarting(true)
+    setStartFeedback(null)
+
+    try {
+      const response = await fetch("/functions/v1/start-campaign", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ campaign_id: campaign.id }),
+      })
+
+      let payload: StartCampaignResponse | null = null
+
+      try {
+        payload = await response.json()
+      } catch (error) {
+        console.error("Failed to parse start-campaign response", error)
+      }
+
+      if (!response.ok || !payload || payload.ok !== true) {
+        const errorMessage =
+          (payload && "error" in payload ? payload.error : null) || response.statusText || "Failed to start campaign"
+        throw new Error(errorMessage)
+      }
+
+      setStatus("live")
+      setStartFeedback({
+        type: "success",
+        message: `Campaign started. Selected ${payload.selected ?? 0} leads, inserted ${payload.inserted ?? 0}.`,
+      })
+      router.refresh()
+    } catch (error) {
+      setStartFeedback({
+        type: "error",
+        message: error instanceof Error ? error.message : "Unable to start campaign",
+      })
+    } finally {
+      setIsStarting(false)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -150,9 +220,27 @@ export default function CampaignDetailPage() {
         </div>
       </div>
 
-      <div className="sticky bottom-4 flex justify-end gap-3">
-        <Button variant="primary" className="gap-2">
-          <Play size={16} /> Start campaign
+      <div className="sticky bottom-4 flex flex-wrap items-center justify-end gap-3">
+        {startFeedback ? (
+          <div
+            className={`rounded-2xl border px-4 py-2 text-sm ${
+              startFeedback.type === "success"
+                ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-100"
+                : "border-amber-400/40 bg-amber-500/10 text-amber-100"
+            }`}
+            role="status"
+            aria-live="polite"
+          >
+            {startFeedback.message}
+          </div>
+        ) : null}
+        <Button
+          variant="primary"
+          className="gap-2"
+          disabled={isStarting || !campaign || campaign.id === "new"}
+          onClick={handleStartCampaign}
+        >
+          <Play size={16} /> {isStarting ? "Starting..." : "Start campaign"}
         </Button>
         <Button variant="subtle" className="gap-2 text-amber-200">
           <Pause size={16} /> Pause
