@@ -1,8 +1,21 @@
 "use client"
 
-import React from "react"
+import React, { useState } from "react"
 import { Mail, Phone, RadioTower, Timer, UserRound } from "lucide-react"
-import { Badge, Card, CardContent, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow } from "@/components/ui-custom"
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeaderCell,
+  TableRow,
+} from "@/components/ui-custom"
+
+import { LeadTimeline } from "./LeadTimeline"
 
 export type LeadInboxEntry = {
   id: string
@@ -39,6 +52,8 @@ function statusVariant(status: string | null) {
 }
 
 export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
+  const [selectedLead, setSelectedLead] = useState<LeadInboxEntry | null>(null)
+
   if (!loading && leads.length === 0) {
     return (
       <Card>
@@ -68,6 +83,7 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
               <TableHeaderCell>Último toque</TableHeaderCell>
               <TableHeaderCell>Campaña</TableHeaderCell>
               <TableHeaderCell>Canal</TableHeaderCell>
+              <TableHeaderCell>Timeline</TableHeaderCell>
             </tr>
           </TableHead>
           <TableBody>
@@ -92,11 +108,16 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
                   </div>
                 </TableCell>
                 <TableCell className="text-white/80">{lead.channel_last ?? "—"}</TableCell>
+                <TableCell>
+                  <Button variant="ghost" size="sm" onClick={() => setSelectedLead(lead)}>
+                    Ver timeline
+                  </Button>
+                </TableCell>
               </TableRow>
             ))}
             {loading ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-white/60">
+                <TableCell colSpan={8} className="text-center text-white/60">
                   Cargando leads...
                 </TableCell>
               </TableRow>
@@ -141,10 +162,21 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
                 <span>{lead.campaign_name ?? lead.campaign_id ?? "Sin campaña"}</span>
               </div>
             </div>
+            <div className="mt-3">
+              <Button variant="outline" size="sm" onClick={() => setSelectedLead(lead)}>
+                Ver timeline
+              </Button>
+            </div>
           </div>
         ))}
         {loading ? <p className="text-center text-sm text-white/60">Cargando leads...</p> : null}
       </div>
+
+      {selectedLead ? (
+        <div className="pt-2">
+          <LeadTimeline leadId={selectedLead.id} leadName={selectedLead.name ?? selectedLead.email ?? selectedLead.id} />
+        </div>
+      ) : null}
     </div>
   )
 }
