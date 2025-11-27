@@ -104,14 +104,16 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
       if (!alive) return
 
       if (!response.ok) {
-        console.error(response.error)
-        setError("No se pudo obtener el timeline de touch_runs para el lead")
+        if (response.error) {
+          console.warn("lead timeline error", response.error)
+        }
+        setError("No se pudo obtener el timeline de touch_runs para este lead.")
         setTouches([])
         setLoading(false)
         return
       }
 
-      setTouches(response.data)
+      setTouches(response.data ?? [])
       setLoading(false)
     }
 

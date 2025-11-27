@@ -155,11 +155,13 @@ export default function LeadDetailPage() {
       }
 
       if (!touchRunsResult.ok) {
-        console.error(touchRunsResult.error)
-        setError("No se pudo obtener el timeline desde Supabase. Revisa el contrato de touch_runs.")
+        if (touchRunsResult.error) {
+          console.warn("lead timeline error", touchRunsResult.error)
+        }
+        setError("No se pudo obtener el timeline de touch_runs para este lead.")
         setSteps([])
       } else {
-        setSteps(normalizeSteps(touchRunsResult.data))
+        setSteps(normalizeSteps(touchRunsResult.data ?? []))
       }
       setLoading(false)
     }
