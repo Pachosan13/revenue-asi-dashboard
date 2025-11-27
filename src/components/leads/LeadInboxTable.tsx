@@ -15,6 +15,7 @@ import {
   TableHeaderCell,
   TableRow,
 } from "@/components/ui-custom"
+import { cn } from "@/lib/utils"
 
 export type LeadInboxEntry = {
   id: string
@@ -44,9 +45,10 @@ const formatDateTime = (value: string | null) => {
 function statusVariant(status: string | null) {
   const normalized = status?.toLowerCase()
   if (!normalized) return "neutral" as const
-  if (["new", "open"].includes(normalized)) return "info" as const
-  if (["contacted", "in progress", "active"].includes(normalized)) return "warning" as const
-  if (["qualified", "won", "converted"].includes(normalized)) return "success" as const
+  if (["new", "open", "enriched"].includes(normalized)) return "info" as const
+  if (["contacted", "in progress", "active", "attempting", "engaged"].includes(normalized)) return "warning" as const
+  if (["qualified", "won", "converted", "booked"].includes(normalized)) return "success" as const
+  if (["dead", "lost"].includes(normalized)) return "destructive" as const
   return "neutral" as const
 }
 
@@ -101,7 +103,20 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
                 <TableCell className="text-white/80">{lead.email ?? "—"}</TableCell>
                 <TableCell className="text-white/80">{lead.phone ?? "—"}</TableCell>
                 <TableCell>
-                  <Badge variant={statusVariant(lead.status)}>{lead.status ?? "Sin dato"}</Badge>
+                  <Badge
+                    variant={statusVariant(lead.status)}
+                    className={cn(
+                      "flex items-center gap-2 transition duration-200 hover:scale-105 hover:brightness-110",
+                      ["engaged", "qualified", "booked"].includes(lead.status?.toLowerCase() ?? "")
+                        ? "shadow-[0_0_12px_rgba(16,185,129,0.4)] ring-1 ring-emerald-400/60"
+                        : undefined,
+                    )}
+                  >
+                    {["attempting", "engaged"].includes(lead.status?.toLowerCase() ?? "") ? (
+                      <span className="h-2 w-2 animate-pulse rounded-full bg-current" />
+                    ) : null}
+                    <span className="leading-tight">{lead.status ?? "Sin dato"}</span>
+                  </Badge>
                 </TableCell>
                 <TableCell className="text-white/70">{formatDateTime(lead.last_touch_at ?? lead.created_at)}</TableCell>
                 <TableCell className="text-white/80">
@@ -110,7 +125,14 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
                     <span className="text-xs text-white/50">{lead.campaign_id ?? ""}</span>
                   </div>
                 </TableCell>
-                <TableCell className="text-white/80">{lead.channel_last ?? "—"}</TableCell>
+                <TableCell className="text-white/80">
+                  <Badge
+                    variant="outline"
+                    className="transition duration-200 hover:scale-105 hover:bg-white/10 hover:text-white"
+                  >
+                    {lead.channel_last ?? "—"}
+                  </Badge>
+                </TableCell>
                 <TableCell>
                   <Button
                     variant="ghost"
@@ -148,7 +170,20 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
                 <p className="text-base font-semibold text-white">{lead.name ?? "—"}</p>
                 <p className="text-xs text-white/50">ID: {lead.id}</p>
               </div>
-              <Badge variant={statusVariant(lead.status)}>{lead.status ?? "Sin dato"}</Badge>
+              <Badge
+                variant={statusVariant(lead.status)}
+                className={cn(
+                  "flex items-center gap-2 transition duration-200 hover:scale-105 hover:brightness-110",
+                  ["engaged", "qualified", "booked"].includes(lead.status?.toLowerCase() ?? "")
+                    ? "shadow-[0_0_12px_rgba(16,185,129,0.4)] ring-1 ring-emerald-400/60"
+                    : undefined,
+                )}
+              >
+                {["attempting", "engaged"].includes(lead.status?.toLowerCase() ?? "") ? (
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-current" />
+                ) : null}
+                <span className="leading-tight">{lead.status ?? "Sin dato"}</span>
+              </Badge>
             </div>
 
             <div className="mt-3 space-y-2 text-sm text-white/70">
@@ -166,7 +201,12 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
               </div>
               <div className="flex items-center gap-2">
                 <RadioTower size={16} className="text-white/50" />
-                <span>{lead.channel_last ?? "Sin canal"}</span>
+                <Badge
+                  variant="outline"
+                  className="transition duration-200 hover:scale-105 hover:bg-white/10 hover:text-white"
+                >
+                  {lead.channel_last ?? "Sin canal"}
+                </Badge>
               </div>
               <div className="flex items-center gap-2">
                 <UserRound size={16} className="text-white/50" />
