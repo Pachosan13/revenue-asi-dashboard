@@ -74,11 +74,15 @@ export async function fetchLeadTouchRuns(
   >,
   leadId: string,
 ) {
-  return client
+  const { data, error } = await client
     .from("touch_runs")
     .select(touchRunSelect)
     .eq("lead_id", leadId)
     .order("sent_at", { ascending: false, nullsLast: true } as any)
-    .order("scheduled_at", { ascending: false, nullsLast: true } as any)
     .order("created_at", { ascending: false })
+
+  if (error) return { ok: false as const, error }
+  if (!Array.isArray(data)) return { ok: false as const, error: new Error("Invalid touch_runs payload") }
+
+  return { ok: true as const, data: data as TouchRunRow[] }
 }

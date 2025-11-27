@@ -99,19 +99,19 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
       }
 
       const client = supabaseBrowser()
-      const { data, error: dbError } = await fetchLeadTouchRuns(client, leadId)
+      const response = await fetchLeadTouchRuns(client, leadId)
 
       if (!alive) return
 
-      if (dbError) {
-        console.error(dbError)
+      if (!response.ok) {
+        console.error(response.error)
         setError("No se pudo obtener el timeline de touch_runs para el lead")
         setTouches([])
         setLoading(false)
         return
       }
 
-      setTouches((data ?? []) as TouchRunRow[])
+      setTouches(response.data)
       setLoading(false)
     }
 

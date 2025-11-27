@@ -19,70 +19,16 @@ import { StatCard } from "@/components/ui-custom/stat-card"
 const timeFormatter = new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit" })
 const dateFormatter = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" })
 
-const MOCK_LEAD = {
-  id: "mock-lead",
-  email: "mock@example.com",
-  phone: "+34 600 000 000",
-  state: "Engaged",
-  last_touched_at: "2024-11-03T09:00:00Z",
-  last_channel: "email",
-}
-
-const MOCK_STEPS: TouchRunRow[] = [
-  {
-    id: "mock-1",
-    campaign_id: null,
-    campaign_run_id: null,
-    lead_id: "mock-lead",
-    step: 1,
-    channel: "email",
-    status: "sent",
-    payload: { subject: "Bienvenida", message: "¡Hola! Gracias por tu interés" },
-    scheduled_at: "2024-11-01T08:00:00Z",
-    sent_at: "2024-11-01T08:00:00Z",
-    created_at: "2024-11-01T08:00:00Z",
-    error: null,
-    meta: null,
-  },
-  {
-    id: "mock-2",
-    campaign_id: null,
-    campaign_run_id: null,
-    lead_id: "mock-lead",
-    step: 2,
-    channel: "voice",
-    status: "failed",
-    payload: { note: "No respondió" },
-    scheduled_at: null,
-    sent_at: null,
-    created_at: "2024-11-02T10:15:00Z",
-    error: "Sin respuesta",
-    meta: null,
-  },
-  {
-    id: "mock-3",
-    campaign_id: null,
-    campaign_run_id: null,
-    lead_id: "mock-lead",
-    step: 3,
-    channel: "sms",
-    status: "scheduled",
-    payload: { body: "Te llamaremos pronto" },
-    scheduled_at: "2024-11-03T09:00:00Z",
-    sent_at: null,
-    created_at: "2024-11-02T18:45:00Z",
-    error: null,
-    meta: null,
-  },
-]
-
 type LeadRecord = {
   id: string
+  full_name: string | null
   email: string | null
   phone: string | null
   state: string | null
-  last_touched_at: string | null
-  last_channel: string | null
+  last_touch_at: string | null
+  campaign_id: string | null
+  campaign_name: string | null
+  channel_last: string | null
 }
 
 type NormalizedStep = TouchRunRow & {
@@ -143,7 +89,11 @@ export default function LeadDetailPage() {
   const [steps, setSteps] = useState<NormalizedStep[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [usingMock, setUsingMock] = useState(false)
+
+  const leadDisplayName = useMemo(
+    () => lead?.full_name?.trim() || lead?.email || lead?.phone || "Sin nombre",
+    [lead],
+  )
 
   useEffect(() => {
     let alive = true
@@ -154,39 +104,63 @@ export default function LeadDetailPage() {
       setError(null)
 
       if (!supabaseReady) {
-        setLead({ ...MOCK_LEAD, id: leadId })
-        setSteps(normalizeSteps(MOCK_STEPS))
-        setUsingMock(true)
+        setLead({
+          id: leadId,
+          full_name: null,
+          email: null,
+          phone: null,
+          state: null,
+          last_touch_at: null,
+          campaign_id: null,
+          campaign_name: null,
+          channel_last: null,
+        })
+        setSteps([])
         setLoading(false)
         return
       }
 
       const client = supabaseBrowser()
-      const [{ data: leadData, error: leadError }, { data: stepData, error: stepsError }] = await Promise.all([
-        client.from("leads").select("id, email, phone, state, last_touched_at, last_channel").eq("id", leadId).single(),
+      const [leadResult, touchRunsResult] = await Promise.all([
+        client
+          .from("lead_enriched")
+          .select(
+            "id, full_name, email, phone, state, last_touch_at, campaign_id, campaign_name, channel_last",
+          )
+          .eq("id", leadId)
+          .maybeSingle(),
         fetchLeadTouchRuns(client, leadId),
       ])
 
       if (!alive) return
 
-      if (leadError) {
-        console.error(leadError)
-        setError("No se pudo obtener la ficha del lead.")
+      if (leadResult.error) {
+        console.error(leadResult.error)
       }
 
-      if (stepsError) {
-        console.error(stepsError)
-        setError("No se pudo obtener el timeline de touch_runs para este lead.")
-      }
-
-      if (leadData) {
-        setLead(leadData as LeadRecord)
+      if (leadResult.data) {
+        setLead(leadResult.data as LeadRecord)
       } else {
-        setLead({ ...MOCK_LEAD, id: leadId })
+        setLead({
+          id: leadId,
+          full_name: null,
+          email: null,
+          phone: null,
+          state: null,
+          last_touch_at: null,
+          campaign_id: null,
+          campaign_name: null,
+          channel_last: null,
+        })
       }
 
-      setSteps(normalizeSteps((stepData ?? []) as TouchRunRow[]))
-      setUsingMock(false)
+      if (!touchRunsResult.ok) {
+        console.error(touchRunsResult.error)
+        setError("No se pudo obtener el timeline desde Supabase. Revisa el contrato de touch_runs.")
+        setSteps([])
+      } else {
+        setSteps(normalizeSteps(touchRunsResult.data))
+      }
       setLoading(false)
     }
 
@@ -227,8 +201,8 @@ export default function LeadDetailPage() {
             <div className="flex items-center gap-3">
               <h1 className="text-3xl font-semibold text-white">Lead timeline</h1>
               <Badge variant="neutral">Detalle</Badge>
-              {usingMock ? <Badge variant="warning">Mock</Badge> : null}
             </div>
+            <p className="text-lg font-medium text-white/80">{leadDisplayName}</p>
             <p className="text-sm text-white/60">ID: {leadId}</p>
           </div>
         </div>
@@ -244,7 +218,6 @@ export default function LeadDetailPage() {
           <AlertTriangle size={18} className="mt-0.5" />
           <div>
             <p className="font-semibold">{error}</p>
-            <p className="text-sm text-red-200/90">Se cargó un mock para continuar con el QA visual.</p>
           </div>
         </div>
       ) : null}
@@ -259,9 +232,9 @@ export default function LeadDetailPage() {
         <CardContent className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
             <p className="text-sm text-white/70">
-              Last touch: {lead?.last_touched_at ? new Date(lead.last_touched_at).toLocaleString() : "No touches yet"}
+              Last touch: {lead?.last_touch_at ? new Date(lead.last_touch_at).toLocaleString() : "No touches yet"}
             </p>
-            <p className="text-xs text-white/50">Último canal: {lead?.last_channel ?? "—"}</p>
+            <p className="text-xs text-white/50">Último canal: {lead?.channel_last ?? "—"}</p>
             <p className="text-xs text-white/50">Email: {lead?.email ?? "—"} · Phone: {lead?.phone ?? "—"}</p>
           </div>
           <Badge variant="outline" className="capitalize">
@@ -278,7 +251,7 @@ export default function LeadDetailPage() {
         </div>
       ) : null}
 
-      {!loading && steps.length === 0 ? (
+      {!loading && !error && steps.length === 0 ? (
         <Card>
           <CardContent className="space-y-3">
             <p className="text-lg font-semibold text-white">No steps yet</p>
