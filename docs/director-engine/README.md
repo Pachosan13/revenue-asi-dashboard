@@ -243,3 +243,9 @@ El Director responde SIEMPRE en JSON estructurado:
 }
 
 
+v1 — Asistido: Diseña + planea + prioriza.
+v2 — Semiautónomo: Ejecuta campañas con aprobación.
+v3 — Autónomo: Toma decisiones solo según data.
+v4 — Self-evolving: Aprende, optimiza y crea solo.
+
+

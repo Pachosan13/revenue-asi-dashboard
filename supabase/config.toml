@@ -366,3 +366,59 @@ entrypoint = "./functions/run-cadence/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/dispatch-touch/index.ts"
+
+[functions.campaign-engine]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/campaign-engine/index.ts"
+
+[functions.dispatch-touch-voice]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/dispatch-touch-voice/index.ts"
+
+[functions.voice-webhook]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/voice-webhook/index.ts"
+
+[functions.render-voice]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/render-voice/index.ts"
+
+[functions.touch-orchestrator-v4]
+enabled = true
+verify_jwt = false
+
+[functions.domain-create]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/domain-create/index.ts"
+
+[functions.domain-verify]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/domain-verify/index.ts"
+
+[functions.account-create]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/account-create/index.ts"
+
+[functions.warmup-engine]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/warmup-engine/index.ts"
+
+[functions.dispatch-touch-email]
+enabled = true
+verify_jwt = false
+
+[functions.dispatch-touch-sms]
+enabled = true
+verify_jwt = false
+
+[functions.dispatch-touch-whatsapp]
+enabled = true
+verify_jwt = false
