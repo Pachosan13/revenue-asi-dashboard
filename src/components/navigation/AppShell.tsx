@@ -2,12 +2,13 @@
 
 import React, { useMemo, useState } from "react"
 import { usePathname } from "next/navigation"
-import { Menu, X, Home, Mails, Send, Activity, FlaskConical, Settings } from "lucide-react"
+import { Menu, X, Home, Mails, Send, Activity, FlaskConical, Settings, Crown } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button, Input } from "@/components/ui-custom"
 
 const navItems = [
   { label: "Dashboard", href: "/dashboard", icon: Home, subtitle: "Operating picture" },
+  { label: "Director Console", href: "/director", icon: Crown, subtitle: "CEO overview" },
   { label: "Leads Inbox", href: "/leads-inbox", icon: Mails, subtitle: "Inbox & actions" },
   { label: "Campaigns", href: "/campaigns", icon: Send, subtitle: "Outbound" },
   { label: "Prompt Lab", href: "/prompt-lab", icon: FlaskConical, subtitle: "Experiments" },
