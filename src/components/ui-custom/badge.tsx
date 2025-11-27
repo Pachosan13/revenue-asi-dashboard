@@ -9,6 +9,8 @@ const badgeVariants = cva("inline-flex items-center rounded-full px-3 py-1 text-
       success: "bg-emerald-500/15 text-emerald-200 border border-emerald-400/30",
       warning: "bg-amber-500/15 text-amber-200 border border-amber-400/30",
       info: "bg-blue-500/15 text-blue-200 border border-blue-400/30",
+      destructive: "bg-red-500/15 text-red-200 border border-red-400/30",
+      outline: "border border-white/15 text-white/80",
     },
   },
   defaultVariants: {
