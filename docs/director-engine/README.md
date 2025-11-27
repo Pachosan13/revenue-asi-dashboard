@@ -109,3 +109,137 @@ Revenue ASI es un **Director de Crecimiento** para SMBs que vende a hispanos:
   - Definiendo esquemas de datos.
   - Diseñando el CRM basado en chat.
 
+  # Revenue ASI — Director Engine (v0.1)
+
+El Director Engine es el “cerebro” que da órdenes.  
+No ejecuta llamadas, no manda emails, no llama leads.  
+Su trabajo es **pensar, decidir y priorizar** qué debe hacer el sistema.
+
+---
+
+## 1. Objetivo del Director Engine
+
+- Maximizar **revenue mensual** de Revenue ASI.  
+- Bajo estas restricciones:
+  - Cash limitado para API (OpenAI, Elastic, Twilio).
+  - Tiempo limitado del founder (Pacho).
+  - Foco en nichos con **LTV alto** y **decisor accesible**.
+
+---
+
+## 2. Inputs que el Director usa
+
+El Director siempre parte de:
+
+1. **ICP activo**
+   - Nicho principal
+   - País / idioma
+   - Ticket promedio deseado
+   - Tipo de decisión (CEO, owner, CMO, etc.)
+
+2. **Ofertas activas**
+   - Nombre de la oferta
+   - Precio setup / mensual
+   - Entregables
+   - COGS esperados (APIs, Twilio, horas humanas)
+
+3. **Canales activos**
+   - Outbound voice
+   - Email
+   - WhatsApp / SMS
+   - Contenido orgánico
+   - Partnerships
+
+4. **Datos históricos**
+   - Calls → Appointments
+   - Appointments → Clientes
+   - Costo Twilio / 1000 llamadas
+   - Cash actual disponible para campañas
+
+5. **Restricciones**
+   - Presupuesto máximo por día
+   - Horas que Pacho puede dedicar a:
+     - Ventas 1:1
+     - Crear contenido
+     - Construir producto / sistema
+
+---
+
+## 3. Outputs del Director Engine
+
+Cada vez que se le consulta, el Director devuelve SIEMPRE:
+
+1. **Prioridad #1 de hoy**
+   - “Hoy el foco es: `<X>`”
+   - Justificación en 3–5 bullets, basada en datos.
+
+2. **Plan de acción para 24–72h**
+   - 3–5 tareas concretas, accionables.
+   - Cada tarea con:
+     - Tipo: `venta`, `producto`, `infra`, `contenido`, `relación`
+     - Owner: `Pacho`, `Agente outbound`, `Dev`, etc.
+     - Dificultad estimada: baja / media / alta
+     - Impacto estimado: bajo / medio / alto
+
+3. **Instrucciones para los agentes**
+   - Qué debe hacer el agente de:
+     - Outbound (llamadas)
+     - Email
+     - Reporting
+   - En formato de texto (para luego pasarlo al código / prompts).
+
+---
+
+## 4. Interface tipo “chat-based CRM”
+
+Prompt típico al Director:
+
+> “Contexto actual:  
+> - Cash disponible este mes: $X  
+> - Nicho actual: `<nicho>`  
+> - Ofertas: `<lista>`  
+> - Campañas corriendo: `<resumen>`  
+> Dame:  
+> 1) Prioridad #1 para los próximos 3 días  
+> 2) Las 5 acciones concretas que debo ejecutar hoy  
+> 3) Qué experimentos de adquisición probar esta semana.”
+
+El Director responde SIEMPRE en JSON estructurado:
+
+```json
+{
+  "priority": {
+    "headline": "Cerrar 2 clientes de Smart Website en nicho dentistas USA",
+    "why": [
+      "Mejor ratio lead → cliente",
+      "Ticket alto vs costo bajo de fulfillment",
+      "Cash rápido en < 30 días"
+    ]
+  },
+  "actions_today": [
+    {
+      "type": "sales",
+      "owner": "Pacho",
+      "description": "Enviar 10 DMs hiper personalizados a dentistas usando script X",
+      "difficulty": "media",
+      "impact": "alta"
+    },
+    {
+      "type": "product",
+      "owner": "Pacho",
+      "description": "Refinar pitch deck de Smart Website para dentistas (versión 1-pager)",
+      "difficulty": "baja",
+      "impact": "media"
+    }
+  ],
+  "experiments": [
+    {
+      "name": "Cold email secuencia 3 pasos dentistas",
+      "channel": "email",
+      "hypothesis": "Podemos conseguir 3–5 citas / semana con 100 emails bien segmentados",
+      "success_metric": "número de citas agendadas"
+    }
+  ]
+}
+
+
