@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { setLeadState } from "../_shared/state.ts";
 
 serve(async (req) => {
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -48,6 +49,21 @@ serve(async (req) => {
 
     if (inserts.length) {
       await supabase.from("touch_runs").insert(inserts);
+
+      for (const lead of leads ?? []) {
+        await setLeadState({
+          supabase,
+          leadId: lead.id,
+          newState: "attempting",
+          reason: "added_to_cadence",
+          actor: "system",
+          source: "run-cadence",
+          meta: { campaign_id: c.id, campaign_run_id: run?.id },
+        });
+      }
+
+      // TODO: Mark leads as "qualified", "booked", or "dead" once outcomes are known
+      // (e.g., after responses or appointment scheduling flows are implemented).
     }
   }
 
