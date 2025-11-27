@@ -39,6 +39,19 @@ type NormalizedStep = TouchRunRow & {
   preview: string
 }
 
+function getLeadTitle(record?: LeadRecord | null) {
+  return record?.full_name?.trim() || record?.email || record?.phone || "Sin nombre"
+}
+
+function getLeadSubtitle(record?: LeadRecord | null) {
+  const email = record?.email?.trim()
+  const phone = record?.phone?.trim()
+  if (email && phone) return `${email} · ${phone}`
+  if (email) return email
+  if (phone) return phone
+  return "Sin contacto"
+}
+
 function normalizeSteps(steps: TouchRunRow[]): NormalizedStep[] {
   return steps
     .map((step) => {
@@ -89,11 +102,6 @@ export default function LeadDetailPage() {
   const [steps, setSteps] = useState<NormalizedStep[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-
-  const leadDisplayName = useMemo(
-    () => lead?.full_name?.trim() || lead?.email || lead?.phone || "Sin nombre",
-    [lead],
-  )
 
   useEffect(() => {
     let alive = true
@@ -204,7 +212,8 @@ export default function LeadDetailPage() {
               <h1 className="text-3xl font-semibold text-white">Lead timeline</h1>
               <Badge variant="neutral">Detalle</Badge>
             </div>
-            <p className="text-lg font-medium text-white/80">{leadDisplayName}</p>
+            <p className="text-lg font-medium text-white/80">{getLeadTitle(lead)}</p>
+            <p className="text-sm text-white/70">{getLeadSubtitle(lead)}</p>
             <p className="text-sm text-white/60">ID: {leadId}</p>
           </div>
         </div>
