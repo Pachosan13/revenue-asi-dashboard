@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import type { SupabaseClient } from "@supabase/supabase-js"
 import {
   Button,
   Card,
@@ -13,7 +14,7 @@ import {
 type NewLeadModalProps = {
   open: boolean
   onOpenChange: (v: boolean) => void
-  supabase: any | null
+  supabase: SupabaseClient | null
   onCreated?: () => void
 }
 
@@ -27,18 +28,21 @@ export default function NewLeadModal({
 
   const [form, setForm] = useState({
     name: "",
-    phone_e164: "",
-    company: "",
+    phone: "",
+    email: "",
     notes: "",
   })
 
   if (!open) return null
 
   async function handleSave() {
-    if (!supabase) return
+    if (!supabase) {
+      alert("No hay Supabase configurado.")
+      return
+    }
 
-    if (!form.phone_e164.trim()) {
-      alert("Phone E.164 requerido (ej: +50765699957)")
+    if (!form.phone.trim()) {
+      alert("El teléfono es obligatorio.")
       return
     }
 
@@ -46,18 +50,15 @@ export default function NewLeadModal({
 
     try {
       const { error } = await supabase.from("leads").insert({
-        name: form.name || null,
-        phone_e164: form.phone_e164.trim(),
-        company: form.company || null,
-        notes: form.notes || null,
-        source: "manual",
-        status: "new",
+        phone: form.phone.trim(),
+        email: form.email.trim() || null,
+        state: "new",
       })
 
       if (error) throw error
 
       onOpenChange(false)
-      setForm({ name: "", phone_e164: "", company: "", notes: "" })
+      setForm({ name: "", phone: "", email: "", notes: "" })
       onCreated?.()
     } catch (err) {
       console.error(err)
@@ -76,7 +77,7 @@ export default function NewLeadModal({
         />
         <CardContent className="space-y-3">
           <Input
-            placeholder="Name"
+            placeholder="Name (visual only)"
             value={form.name}
             onChange={(e) =>
               setForm((f) => ({ ...f, name: e.target.value }))
@@ -84,23 +85,23 @@ export default function NewLeadModal({
           />
 
           <Input
-            placeholder="Phone (E.164) e.g. +50765699957"
-            value={form.phone_e164}
+            placeholder="Phone (E.164) ej. +50765699957"
+            value={form.phone}
             onChange={(e) =>
-              setForm((f) => ({ ...f, phone_e164: e.target.value }))
+              setForm((f) => ({ ...f, phone: e.target.value }))
             }
           />
 
           <Input
-            placeholder="Company"
-            value={form.company}
+            placeholder="Email (opcional)"
+            value={form.email}
             onChange={(e) =>
-              setForm((f) => ({ ...f, company: e.target.value }))
+              setForm((f) => ({ ...f, email: e.target.value }))
             }
           />
 
           <Textarea
-            placeholder="Notes"
+            placeholder="Notes (solo para ti, no se envía)"
             value={form.notes}
             onChange={(e) =>
               setForm((f) => ({ ...f, notes: e.target.value }))

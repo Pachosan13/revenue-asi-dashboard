@@ -52,7 +52,6 @@ export default function PromptLabPage() {
   }, [supabase])
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadPrototypes()
   }, [loadPrototypes])
 

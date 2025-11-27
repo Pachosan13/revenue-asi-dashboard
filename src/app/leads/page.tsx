@@ -1,11 +1,13 @@
 "use client"
 
-import React, { useEffect, useMemo, useState } from "react"
+import React, { useCallback, useEffect, useMemo, useState } from "react"
 import { AlertTriangle, Filter, RefreshCw } from "lucide-react"
+import { useRouter } from "next/navigation"
 import { supabaseBrowser } from "@/lib/supabase"
 import LeadTable from "@/components/LeadTable"
 import type { LeadEnriched } from "@/types/lead"
 import { Badge, Button, Card, CardContent, CardHeader, Input, Select } from "@/components/ui-custom"
+import NewLeadModal from "./new-lead-modal"
 
 const STATUS_OPTIONS = ["All", "new", "contacted", "qualified", "won", "lost"] as const
 
@@ -50,6 +52,7 @@ function getLeadStatus(lead: LeadEnriched) {
 }
 
 export default function LeadsPage() {
+  const router = useRouter()
   const supabase = useMemo(() => {
     const hasEnv = process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
     if (!hasEnv) return null
@@ -63,41 +66,43 @@ export default function LeadsPage() {
   const [status, setStatus] = useState<(typeof STATUS_OPTIONS)[number]>("All")
   const [dateFrom, setDateFrom] = useState("")
   const [dateTo, setDateTo] = useState("")
+  const [showNewLead, setShowNewLead] = useState(false)
+
+  const loadLeads = useCallback(async () => {
+    if (!supabase) {
+      setLeads(MOCK_LEADS)
+      setUsingMock(true)
+      setError(null)
+      setLoading(false)
+      return
+    }
+
+    setLoading(true)
+    const { data, error } = await supabase.from("lead_enriched").select("*").limit(200)
+
+    if (error) {
+      console.error(error)
+      setError("No se pudo acceder a lead_enriched. Proporciona el SQL/contrato o usa el mock.")
+      setLeads(MOCK_LEADS)
+      setUsingMock(true)
+    } else {
+      setLeads((data ?? []) as LeadEnriched[])
+      setError(null)
+      setUsingMock(false)
+    }
+    setLoading(false)
+  }, [supabase])
 
   useEffect(() => {
-    let alive = true
+    void loadLeads()
+  }, [loadLeads])
 
-    async function load() {
-      if (!supabase) {
-        setLeads(MOCK_LEADS)
-        setUsingMock(true)
-        setLoading(false)
-        return
-      }
-
-      setLoading(true)
-      const { data, error } = await supabase.from("lead_enriched").select("*").limit(200)
-
-      if (!alive) return
-
-      if (error) {
-        console.error(error)
-        setError("No se pudo acceder a lead_enriched. Proporciona el SQL/contrato o usa el mock.")
-        setLeads(MOCK_LEADS)
-        setUsingMock(true)
-      } else {
-        setLeads((data ?? []) as LeadEnriched[])
-        setError(null)
-        setUsingMock(false)
-      }
-      setLoading(false)
-    }
-
-    load()
-    return () => {
-      alive = false
-    }
-  }, [supabase])
+  const handleSelectLead = useCallback(
+    (lead: LeadEnriched) => {
+      router.push(`/leads/${lead.id}`)
+    },
+    [router],
+  )
 
   const filtered = leads.filter((lead) => {
     const searchText = q.trim().toLowerCase()
@@ -142,8 +147,8 @@ export default function LeadsPage() {
             <RefreshCw size={16} />
             Refresh
           </Button>
-          <Button variant="primary" size="sm">
-            New lead
+          <Button variant="primary" size="sm" onClick={() => setShowNewLead(true)}>
+            + New lead
           </Button>
         </div>
       </div>
@@ -207,12 +212,17 @@ export default function LeadsPage() {
             leads={filtered}
             loading={loading}
             deriveStatus={getLeadStatus}
-            onSelect={(lead) => {
-              console.log("selected lead", lead.id)
-            }}
+            onSelect={handleSelectLead}
           />
         </CardContent>
       </Card>
+
+      <NewLeadModal
+        open={showNewLead}
+        onOpenChange={setShowNewLead}
+        supabase={supabase}
+        onCreated={loadLeads}
+      />
     </div>
   )
 }

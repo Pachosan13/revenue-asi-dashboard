@@ -75,7 +75,7 @@ export default function CampaignsPage() {
   const [status, setStatus] = useState<CampaignStatus | "all">("all")
   const [query, setQuery] = useState("")
   const [loading, setLoading] = useState(true)
-  const [campaigns, setCampaigns] = useState<any[]>([])
+  const [campaigns, setCampaigns] = useState<CampaignRow[]>([])
   const [runCounts, setRunCounts] = useState({ campaignRuns: 0, touchRuns: 0 })
 
   const loadCampaigns = useCallback(async () => {
@@ -134,8 +134,8 @@ export default function CampaignsPage() {
   }, [supabase])
 
   useEffect(() => {
-    loadCampaigns()
-    loadRunCounts()
+    void loadCampaigns()
+    void loadRunCounts()
   }, [loadCampaigns, loadRunCounts])
 
   const filtered = useMemo(() => {

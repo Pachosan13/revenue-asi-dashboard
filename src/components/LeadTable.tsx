@@ -128,7 +128,14 @@ export default function LeadTable({ leads, loading = false, onSelect, deriveStat
                 <TableCell className="text-white/60">{fmtDate(lead.last_touch_at ?? undefined)}</TableCell>
                 <TableCell className="text-right text-sm">
                   <div className="flex justify-end gap-2 opacity-0 transition group-hover:opacity-100">
-                    <Button variant="ghost" size="sm" onClick={(e) => e.stopPropagation()}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onSelect?.(lead)
+                      }}
+                    >
                       <Eye size={16} />
                     </Button>
                     <Button variant="ghost" size="sm" onClick={(e) => e.stopPropagation()}>
@@ -190,10 +197,18 @@ export default function LeadTable({ leads, loading = false, onSelect, deriveStat
               </div>
             </div>
             <div className="mt-4 flex items-center gap-2">
-              <Button variant="subtle" size="sm" className="flex-1">
+              <Button
+                variant="subtle"
+                size="sm"
+                className="flex-1"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onSelect?.(lead)
+                }}
+              >
                 <Eye size={14} /> View
               </Button>
-              <Button variant="outline" size="sm" className="flex-1">
+              <Button variant="outline" size="sm" className="flex-1" onClick={(e) => e.stopPropagation()}>
                 <Mail size={14} /> Contact
               </Button>
             </div>
