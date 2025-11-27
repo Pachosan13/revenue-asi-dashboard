@@ -5,7 +5,7 @@
 Revenue ASI es un **Director de Crecimiento** para SMBs que vende a hispanos:
 - Define nicho, oferta, mensaje y canales.
 - Orquesta campañas de outbound (voice, email, WhatsApp, SMS).
-- Enriquce leads y prioriza follow-ups.
+- Enriquece leads y prioriza follow-ups.
 - Alimenta un CRM basado en conversaciones, no en campos.
 
 > Meta: 10–20 citas calificadas por mes por cliente, con margen alto y operación lo más autónoma posible.
@@ -109,7 +109,7 @@ Revenue ASI es un **Director de Crecimiento** para SMBs que vende a hispanos:
   - Definiendo esquemas de datos.
   - Diseñando el CRM basado en chat.
 
-  # Revenue ASI — Director Engine (v0.1)
+## Anexo: Versión original (v0.1)
 
 El Director Engine es el “cerebro” que da órdenes.  
 No ejecuta llamadas, no manda emails, no llama leads.  
