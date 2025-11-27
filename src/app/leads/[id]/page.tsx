@@ -4,7 +4,18 @@ import React, { useEffect, useMemo, useState } from "react"
 import { AlertTriangle, ArrowLeft, Clock4, Mail, PhoneCall, ServerCrash } from "lucide-react"
 import { useParams, useRouter } from "next/navigation"
 
+<<<<<<< HEAD
 import { channelLabel, formatPreview, getWhen, statusVariant, type TouchRunRow } from "@/components/leads/timeline-utils"
+=======
+import {
+  channelLabel,
+  fetchLeadTouchRuns,
+  formatPreview,
+  getWhen,
+  statusVariant,
+  type TouchRunRow,
+} from "@/components/leads/timeline-utils"
+>>>>>>> origin/codex/fix-touch_runs.type-bug-and-enhance-timelines-iy1cd0
 import { supabaseBrowser } from "@/lib/supabase"
 import { Badge, Button, Card, CardContent, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow } from "@/components/ui-custom"
 import { StatCard } from "@/components/ui-custom/stat-card"
@@ -157,6 +168,7 @@ export default function LeadDetailPage() {
       const client = supabaseBrowser()
       const [{ data: leadData, error: leadError }, { data: stepData, error: stepsError }] = await Promise.all([
         client.from("leads").select("id, email, phone, state, last_touched_at, last_channel").eq("id", leadId).single(),
+<<<<<<< HEAD
         client
           .from("touch_runs")
           .select(
@@ -164,6 +176,9 @@ export default function LeadDetailPage() {
           )
           .eq("lead_id", leadId)
           .order("created_at", { ascending: false }),
+=======
+        fetchLeadTouchRuns(client, leadId),
+>>>>>>> origin/codex/fix-touch_runs.type-bug-and-enhance-timelines-iy1cd0
       ])
 
       if (!alive) return
