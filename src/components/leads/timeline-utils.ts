@@ -16,12 +16,9 @@ export type TouchRunRow = {
   meta: any
 }
 
-<<<<<<< HEAD
-=======
 export const touchRunSelect =
   "id, campaign_id, campaign_run_id, lead_id, step, channel, status, payload, scheduled_at, sent_at, created_at, error, meta"
 
->>>>>>> origin/codex/fix-touch_runs.type-bug-and-enhance-timelines-iy1cd0
 export const channelLabel: Record<string, string> = {
   whatsapp: "WhatsApp",
   sms: "SMS",
@@ -69,8 +66,6 @@ export function formatDate(dateString: string | null, options?: Intl.DateTimeFor
   if (Number.isNaN(parsed.getTime())) return null
   return new Intl.DateTimeFormat("en-US", options).format(parsed)
 }
-<<<<<<< HEAD
-=======
 
 export async function fetchLeadTouchRuns(
   client: Pick<
@@ -87,4 +82,3 @@ export async function fetchLeadTouchRuns(
     .order("scheduled_at", { ascending: false, nullsLast: true } as any)
     .order("created_at", { ascending: false })
 }
->>>>>>> origin/codex/fix-touch_runs.type-bug-and-enhance-timelines-iy1cd0

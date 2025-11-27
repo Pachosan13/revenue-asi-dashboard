@@ -5,11 +5,7 @@ import { AlertTriangle, Clock4, Mail, PhoneCall, ServerCrash } from "lucide-reac
 
 import { supabaseBrowser } from "@/lib/supabase"
 import { Badge, Card, CardContent, CardHeader } from "@/components/ui-custom"
-<<<<<<< HEAD
-import { channelLabel, formatPreview, getWhen, statusVariant, type TouchRunRow } from "./timeline-utils"
-=======
 import { channelLabel, fetchLeadTouchRuns, formatPreview, getWhen, statusVariant, type TouchRunRow } from "./timeline-utils"
->>>>>>> origin/codex/fix-touch_runs.type-bug-and-enhance-timelines-iy1cd0
 
 type LeadTimelineProps = {
   leadId: string
@@ -103,16 +99,7 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
       }
 
       const client = supabaseBrowser()
-<<<<<<< HEAD
-      const { data, error: dbError } = await client
-        .from("touch_runs")
-        .select(
-          "id, campaign_id, campaign_run_id, lead_id, step, channel, status, payload, scheduled_at, sent_at, created_at, error, meta",
-        )
-        .eq("lead_id", leadId)
-=======
       const { data, error: dbError } = await fetchLeadTouchRuns(client, leadId)
->>>>>>> origin/codex/fix-touch_runs.type-bug-and-enhance-timelines-iy1cd0
 
       if (!alive) return
 
@@ -124,17 +111,7 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
         return
       }
 
-<<<<<<< HEAD
-      const sorted = (data ?? []).sort((a, b) => {
-        const aDate = new Date(getWhen(a) ?? 0).getTime()
-        const bDate = new Date(getWhen(b) ?? 0).getTime()
-        return bDate - aDate
-      }) as TouchRunRow[]
-
-      setTouches(sorted)
-=======
       setTouches((data ?? []) as TouchRunRow[])
->>>>>>> origin/codex/fix-touch_runs.type-bug-and-enhance-timelines-iy1cd0
       setLoading(false)
     }
 
