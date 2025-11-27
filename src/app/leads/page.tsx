@@ -4,10 +4,20 @@ import React, { useEffect, useMemo, useState } from "react"
 import { Filter, RefreshCw } from "lucide-react"
 import { supabaseBrowser } from "@/lib/supabase"
 import LeadTable from "@/components/LeadTable"
-import type { LeadEnriched } from "@/types/lead"
+import type { LeadEnriched, LeadState } from "@/types/lead"
 import { Badge, Button, Card, CardContent, CardHeader, Input, Select } from "@/components/ui-custom"
 
 const STATUS_OPTIONS = ["All", "New", "Contacted", "Qualified"] as const
+const STATE_FILTERS: ("All" | LeadState)[] = [
+  "All",
+  "new",
+  "enriched",
+  "attempting",
+  "engaged",
+  "qualified",
+  "booked",
+  "dead",
+]
 
 function getLeadStatus(lead: LeadEnriched) {
   const confidence = lead.confidence ?? 0
@@ -26,6 +36,7 @@ export default function LeadsPage() {
   const [loading, setLoading] = useState(true)
   const [q, setQ] = useState("")
   const [status, setStatus] = useState<(typeof STATUS_OPTIONS)[number]>("All")
+  const [stateFilter, setStateFilter] = useState<LeadState | "All">("All")
   const [confidence, setConfidence] = useState(30)
   const [dateFrom, setDateFrom] = useState("")
   const [dateTo, setDateTo] = useState("")
@@ -42,7 +53,9 @@ export default function LeadsPage() {
       setLoading(true)
       const { data, error } = await supabase
         .from("lead_enriched")
-        .select("*")
+        .select(
+          "id, lead_raw_id, created_at, full_name, email, phone, company, title, location, confidence, data, state",
+        )
         .order("created_at", { ascending: false })
         .limit(200)
 
@@ -77,6 +90,8 @@ export default function LeadsPage() {
 
     const leadStatus = getLeadStatus(lead)
     if (status !== "All" && leadStatus !== status) return false
+
+    if (stateFilter !== "All" && lead.state !== stateFilter) return false
 
     if ((lead.confidence ?? 0) * 100 < confidence) return false
 
@@ -127,6 +142,26 @@ export default function LeadsPage() {
           }
         />
         <CardContent className="grid gap-4 lg:grid-cols-4">
+          <div className="space-y-2 lg:col-span-4">
+            <p className="text-xs uppercase tracking-[0.1em] text-white/50">State</p>
+            <div className="flex flex-wrap gap-2">
+              {STATE_FILTERS.map((state) => {
+                const active = stateFilter === state
+                const label = state === "All" ? "All" : state.charAt(0).toUpperCase() + state.slice(1)
+                return (
+                  <Button
+                    key={state}
+                    variant={active ? "primary" : "outline"}
+                    size="sm"
+                    onClick={() => setStateFilter(state)}
+                    className="capitalize"
+                  >
+                    {label}
+                  </Button>
+                )
+              })}
+            </div>
+          </div>
           <div className="space-y-2">
             <p className="text-xs uppercase tracking-[0.1em] text-white/50">Status</p>
             <Select value={status} onChange={(e) => setStatus(e.target.value as (typeof STATUS_OPTIONS)[number])}>
@@ -178,7 +213,6 @@ export default function LeadsPage() {
           <LeadTable
             leads={filtered}
             loading={loading}
-            deriveStatus={getLeadStatus}
             onSelect={(lead) => {
               console.log("selected lead", lead.id)
             }}

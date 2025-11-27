@@ -16,5 +16,15 @@ export type LeadEnriched = {
   title: string | null
   location: string | null
   confidence: number | null
+  state: LeadState
   data: Record<string, unknown>
 }
+
+export type LeadState =
+  | "new"
+  | "enriched"
+  | "attempting"
+  | "engaged"
+  | "qualified"
+  | "booked"
+  | "dead"

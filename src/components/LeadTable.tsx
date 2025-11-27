@@ -1,8 +1,8 @@
 "use client"
 
 import React, { useMemo, useState } from "react"
-import { CalendarClock, Mail, MapPin, Phone, Star, StickyNote, Eye } from "lucide-react"
-import type { LeadEnriched } from "@/types/lead"
+import { CalendarClock, Eye, Mail, MapPin, Phone, Star, StickyNote } from "lucide-react"
+import type { LeadEnriched, LeadState } from "@/types/lead"
 import { Badge, Button, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow } from "@/components/ui-custom"
 
 function fmtDate(iso?: string) {
@@ -18,6 +18,7 @@ const SORTABLE_FIELDS = [
   { key: "full_name", label: "Nombre" },
   { key: "company", label: "Empresa" },
   { key: "email", label: "Email" },
+  { key: "state", label: "Estado" },
   { key: "confidence", label: "Confidence" },
   { key: "created_at", label: "Fecha" },
 ] as const
@@ -28,10 +29,30 @@ type LeadTableProps = {
   leads: LeadEnriched[]
   loading?: boolean
   onSelect?: (lead: LeadEnriched) => void
-  deriveStatus?: (lead: LeadEnriched) => string
 }
 
-export default function LeadTable({ leads, loading = false, onSelect, deriveStatus }: LeadTableProps) {
+function stateColor(state: LeadState | null | undefined) {
+  switch (state) {
+    case "new":
+      return { label: "New", className: "bg-white/5 text-white" }
+    case "enriched":
+      return { label: "Enriched", className: "bg-blue-500/15 text-blue-200 border-blue-400/30" }
+    case "attempting":
+      return { label: "Attempting", className: "bg-amber-500/15 text-amber-200 border-amber-400/30" }
+    case "engaged":
+      return { label: "Engaged", className: "bg-green-500/15 text-green-200 border-green-400/30" }
+    case "qualified":
+      return { label: "Qualified", className: "bg-emerald-500/15 text-emerald-200 border-emerald-400/30" }
+    case "booked":
+      return { label: "Booked", className: "bg-cyan-500/15 text-cyan-200 border-cyan-400/30" }
+    case "dead":
+      return { label: "Dead", className: "bg-slate-500/20 text-slate-200 border-slate-400/30" }
+    default:
+      return { label: "Unknown", className: "bg-white/10 text-white/80" }
+  }
+}
+
+export default function LeadTable({ leads, loading = false, onSelect }: LeadTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>("created_at")
   const [direction, setDirection] = useState<"asc" | "desc">("desc")
 
@@ -63,9 +84,8 @@ export default function LeadTable({ leads, loading = false, onSelect, deriveStat
   }
 
   const renderStatus = (lead: LeadEnriched) => {
-    const status = deriveStatus ? deriveStatus(lead) : "New"
-    const variant = status === "Qualified" ? "success" : status === "Contacted" ? "info" : "neutral"
-    return <Badge variant={variant}>{status}</Badge>
+    const { label, className } = stateColor(lead.state)
+    return <Badge className={`border ${className}`}>{label}</Badge>
   }
 
   if (!loading && sortedLeads.length === 0) {
@@ -112,12 +132,13 @@ export default function LeadTable({ leads, loading = false, onSelect, deriveStat
                     </div>
                     <div>
                       <p className="font-semibold text-white">{lead.full_name ?? "—"}</p>
-                      <p className="text-xs text-white/50">{renderStatus(lead)}</p>
+                      <div className="text-xs text-white/70">{renderStatus(lead)}</div>
                     </div>
                   </div>
                 </TableCell>
                 <TableCell className="text-white/80">{lead.company ?? "—"}</TableCell>
                 <TableCell className="text-white/80">{lead.email ?? "—"}</TableCell>
+                <TableCell>{renderStatus(lead)}</TableCell>
                 <TableCell className="text-white/80">
                   {lead.confidence != null ? `${Math.round(lead.confidence * 100)}%` : "—"}
                 </TableCell>

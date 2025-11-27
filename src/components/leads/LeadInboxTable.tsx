@@ -14,6 +14,7 @@ import {
   TableHeaderCell,
   TableRow,
 } from "@/components/ui-custom"
+import type { LeadState } from "@/types/lead"
 
 import { LeadTimeline } from "./LeadTimeline"
 
@@ -22,7 +23,7 @@ export type LeadInboxEntry = {
   name: string | null
   email: string | null
   phone: string | null
-  status: string | null
+  state: LeadState | null
   last_touch_at: string | null
   campaign_id: string | null
   campaign_name: string | null
@@ -42,13 +43,25 @@ const formatDateTime = (value: string | null) => {
   return date.toLocaleString()
 }
 
-function statusVariant(status: string | null) {
-  const normalized = status?.toLowerCase()
-  if (!normalized) return "neutral" as const
-  if (["new", "open"].includes(normalized)) return "info" as const
-  if (["contacted", "in progress", "active"].includes(normalized)) return "warning" as const
-  if (["qualified", "won", "converted"].includes(normalized)) return "success" as const
-  return "neutral" as const
+function stateBadge(state: LeadState | null) {
+  switch (state) {
+    case "new":
+      return { label: "New", className: "bg-white/5 text-white border border-white/10" }
+    case "enriched":
+      return { label: "Enriched", className: "bg-blue-500/15 text-blue-200 border border-blue-400/30" }
+    case "attempting":
+      return { label: "Attempting", className: "bg-amber-500/15 text-amber-200 border border-amber-400/30" }
+    case "engaged":
+      return { label: "Engaged", className: "bg-green-500/15 text-green-200 border border-green-400/30" }
+    case "qualified":
+      return { label: "Qualified", className: "bg-emerald-500/15 text-emerald-200 border border-emerald-400/30" }
+    case "booked":
+      return { label: "Booked", className: "bg-cyan-500/15 text-cyan-200 border border-cyan-400/30" }
+    case "dead":
+      return { label: "Dead", className: "bg-slate-500/20 text-slate-200 border border-slate-400/30" }
+    default:
+      return { label: "Sin estado", className: "bg-white/10 text-white/80" }
+  }
 }
 
 export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
@@ -98,7 +111,10 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
                 <TableCell className="text-white/80">{lead.email ?? "—"}</TableCell>
                 <TableCell className="text-white/80">{lead.phone ?? "—"}</TableCell>
                 <TableCell>
-                  <Badge variant={statusVariant(lead.status)}>{lead.status ?? "Sin dato"}</Badge>
+                  {(() => {
+                    const { label, className } = stateBadge(lead.state)
+                    return <Badge className={className}>{label}</Badge>
+                  })()}
                 </TableCell>
                 <TableCell className="text-white/70">{formatDateTime(lead.last_touch_at ?? lead.created_at)}</TableCell>
                 <TableCell className="text-white/80">
@@ -137,7 +153,10 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
                 <p className="text-base font-semibold text-white">{lead.name ?? "—"}</p>
                 <p className="text-xs text-white/50">ID: {lead.id}</p>
               </div>
-              <Badge variant={statusVariant(lead.status)}>{lead.status ?? "Sin dato"}</Badge>
+              {(() => {
+                const { label, className } = stateBadge(lead.state)
+                return <Badge className={className}>{label}</Badge>
+              })()}
             </div>
 
             <div className="mt-3 space-y-2 text-sm text-white/70">
