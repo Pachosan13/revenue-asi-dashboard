@@ -5,7 +5,7 @@
 Revenue ASI es un **Director de Crecimiento** para SMBs que vende a hispanos:
 - Define nicho, oferta, mensaje y canales.
 - Orquesta campañas de outbound (voice, email, WhatsApp, SMS).
-- Enriquece leads y prioriza follow-ups.
+- Enriquce leads y prioriza follow-ups.
 - Alimenta un CRM basado en conversaciones, no en campos.
 
 > Meta: 10–20 citas calificadas por mes por cliente, con margen alto y operación lo más autónoma posible.
@@ -109,143 +109,24 @@ Revenue ASI es un **Director de Crecimiento** para SMBs que vende a hispanos:
   - Definiendo esquemas de datos.
   - Diseñando el CRM basado en chat.
 
-## Anexo: Versión original (v0.1)
 
-El Director Engine es el “cerebro” que da órdenes.  
-No ejecuta llamadas, no manda emails, no llama leads.  
-Su trabajo es **pensar, decidir y priorizar** qué debe hacer el sistema.
+## lead_enriched — Contract
 
----
+`lead_enriched` es una vista SQL que enriquece los leads con el último touch y metadatos de campaña usando únicamente tablas existentes (`leads`, `touch_runs`, `campaigns`). Sirve como fuente principal para Leads Inbox y Leads Page.
 
-## 1. Objetivo del Director Engine
+Columnas expuestas:
+- `id` — Identificador del lead.
+- `full_name` — Nombre calculado combinando `lead_enriched.name`, `leads.contact_name` o `leads.company_name`.
+- `email` — Email del lead.
+- `phone` — Teléfono del lead.
+- `state` — Estado actual del lead.
+- `last_touch_at` — Fecha/hora del último touch.
+- `campaign_id` — Campaña del último touch.
+- `campaign_name` — Nombre de la campaña.
+- `channel_last` — Canal del último touch.
 
-- Maximizar **revenue mensual** de Revenue ASI.  
-- Bajo estas restricciones:
-  - Cash limitado para API (OpenAI, Elastic, Twilio).
-  - Tiempo limitado del founder (Pacho).
-  - Foco en nichos con **LTV alto** y **decisor accesible**.
-
----
-
-## 2. Inputs que el Director usa
-
-El Director siempre parte de:
-
-1. **ICP activo**
-   - Nicho principal
-   - País / idioma
-   - Ticket promedio deseado
-   - Tipo de decisión (CEO, owner, CMO, etc.)
-
-2. **Ofertas activas**
-   - Nombre de la oferta
-   - Precio setup / mensual
-   - Entregables
-   - COGS esperados (APIs, Twilio, horas humanas)
-
-3. **Canales activos**
-   - Outbound voice
-   - Email
-   - WhatsApp / SMS
-   - Contenido orgánico
-   - Partnerships
-
-4. **Datos históricos**
-   - Calls → Appointments
-   - Appointments → Clientes
-   - Costo Twilio / 1000 llamadas
-   - Cash actual disponible para campañas
-
-5. **Restricciones**
-   - Presupuesto máximo por día
-   - Horas que Pacho puede dedicar a:
-     - Ventas 1:1
-     - Crear contenido
-     - Construir producto / sistema
-
----
-
-## 3. Outputs del Director Engine
-
-Cada vez que se le consulta, el Director devuelve SIEMPRE:
-
-1. **Prioridad #1 de hoy**
-   - “Hoy el foco es: `<X>`”
-   - Justificación en 3–5 bullets, basada en datos.
-
-2. **Plan de acción para 24–72h**
-   - 3–5 tareas concretas, accionables.
-   - Cada tarea con:
-     - Tipo: `venta`, `producto`, `infra`, `contenido`, `relación`
-     - Owner: `Pacho`, `Agente outbound`, `Dev`, etc.
-     - Dificultad estimada: baja / media / alta
-     - Impacto estimado: bajo / medio / alto
-
-3. **Instrucciones para los agentes**
-   - Qué debe hacer el agente de:
-     - Outbound (llamadas)
-     - Email
-     - Reporting
-   - En formato de texto (para luego pasarlo al código / prompts).
-
----
-
-## 4. Interface tipo “chat-based CRM”
-
-Prompt típico al Director:
-
-> “Contexto actual:  
-> - Cash disponible este mes: $X  
-> - Nicho actual: `<nicho>`  
-> - Ofertas: `<lista>`  
-> - Campañas corriendo: `<resumen>`  
-> Dame:  
-> 1) Prioridad #1 para los próximos 3 días  
-> 2) Las 5 acciones concretas que debo ejecutar hoy  
-> 3) Qué experimentos de adquisición probar esta semana.”
-
-El Director responde SIEMPRE en JSON estructurado:
-
-```json
-{
-  "priority": {
-    "headline": "Cerrar 2 clientes de Smart Website en nicho dentistas USA",
-    "why": [
-      "Mejor ratio lead → cliente",
-      "Ticket alto vs costo bajo de fulfillment",
-      "Cash rápido en < 30 días"
-    ]
-  },
-  "actions_today": [
-    {
-      "type": "sales",
-      "owner": "Pacho",
-      "description": "Enviar 10 DMs hiper personalizados a dentistas usando script X",
-      "difficulty": "media",
-      "impact": "alta"
-    },
-    {
-      "type": "product",
-      "owner": "Pacho",
-      "description": "Refinar pitch deck de Smart Website para dentistas (versión 1-pager)",
-      "difficulty": "baja",
-      "impact": "media"
-    }
-  ],
-  "experiments": [
-    {
-      "name": "Cold email secuencia 3 pasos dentistas",
-      "channel": "email",
-      "hypothesis": "Podemos conseguir 3–5 citas / semana con 100 emails bien segmentados",
-      "success_metric": "número de citas agendadas"
-    }
-  ]
-}
-
-
-v1 — Asistido: Diseña + planea + prioriza.
-v2 — Semiautónomo: Ejecuta campañas con aprobación.
-v3 — Autónomo: Toma decisiones solo según data.
-v4 — Self-evolving: Aprende, optimiza y crea solo.
-
-
+Expectativa del Leads Inbox / Leads Page:
+- Consumir `supabase.from("lead_enriched").select("*")`.
+- Mostrar `state` como status y permitir filtros por este campo.
+- Usar `last_touch_at`, `campaign_name` y `channel_last` para contexto del último contacto.
+- Si la vista falla, caer a mocks y mostrar banner de error.
