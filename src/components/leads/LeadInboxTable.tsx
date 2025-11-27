@@ -1,7 +1,8 @@
 "use client"
 
-import React, { useState } from "react"
+import React from "react"
 import { Mail, Phone, RadioTower, Timer, UserRound } from "lucide-react"
+import { useRouter } from "next/navigation"
 import {
   Badge,
   Button,
@@ -14,8 +15,6 @@ import {
   TableHeaderCell,
   TableRow,
 } from "@/components/ui-custom"
-
-import { LeadTimeline } from "./LeadTimeline"
 
 export type LeadInboxEntry = {
   id: string
@@ -52,7 +51,11 @@ function statusVariant(status: string | null) {
 }
 
 export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
-  const [selectedLead, setSelectedLead] = useState<LeadInboxEntry | null>(null)
+  const router = useRouter()
+
+  const handleNavigate = (leadId: string) => {
+    router.push(`/leads/${leadId}`)
+  }
 
   if (!loading && leads.length === 0) {
     return (
@@ -88,7 +91,7 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
           </TableHead>
           <TableBody>
             {leads.map((lead) => (
-              <TableRow key={lead.id}>
+              <TableRow key={lead.id} className="cursor-pointer" onClick={() => handleNavigate(lead.id)}>
                 <TableCell>
                   <div className="flex flex-col">
                     <span className="font-semibold text-white">{lead.name ?? "—"}</span>
@@ -109,7 +112,14 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
                 </TableCell>
                 <TableCell className="text-white/80">{lead.channel_last ?? "—"}</TableCell>
                 <TableCell>
-                  <Button variant="ghost" size="sm" onClick={() => setSelectedLead(lead)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      handleNavigate(lead.id)
+                    }}
+                  >
                     Ver timeline
                   </Button>
                 </TableCell>
@@ -130,7 +140,8 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
         {leads.map((lead) => (
           <div
             key={lead.id}
-            className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.35)]"
+            className="cursor-pointer rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.35)]"
+            onClick={() => handleNavigate(lead.id)}
           >
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -163,7 +174,14 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
               </div>
             </div>
             <div className="mt-3">
-              <Button variant="outline" size="sm" onClick={() => setSelectedLead(lead)}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  handleNavigate(lead.id)
+                }}
+              >
                 Ver timeline
               </Button>
             </div>
@@ -171,12 +189,6 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
         ))}
         {loading ? <p className="text-center text-sm text-white/60">Cargando leads...</p> : null}
       </div>
-
-      {selectedLead ? (
-        <div className="pt-2">
-          <LeadTimeline leadId={selectedLead.id} leadName={selectedLead.name ?? selectedLead.email ?? selectedLead.id} />
-        </div>
-      ) : null}
     </div>
   )
 }
