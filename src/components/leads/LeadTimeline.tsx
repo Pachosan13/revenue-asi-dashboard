@@ -5,35 +5,24 @@ import { AlertTriangle, Clock4, Mail, PhoneCall, ServerCrash } from "lucide-reac
 
 import { supabaseBrowser } from "@/lib/supabase"
 import { Badge, Card, CardContent, CardHeader } from "@/components/ui-custom"
-
-type TouchRun = {
-  id: string
-  lead_id: string
-  channel: "voice" | "email" | string
-  type: string | null
-  status: "sent" | "failed" | "scheduled" | "error" | string
-  payload: Record<string, unknown> | null
-  created_at: string | null
-  step: number | null
-  sent_at: string | null
-  error: string | null
-  meta: Record<string, unknown> | null
-}
+import { channelLabel, fetchLeadTouchRuns, formatPreview, getWhen, statusVariant, type TouchRunRow } from "./timeline-utils"
 
 type LeadTimelineProps = {
   leadId: string
   leadName?: string | null
 }
 
-const MOCK_TIMELINE: TouchRun[] = [
+const MOCK_TIMELINE: TouchRunRow[] = [
   {
     id: "mock-touch-1",
+    campaign_id: null,
+    campaign_run_id: null,
     lead_id: "mock-lead",
     channel: "email",
-    type: "welcome",
     status: "sent",
-    payload: { subject: "Bienvenida", preview: "Hola, gracias por tu interés" },
+    payload: { subject: "Bienvenida", message: "Hola, gracias por tu interés" },
     created_at: "2024-11-01T08:00:00Z",
+    scheduled_at: "2024-11-01T08:00:00Z",
     sent_at: "2024-11-01T08:00:00Z",
     step: 1,
     error: null,
@@ -41,12 +30,14 @@ const MOCK_TIMELINE: TouchRun[] = [
   },
   {
     id: "mock-touch-2",
+    campaign_id: null,
+    campaign_run_id: null,
     lead_id: "mock-lead",
     channel: "voice",
-    type: "follow_up",
     status: "failed",
     payload: { attempt: 1, note: "No contestó" },
     created_at: "2024-11-02T10:15:00Z",
+    scheduled_at: null,
     sent_at: null,
     step: 2,
     error: "Sin respuesta",
@@ -54,12 +45,14 @@ const MOCK_TIMELINE: TouchRun[] = [
   },
   {
     id: "mock-touch-3",
+    campaign_id: null,
+    campaign_run_id: null,
     lead_id: "mock-lead",
     channel: "email",
-    type: "reminder",
     status: "scheduled",
     payload: { reminder_at: "2024-11-03T09:00:00Z" },
     created_at: "2024-11-02T18:45:00Z",
+    scheduled_at: "2024-11-03T09:00:00Z",
     sent_at: "2024-11-03T09:00:00Z",
     step: 3,
     error: null,
@@ -74,14 +67,7 @@ function formatDateTime(value: string | null) {
   return date.toLocaleString()
 }
 
-function payloadSnippet(payload: Record<string, unknown> | null) {
-  if (!payload) return "—"
-  const serialized = JSON.stringify(payload)
-  if (serialized.length <= 200) return serialized
-  return `${serialized.slice(0, 200)}…`
-}
-
-function channelIcon(channel: string) {
+function channelIcon(channel?: string | null) {
   if (channel === "voice") return <PhoneCall size={16} />
   if (channel === "email") return <Mail size={16} />
   return <Clock4 size={16} />
@@ -92,7 +78,7 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
     () => Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
     [],
   )
-  const [touches, setTouches] = useState<TouchRun[]>([])
+  const [touches, setTouches] = useState<TouchRunRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -113,10 +99,7 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
       }
 
       const client = supabaseBrowser()
-      const { data, error: dbError } = await client
-        .from("touch_runs")
-        .select("id, lead_id, channel, type, status, payload, created_at, sent_at, step, error, meta")
-        .eq("lead_id", leadId)
+      const { data, error: dbError } = await fetchLeadTouchRuns(client, leadId)
 
       if (!alive) return
 
@@ -128,13 +111,7 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
         return
       }
 
-      const sorted = (data ?? []).sort((a, b) => {
-        const aDate = new Date(a.sent_at ?? a.created_at ?? 0).getTime()
-        const bDate = new Date(b.sent_at ?? b.created_at ?? 0).getTime()
-        return bDate - aDate
-      }) as TouchRun[]
-
-      setTouches(sorted)
+      setTouches((data ?? []) as TouchRunRow[])
       setLoading(false)
     }
 
@@ -166,33 +143,33 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
 
         <div className="space-y-3">
           {touches.map((touch) => {
-            const timestamp = formatDateTime(touch.sent_at ?? touch.created_at)
+            const timestamp = formatDateTime(getWhen(touch))
             return (
               <div
                 key={touch.id}
                 className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/5 p-4 shadow-[0_8px_30px_rgba(0,0,0,0.3)]"
               >
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 text-white">
-                    <div className="rounded-full bg-white/10 p-2 text-emerald-300">{channelIcon(touch.channel)}</div>
-                    <div>
-                      <p className="font-semibold">{touch.type ?? "Evento"}</p>
-                      <p className="text-xs text-white/60">Paso {touch.step ?? "—"}</p>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-white">
+                      <div className="rounded-full bg-white/10 p-2 text-emerald-300">{channelIcon(touch.channel)}</div>
+                      <div>
+                        <p className="font-semibold">{channelLabel[touch.channel ?? ""] ?? "Evento"}</p>
+                        <p className="text-xs text-white/60">Paso #{touch.step ?? "—"}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge variant={statusVariant(touch.status)} className="capitalize">
+                        {touch.status ?? "Sin estado"}
+                      </Badge>
+                      <span className="text-xs text-white/60">{timestamp}</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="neutral" className="capitalize">
-                      {touch.status}
-                    </Badge>
-                    <span className="text-xs text-white/60">{timestamp}</span>
-                  </div>
-                </div>
 
-                <div className="space-y-1 text-sm text-white/80">
-                  <div className="flex items-start gap-2">
-                    <span className="text-xs uppercase tracking-[0.14em] text-white/50">Payload</span>
-                    <span className="flex-1 break-words text-white/80">{payloadSnippet(touch.payload)}</span>
-                  </div>
+                  <div className="space-y-1 text-sm text-white/80">
+                    <div className="flex items-start gap-2">
+                      <span className="text-xs uppercase tracking-[0.14em] text-white/50">Payload</span>
+                      <span className="flex-1 break-words text-white/80">{formatPreview(touch.payload)}</span>
+                    </div>
                   {touch.error ? (
                     <div className="flex items-start gap-2 text-amber-200">
                       <ServerCrash size={16} />
