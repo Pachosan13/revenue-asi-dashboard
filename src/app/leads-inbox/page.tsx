@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useState } from "react"
 import { AlertTriangle, RefreshCw } from "lucide-react"
 import { supabaseBrowser } from "@/lib/supabase"
 import { Card, CardContent, CardHeader, Input, Badge, Button } from "@/components/ui-custom"
-import type { LeadEnriched } from "@/types/lead"
+import type { LeadEnriched, LeadState } from "@/types/lead"
 import { LeadInboxTable, type LeadInboxEntry } from "@/components/leads/LeadInboxTable"
 
 const REQUIRED_FIELDS = [
@@ -12,10 +12,21 @@ const REQUIRED_FIELDS = [
   "name/full_name",
   "email",
   "phone",
-  "status",
+  "state",
   "last_touch_at",
   "campaign_id/name",
   "channel_last",
+]
+
+const STATE_FILTERS: (LeadState | "All")[] = [
+  "All",
+  "new",
+  "enriched",
+  "attempting",
+  "engaged",
+  "qualified",
+  "booked",
+  "dead",
 ]
 
 const MOCK_LEADS: LeadInboxEntry[] = [
@@ -24,7 +35,7 @@ const MOCK_LEADS: LeadInboxEntry[] = [
     name: "Ana Ruiz",
     email: "ana.ruiz@example.com",
     phone: "+34 600 111 222",
-    status: "New",
+    state: "new",
     last_touch_at: "2024-11-02T10:15:00Z",
     campaign_id: "CMP-42",
     campaign_name: "Q4 Retail Push",
@@ -36,7 +47,7 @@ const MOCK_LEADS: LeadInboxEntry[] = [
     name: "Carlos Soto",
     email: "carlos.soto@example.com",
     phone: "+34 600 333 444",
-    status: "Contacted",
+    state: "attempting",
     last_touch_at: "2024-11-01T16:45:00Z",
     campaign_id: "CMP-18",
     campaign_name: "ABM EMEA",
@@ -48,7 +59,7 @@ const MOCK_LEADS: LeadInboxEntry[] = [
     name: "Lucía Romero",
     email: "lucia.romero@example.com",
     phone: null,
-    status: "Qualified",
+    state: "qualified",
     last_touch_at: null,
     campaign_id: null,
     campaign_name: null,
@@ -68,7 +79,7 @@ function mapLead(row: SupabaseLeadRow): LeadInboxEntry {
     name: row.full_name ?? (data.full_name as string | undefined) ?? (data.name as string | undefined) ?? null,
     email: row.email ?? (data.email as string | undefined) ?? null,
     phone: row.phone ?? (data.phone as string | undefined) ?? null,
-    status: (data.status as string | undefined) ?? null,
+    state: (row.state as LeadState | undefined) ?? (data.state as LeadState | undefined) ?? null,
     last_touch_at: lastTouch,
     campaign_id: (data.campaign_id as string | undefined) ?? null,
     campaign_name: (data.campaign_name as string | undefined) ?? null,
@@ -85,7 +96,7 @@ function collectMissingFields(leads: LeadInboxEntry[]) {
     if (!lead.name) missing.add("name/full_name")
     if (!lead.email) missing.add("email")
     if (!lead.phone) missing.add("phone")
-    if (!lead.status) missing.add("status")
+    if (!lead.state) missing.add("state")
     if (!lead.last_touch_at) missing.add("last_touch_at")
     if (!lead.campaign_id && !lead.campaign_name) missing.add("campaign_id/name")
     if (!lead.channel_last) missing.add("channel_last")
@@ -102,6 +113,7 @@ export default function LeadsInboxPage() {
   const [missingFields, setMissingFields] = useState<string[]>([])
   const [usingMock, setUsingMock] = useState(!supabaseReady)
   const [query, setQuery] = useState("")
+  const [stateFilter, setStateFilter] = useState<LeadState | "All">("All")
 
   useEffect(() => {
     let alive = true
@@ -120,7 +132,7 @@ export default function LeadsInboxPage() {
       const client = supabaseBrowser()
       const { data, error: dbError } = await client
         .from("lead_enriched")
-        .select("id, full_name, email, phone, created_at, lead_raw_id, data")
+        .select("id, full_name, email, phone, created_at, lead_raw_id, data, state")
         .order("created_at", { ascending: false })
         .limit(100)
 
@@ -151,14 +163,17 @@ export default function LeadsInboxPage() {
 
   const filteredLeads = leads.filter((lead) => {
     const term = query.trim().toLowerCase()
+    if (stateFilter !== "All" && lead.state !== stateFilter) return false
+
     if (!term) return true
-    return (
+    const matchesQuery =
       lead.name?.toLowerCase().includes(term) ||
       lead.email?.toLowerCase().includes(term) ||
       lead.phone?.toLowerCase().includes(term) ||
       lead.campaign_name?.toLowerCase().includes(term) ||
       lead.channel_last?.toLowerCase().includes(term)
-    )
+
+    return matchesQuery
   })
 
   return (
@@ -219,6 +234,23 @@ export default function LeadsInboxPage() {
           action={<Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar por nombre, email o campaña" />}
         />
         <CardContent>
+          <div className="mb-4 flex flex-wrap gap-2">
+            {STATE_FILTERS.map((state) => {
+              const active = stateFilter === state
+              const label = state === "All" ? "All" : state.charAt(0).toUpperCase() + state.slice(1)
+              return (
+                <Button
+                  key={state}
+                  variant={active ? "primary" : "outline"}
+                  size="sm"
+                  onClick={() => setStateFilter(state)}
+                  className="capitalize"
+                >
+                  {label}
+                </Button>
+              )
+            })}
+          </div>
           <LeadInboxTable leads={filteredLeads} loading={loading} />
         </CardContent>
       </Card>
