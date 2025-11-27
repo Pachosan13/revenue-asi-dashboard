@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useMemo, useState } from "react"
-import { CalendarClock, Mail, MapPin, Phone, Star, StickyNote, Eye } from "lucide-react"
+import { CalendarClock, Mail, Phone, RadioTower, StickyNote, Eye } from "lucide-react"
 import type { LeadEnriched } from "@/types/lead"
 import { Badge, Button, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow } from "@/components/ui-custom"
 
@@ -16,10 +16,10 @@ function fmtDate(iso?: string) {
 
 const SORTABLE_FIELDS = [
   { key: "full_name", label: "Nombre" },
-  { key: "company", label: "Empresa" },
   { key: "email", label: "Email" },
-  { key: "confidence", label: "Confidence" },
-  { key: "created_at", label: "Fecha" },
+  { key: "state", label: "Estado" },
+  { key: "campaign_name", label: "Campaña" },
+  { key: "last_touch_at", label: "Último toque" },
 ] as const
 
 type SortKey = (typeof SORTABLE_FIELDS)[number]["key"]
@@ -32,14 +32,14 @@ type LeadTableProps = {
 }
 
 export default function LeadTable({ leads, loading = false, onSelect, deriveStatus }: LeadTableProps) {
-  const [sortKey, setSortKey] = useState<SortKey>("created_at")
+  const [sortKey, setSortKey] = useState<SortKey>("last_touch_at")
   const [direction, setDirection] = useState<"asc" | "desc">("desc")
 
   const sortedLeads = useMemo(() => {
     const cloned = [...leads]
     cloned.sort((a, b) => {
-      const aVal = (a as Record<string, unknown>)[sortKey]
-      const bVal = (b as Record<string, unknown>)[sortKey]
+      const aVal = (a as unknown as Record<string, unknown>)[sortKey]
+      const bVal = (b as unknown as Record<string, unknown>)[sortKey]
 
       if (aVal == null && bVal != null) return direction === "asc" ? -1 : 1
       if (aVal != null && bVal == null) return direction === "asc" ? 1 : -1
@@ -64,7 +64,13 @@ export default function LeadTable({ leads, loading = false, onSelect, deriveStat
 
   const renderStatus = (lead: LeadEnriched) => {
     const status = deriveStatus ? deriveStatus(lead) : "New"
-    const variant = status === "Qualified" ? "success" : status === "Contacted" ? "info" : "neutral"
+    const normalized = status.toLowerCase()
+    const variant =
+      normalized === "qualified"
+        ? "success"
+        : ["contacted", "in_progress", "active", "new"].includes(normalized)
+          ? "info"
+          : "neutral"
     return <Badge variant={variant}>{status}</Badge>
   }
 
@@ -116,12 +122,10 @@ export default function LeadTable({ leads, loading = false, onSelect, deriveStat
                     </div>
                   </div>
                 </TableCell>
-                <TableCell className="text-white/80">{lead.company ?? "—"}</TableCell>
                 <TableCell className="text-white/80">{lead.email ?? "—"}</TableCell>
-                <TableCell className="text-white/80">
-                  {lead.confidence != null ? `${Math.round(lead.confidence * 100)}%` : "—"}
-                </TableCell>
-                <TableCell className="text-white/60">{fmtDate(lead.created_at)}</TableCell>
+                <TableCell className="text-white/80">{lead.state ?? "—"}</TableCell>
+                <TableCell className="text-white/80">{lead.campaign_name ?? lead.campaign_id ?? "—"}</TableCell>
+                <TableCell className="text-white/60">{fmtDate(lead.last_touch_at ?? undefined)}</TableCell>
                 <TableCell className="text-right text-sm">
                   <div className="flex justify-end gap-2 opacity-0 transition group-hover:opacity-100">
                     <Button variant="ghost" size="sm" onClick={(e) => e.stopPropagation()}>
@@ -165,13 +169,9 @@ export default function LeadTable({ leads, loading = false, onSelect, deriveStat
                   {renderStatus(lead)}
                 </div>
               </div>
-              <span className="text-xs text-white/60">{fmtDate(lead.created_at)}</span>
+              <span className="text-xs text-white/60">{fmtDate(lead.last_touch_at ?? undefined)}</span>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-white/70">
-              <div className="flex items-center gap-2 text-white/70">
-                <Star size={14} className="text-amber-300" />
-                <span>{lead.confidence != null ? `${Math.round(lead.confidence * 100)}% confidence` : "No score"}</span>
-              </div>
               <div className="flex items-center gap-2">
                 <Mail size={14} className="text-white/60" />
                 <span>{lead.email ?? "Sin email"}</span>
@@ -181,12 +181,12 @@ export default function LeadTable({ leads, loading = false, onSelect, deriveStat
                 <span>{lead.phone ?? "Sin teléfono"}</span>
               </div>
               <div className="flex items-center gap-2">
-                <MapPin size={14} className="text-white/60" />
-                <span>{lead.location ?? "—"}</span>
+                <RadioTower size={14} className="text-white/60" />
+                <span>{lead.channel_last ?? "—"}</span>
               </div>
               <div className="flex items-center gap-2">
                 <CalendarClock size={14} className="text-white/60" />
-                <span>{lead.company ?? "—"}</span>
+                <span>{fmtDate(lead.last_touch_at ?? undefined)}</span>
               </div>
             </div>
             <div className="mt-4 flex items-center gap-2">

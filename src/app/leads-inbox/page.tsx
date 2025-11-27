@@ -7,16 +7,7 @@ import { Card, CardContent, CardHeader, Input, Badge, Button } from "@/component
 import type { LeadEnriched } from "@/types/lead"
 import { LeadInboxTable, type LeadInboxEntry } from "@/components/leads/LeadInboxTable"
 
-const REQUIRED_FIELDS = [
-  "id",
-  "name/full_name",
-  "email",
-  "phone",
-  "status",
-  "last_touch_at",
-  "campaign_id/name",
-  "channel_last",
-]
+const REQUIRED_FIELDS = ["id", "name/full_name", "email", "phone", "state", "last_touch_at", "campaign_id/name", "channel_last"]
 
 const MOCK_LEADS: LeadInboxEntry[] = [
   {
@@ -57,25 +48,18 @@ const MOCK_LEADS: LeadInboxEntry[] = [
   },
 ]
 
-type SupabaseLeadRow = Partial<LeadEnriched> & { data?: Record<string, unknown> | null }
-
-function mapLead(row: SupabaseLeadRow): LeadInboxEntry {
-  const data = row.data ?? {}
-  const lastTouch = (data.last_touch_at as string | undefined) ?? row.created_at ?? null
-
-  return {
-    id: row.id ?? "", // id es obligatorio, pero mantenemos cadena vacía si falta
-    name: row.full_name ?? (data.full_name as string | undefined) ?? (data.name as string | undefined) ?? null,
-    email: row.email ?? (data.email as string | undefined) ?? null,
-    phone: row.phone ?? (data.phone as string | undefined) ?? null,
-    status: (data.status as string | undefined) ?? null,
-    last_touch_at: lastTouch,
-    campaign_id: (data.campaign_id as string | undefined) ?? null,
-    campaign_name: (data.campaign_name as string | undefined) ?? null,
-    channel_last: (data.channel_last as string | undefined) ?? null,
-    created_at: row.created_at ?? null,
-  }
-}
+const mapLead = (row: Partial<LeadEnriched>): LeadInboxEntry => ({
+  id: row.id ?? "",
+  name: row.full_name ?? null,
+  email: row.email ?? null,
+  phone: row.phone ?? null,
+  status: row.state ?? null,
+  last_touch_at: row.last_touch_at ?? null,
+  campaign_id: row.campaign_id ?? null,
+  campaign_name: row.campaign_name ?? null,
+  channel_last: row.channel_last ?? null,
+  created_at: null,
+})
 
 function collectMissingFields(leads: LeadInboxEntry[]) {
   const missing = new Set<string>()
@@ -85,7 +69,7 @@ function collectMissingFields(leads: LeadInboxEntry[]) {
     if (!lead.name) missing.add("name/full_name")
     if (!lead.email) missing.add("email")
     if (!lead.phone) missing.add("phone")
-    if (!lead.status) missing.add("status")
+    if (!lead.status) missing.add("state")
     if (!lead.last_touch_at) missing.add("last_touch_at")
     if (!lead.campaign_id && !lead.campaign_name) missing.add("campaign_id/name")
     if (!lead.channel_last) missing.add("channel_last")
@@ -118,11 +102,7 @@ export default function LeadsInboxPage() {
 
       setLoading(true)
       const client = supabaseBrowser()
-      const { data, error: dbError } = await client
-        .from("lead_enriched")
-        .select("id, full_name, email, phone, created_at, lead_raw_id, data")
-        .order("created_at", { ascending: false })
-        .limit(100)
+      const { data, error: dbError } = await client.from("lead_enriched").select("*").limit(100)
 
       if (!alive) return
 

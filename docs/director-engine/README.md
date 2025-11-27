@@ -109,3 +109,24 @@ Revenue ASI es un **Director de Crecimiento** para SMBs que vende a hispanos:
   - Definiendo esquemas de datos.
   - Diseñando el CRM basado en chat.
 
+
+## lead_enriched — Contract
+
+`lead_enriched` es una vista SQL que enriquece los leads con el último touch y metadatos de campaña usando únicamente tablas existentes (`leads`, `touch_runs`, `campaigns`). Sirve como fuente principal para Leads Inbox y Leads Page.
+
+Columnas expuestas:
+- `id` — Identificador del lead.
+- `full_name` — Nombre calculado combinando `lead_enriched.name`, `leads.contact_name` o `leads.company_name`.
+- `email` — Email del lead.
+- `phone` — Teléfono del lead.
+- `state` — Estado actual del lead.
+- `last_touch_at` — Fecha/hora del último touch.
+- `campaign_id` — Campaña del último touch.
+- `campaign_name` — Nombre de la campaña.
+- `channel_last` — Canal del último touch.
+
+Expectativa del Leads Inbox / Leads Page:
+- Consumir `supabase.from("lead_enriched").select("*")`.
+- Mostrar `state` como status y permitir filtros por este campo.
+- Usar `last_touch_at`, `campaign_name` y `channel_last` para contexto del último contacto.
+- Si la vista falla, caer a mocks y mostrar banner de error.
