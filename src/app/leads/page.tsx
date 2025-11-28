@@ -402,24 +402,176 @@ type ImportLeadsModalProps = {
   supabase: ReturnType<typeof supabaseBrowser> | null
 }
 
+type LeadImportPayload = {
+  source?: string
+  niche?: string
+  company_name?: string
+  contact_name?: string
+  phone: string
+  email?: string
+  city?: string
+  country?: string
+  website?: string
+  campaign_name?: string
+}
+
+const CSV_HEADERS: (keyof LeadImportPayload)[] = [
+  "source",
+  "niche",
+  "company_name",
+  "contact_name",
+  "phone",
+  "email",
+  "city",
+  "country",
+  "website",
+  "campaign_name",
+]
+
+function parseCsvPayload(csvRaw: string) {
+  const lines = csvRaw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+
+  if (lines.length === 0) {
+    throw new Error("CSV vacío")
+  }
+
+  const header = lines[0].split(",").map((col) => col.trim().toLowerCase())
+  const expectedHeader = CSV_HEADERS
+    .map((col) => col.toLowerCase())
+    .join(",")
+
+  if (header.join(",") !== expectedHeader) {
+    throw new Error("Encabezados inválidos")
+  }
+
+  const leads: LeadImportPayload[] = []
+  let invalidWithoutPhone = 0
+
+  for (const line of lines.slice(1)) {
+    const columns = line.split(",").map((value) => value.trim())
+
+    if (columns.length !== CSV_HEADERS.length) {
+      throw new Error("Número de columnas incorrecto")
+    }
+
+    const [
+      source,
+      niche,
+      company_name,
+      contact_name,
+      phone,
+      email,
+      city,
+      country,
+      website,
+      campaign_name,
+    ] = columns
+
+    if (!phone) {
+      invalidWithoutPhone += 1
+      continue
+    }
+
+    const lead: LeadImportPayload = {
+      phone,
+      source: source || "manual",
+    }
+
+    if (niche) lead.niche = niche
+    if (company_name) lead.company_name = company_name
+    if (contact_name) lead.contact_name = contact_name
+    if (email) lead.email = email
+    if (city) lead.city = city
+    if (country) lead.country = country
+    if (website) lead.website = website
+    if (campaign_name) lead.campaign_name = campaign_name
+
+    leads.push(lead)
+  }
+
+  return { leads, invalidWithoutPhone }
+}
+
 function ImportLeadsModal({
   open,
   onOpenChange,
   onImported,
   supabase,
 }: ImportLeadsModalProps) {
-  const [payload, setPayload] = useState("")
+  const [activeTab, setActiveTab] = useState<"csv" | "json">("csv")
+  const [csvPayload, setCsvPayload] = useState("")
+  const [jsonPayload, setJsonPayload] = useState("")
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [csvSummary, setCsvSummary] = useState<{ valid: number; invalid: number } | null>(
+    null
+  )
 
   if (!open) return null
 
-  const handleImport = async () => {
+  const mutateImport = async (leads: LeadImportPayload[]) => {
+    if (!supabase) return
+
+    setLoading(true)
+    const { data, error } = await supabase.rpc("import_leads_simple", {
+      p_leads: leads,
+    })
+
+    if (error) {
+      console.error(error)
+      setErrorMessage(
+        "No se pudo importar los leads, revisa el formato o prueba con un batch más pequeño."
+      )
+      setLoading(false)
+      return
+    }
+
+    if (data && data.ok === true) {
+      onImported(data.inserted ?? 0)
+      setErrorMessage(null)
+      setCsvSummary(null)
+      setCsvPayload("")
+      setJsonPayload("")
+      onOpenChange(false)
+    }
+
+    setLoading(false)
+  }
+
+  const handleCsvImport = async () => {
+    setErrorMessage(null)
+
+    let parsedCsv
+    try {
+      parsedCsv = parseCsvPayload(csvPayload)
+    } catch (err) {
+      console.error("Invalid CSV", err)
+      setErrorMessage("No se pudo leer el CSV. Revisa encabezados y formato.")
+      return
+    }
+
+    if (parsedCsv.leads.length === 0) {
+      setErrorMessage("No hay leads válidos con phone para importar.")
+      return
+    }
+
+    setCsvSummary({
+      valid: parsedCsv.leads.length,
+      invalid: parsedCsv.invalidWithoutPhone,
+    })
+
+    await mutateImport(parsedCsv.leads)
+  }
+
+  const handleJsonImport = async () => {
     setErrorMessage(null)
 
     let parsed: unknown
     try {
-      parsed = JSON.parse(payload)
+      parsed = JSON.parse(jsonPayload)
     } catch (err) {
       console.error("Invalid JSON", err)
       setErrorMessage("El JSON no es válido o no es un array de objetos.")
@@ -434,50 +586,72 @@ function ImportLeadsModal({
       return
     }
 
-    if (!supabase) return
-
-    setLoading(true)
-    const { data, error } = await supabase.rpc("import_leads_simple", {
-      p_leads: parsed,
-    })
-
-    if (error) {
-      console.error(error)
-      setErrorMessage(
-        "No se pudo importar los leads, revisa el formato o prueba con un batch más pequeño."
-      )
-      setLoading(false)
-      return
-    }
-
-    if (data && data.ok === true) {
-      onImported(data.inserted ?? 0)
-      setPayload("")
-      setErrorMessage(null)
-      onOpenChange(false)
-    }
-
-    setLoading(false)
+    await mutateImport(parsed as LeadImportPayload[])
   }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
       <Card className="w-full max-w-3xl">
         <CardHeader
-          title="Import leads (JSON)"
-          description="Pega un array JSON de leads con campos básicos como source, niche, company_name, contact_name, phone, email, city, country."
+          title="Import leads"
+          description="Carga tus leads vía CSV (recomendado) o JSON (avanzado)."
         />
-        <CardContent className="space-y-3">
+        <CardContent className="space-y-4">
           {!supabase ? (
             <p className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-100">
               Supabase no está configurado (faltan env vars).
             </p>
           ) : null}
 
-          <Textarea
-            value={payload}
-            onChange={(e) => setPayload(e.target.value)}
-            placeholder={`[
+          <div className="flex gap-2">
+            <Button
+              variant={activeTab === "csv" ? "default" : "ghost"}
+              onClick={() => setActiveTab("csv")}
+              disabled={loading}
+            >
+              CSV (recommended)
+            </Button>
+            <Button
+              variant={activeTab === "json" ? "default" : "ghost"}
+              onClick={() => setActiveTab("json")}
+              disabled={loading}
+            >
+              JSON (advanced)
+            </Button>
+          </div>
+
+          {activeTab === "csv" ? (
+            <div className="space-y-3">
+              <p className="text-sm text-white/80">
+                Pega un CSV con los siguientes encabezados en este orden:
+                <span className="ml-1 font-mono text-xs text-white">
+                  {CSV_HEADERS.join(", ")}
+                </span>
+              </p>
+              <Textarea
+                value={csvPayload}
+                onChange={(e) => setCsvPayload(e.target.value)}
+                placeholder={`source,niche,company_name,contact_name,phone,email,city,country,website,campaign_name\nmanual,dentist,Smile Pro Clinic,Dr. Jane Doe,+13055550001,jane@smilepro.com,Miami,US,https://smilepro.com,Test Campaign`}
+                className="h-60 font-mono"
+              />
+              {csvSummary ? (
+                <p className="text-sm text-white/80">
+                  {csvSummary.valid} leads listos para importar,
+                  {" "}
+                  {csvSummary.invalid} filas ignoradas (sin phone).
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-sm text-white/80">
+                Pega un array JSON de leads con campos básicos como source, niche,
+                company_name, contact_name, phone, email, city, country.
+              </p>
+              <Textarea
+                value={jsonPayload}
+                onChange={(e) => setJsonPayload(e.target.value)}
+                placeholder={`[
   {
     "source": "joe_dentists_q1",
     "niche": "dentist",
@@ -489,8 +663,10 @@ function ImportLeadsModal({
     "country": "US"
   }
 ]`}
-            className="h-72 font-mono"
-          />
+                className="h-60 font-mono"
+              />
+            </div>
+          )}
 
           {errorMessage ? (
             <p className="text-sm text-red-300">{errorMessage}</p>
@@ -507,12 +683,15 @@ function ImportLeadsModal({
             >
               Cancel
             </Button>
-            <Button
-              onClick={handleImport}
-              disabled={loading || !supabase}
-            >
-              {loading ? "Importing..." : "Import"}
-            </Button>
+            {activeTab === "csv" ? (
+              <Button onClick={handleCsvImport} disabled={loading || !supabase}>
+                {loading ? "Importing..." : "Import CSV"}
+              </Button>
+            ) : (
+              <Button onClick={handleJsonImport} disabled={loading || !supabase}>
+                {loading ? "Importing..." : "Import JSON"}
+              </Button>
+            )}
           </div>
         </CardContent>
       </Card>
