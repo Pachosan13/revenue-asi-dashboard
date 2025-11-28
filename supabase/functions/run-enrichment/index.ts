@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const VERSION = "run-enrichment-v2_2025-11-24_industry_C";
+const VERSION = "run-enrichment-v2_2025-11-27";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -10,189 +10,180 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// --- Industry inference rules (heuristic, extendable) ---
-function inferIndustry(payload: any): { industry: string; inferred: boolean; signals: string[] } {
-  const signals: string[] = [];
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  const name = String(payload?.name ?? "").toLowerCase();
-  const email = String(payload?.email ?? "").toLowerCase();
-  const website = String(payload?.website ?? "").toLowerCase();
-  const gmbName = String(payload?.gmb?.name ?? "").toLowerCase();
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  const haystack = [name, email, website, gmbName].join(" ");
+// 🔢 normalizar teléfono muy simple (sin locuras todavía)
+function normalizePhone(raw: unknown): string | null {
+  if (!raw) return null;
+  const s = String(raw);
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return null;
+  return digits;
+}
 
-  // If explicit industry already provided
-  const explicit = payload?.industry ?? payload?.meta?.industry;
-  if (explicit && typeof explicit === "string") {
-    return { industry: explicit.toLowerCase(), inferred: false, signals: ["explicit_tag"] };
-  }
-
-  // Dentist
-  if (/(dentist|dental|odontolog|orthodont|endodont|periodont|implants?)/.test(haystack)) {
-    signals.push("keywords:dental");
-    return { industry: "dentist", inferred: true, signals };
-  }
-
-  // Lawyers
-  if (/(lawyer|attorney|law firm|abogado|legal|injury|immigration|divorce|criminal defense)/.test(haystack)) {
-    signals.push("keywords:legal");
-    return { industry: "lawyer", inferred: true, signals };
-  }
-
-  // Real estate
-  if (/(realtor|real estate|brokerage|propiedad|inmobili|listing|homes for sale)/.test(haystack)) {
-    signals.push("keywords:real_estate");
-    return { industry: "real_estate", inferred: true, signals };
-  }
-
-  // Home services (plumbing, hvac, roofing, electrical, cleaning, handyman)
-  if (/(plumb|plomer|hvac|air ?conditioning|ac repair|roof|techo|electric|electrical|cleaning|limpieza|handyman|remodel|construction|contractor|pest control)/.test(haystack)) {
-    signals.push("keywords:home_services");
-    return { industry: "home_services", inferred: true, signals };
-  }
-
-  // Restaurants / food
-  if (/(restaurant|restaurante|cafe|coffee|bakery|panader|bar|grill|pizza|taquer|menu|reservation)/.test(haystack)) {
-    signals.push("keywords:restaurant");
-    return { industry: "restaurant", inferred: true, signals };
-  }
-
-  // fallback
-  signals.push("fallback:generic");
-  return { industry: "generic", inferred: true, signals };
+// 🌎 adivinar país muy básico usando phone + country actual
+function guessCountryCode(phone: string | null, countryCol: string | null): string | null {
+  if (countryCol) return countryCol;
+  if (!phone) return null;
+  if (phone.startsWith("507") || phone.length === 8) return "PA";
+  return null;
 }
 
 serve(async (req) => {
+  // CORS preflight
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  if (req.method !== "POST") {
+  try {
+    const body = await req.json().catch(() => ({}));
+    const limit = typeof body.limit === "number" ? body.limit : 50;
+
+    // 1️⃣ Traer leads que todavía NO están enriquecidos
+    //    (enriched IS NULL) — NO tocamos el enum state todavía
+    const { data: leads, error: selectError } = await supabase
+      .from("leads")
+      .select(
+        `
+        id,
+        source,
+        niche,
+        company_name,
+        contact_name,
+        phone,
+        email,
+        website,
+        city,
+        country,
+        score,
+        status,
+        notes,
+        created_at,
+        enriched
+      `
+      )
+      .is("enriched", null)
+      .limit(limit);
+
+    if (selectError) {
+      console.error("select leads error", selectError);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          version: VERSION,
+          error: "select_leads_failed",
+          details: selectError.message,
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    if (!leads || leads.length === 0) {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          version: VERSION,
+          processed: 0,
+          message: "no leads to enrich",
+        }),
+        {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    // 2️⃣ Construir payload de enriched para cada lead
+    const updates = leads.map((lead: any) => {
+      const normalizedPhone = normalizePhone(lead.phone);
+      const hasEmail =
+        !!lead.email && String(lead.email).includes("@");
+      const hasPhone = !!normalizedPhone;
+      const countryCode = guessCountryCode(normalizedPhone, lead.country);
+
+      const enrichedPayload = {
+        version: "v1",
+        has_email: hasEmail,
+        has_phone: hasPhone,
+        normalized_phone: normalizedPhone,
+        country_code: countryCode,
+        // contexto útil para scoring futuro
+        source: lead.source ?? null,
+        niche: lead.niche ?? null,
+        company_name: lead.company_name ?? null,
+        contact_name: lead.contact_name ?? null,
+        website: lead.website ?? null,
+        city: lead.city ?? null,
+        score_snapshot: lead.score ?? 0,
+        status_snapshot: lead.status ?? null,
+        created_at_snapshot: lead.created_at ?? null,
+      };
+
+      return {
+        id: lead.id,
+        enriched: enrichedPayload,
+      };
+    });
+
+    // 3️⃣ Hacer UPDATE en bloque en leads (id → enriched)
+    const { error: updateError } = await supabase
+  .from("leads")
+  .upsert(
+    updates.map((u: any) => ({
+      id: u.id,
+      enriched: u.enriched,
+      state: "enriched",
+      updated_at: new Date().toISOString(),
+    })),
+    {
+      onConflict: "id",
+    },
+  );
+
+    if (updateError) {
+      console.error("update leads enriched error", updateError);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          version: VERSION,
+          error: "update_leads_enriched_failed",
+          details: updateError.message,
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
     return new Response(
-      JSON.stringify({ ok: false, error: "Method not allowed" }),
+      JSON.stringify({
+        ok: true,
+        version: VERSION,
+        processed: leads.length,
+      }),
       {
-        status: 405,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      },
     );
-  }
-
-  const SB_URL = Deno.env.get("SUPABASE_URL");
-  const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-  if (!SB_URL || !SB_KEY) {
+  } catch (e) {
+    console.error("unexpected error in run-enrichment", e);
     return new Response(
       JSON.stringify({
         ok: false,
-        stage: "env",
-        error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY",
+        version: VERSION,
+        error: "unexpected_error",
+        details: String(e),
       }),
       {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
-    );
-  }
-
-  const supabase = createClient(SB_URL, SB_KEY);
-
-  let body: any = {};
-  try { body = await req.json(); } catch {}
-  const limit = Number(body?.limit ?? 50);
-
-  try {
-    // 1) Fetch raw leads status=new
-    const { data: raw, error: rawErr } = await supabase
-      .from("lead_raw")
-      .select("id, source, payload, status")
-      .eq("status", "new")
-      .limit(limit);
-
-    if (rawErr) {
-      return new Response(
-        JSON.stringify({ ok: false, stage: "select_raw", error: rawErr.message }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    if (!raw || raw.length === 0) {
-      return new Response(
-        JSON.stringify({ ok: true, version: VERSION, processed: 0, message: "No raw leads new" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    let processed = 0;
-    const errors: any[] = [];
-
-    for (const lead of raw) {
-      const payload = lead.payload || {};
-
-      const name = payload.name ?? null;
-      const email = payload.email ?? null;
-      const phone = payload.phone ?? null;
-      const website = payload.website ?? null;
-
-      if (!email && !phone) {
-        errors.push({ id: lead.id, reason: "Missing email and phone" });
-        continue;
-      }
-
-      // 2) Determine industry (Option C)
-      const { industry, inferred, signals } = inferIndustry(payload);
-
-      // 3) Check already enriched
-      const { data: exists } = await supabase
-        .from("lead_enriched")
-        .select("id")
-        .eq("id", lead.id)
-        .maybeSingle();
-
-      if (exists) {
-        await supabase.from("lead_raw").update({ status: "processed" }).eq("id", lead.id);
-        continue;
-      }
-
-      // 4) Insert into lead_enriched with meta.industry
-      const meta = {
-        source: lead.source ?? payload?.meta?.source ?? null,
-        industry,
-        industry_inferred: inferred,
-        industry_signals: signals,
-        v: VERSION,
-      };
-
-      const { error: insErr } = await supabase
-        .from("lead_enriched")
-        .insert({
-          id: lead.id,
-          name,
-          phone,
-          email,
-          website,
-          status: "new",
-          meta,
-        });
-
-      if (insErr) {
-        errors.push({ id: lead.id, stage: "insert_enriched", error: insErr.message });
-        continue;
-      }
-
-      // 5) Mark raw processed
-      await supabase.from("lead_raw").update({ status: "processed" }).eq("id", lead.id);
-
-      processed++;
-    }
-
-    return new Response(
-      JSON.stringify({ ok: true, version: VERSION, processed, errors }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-  } catch (e: any) {
-    return new Response(
-      JSON.stringify({ ok: false, stage: "fatal", error: e?.message ?? String(e) }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      },
     );
   }
 });

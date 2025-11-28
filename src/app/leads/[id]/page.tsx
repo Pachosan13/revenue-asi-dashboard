@@ -1,7 +1,14 @@
 "use client"
 
 import React, { useEffect, useMemo, useState } from "react"
-import { AlertTriangle, ArrowLeft, Clock4, Mail, PhoneCall, ServerCrash } from "lucide-react"
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Clock4,
+  Mail,
+  PhoneCall,
+  ServerCrash,
+} from "lucide-react"
 import { useParams, useRouter } from "next/navigation"
 
 import {
@@ -13,76 +20,38 @@ import {
   type TouchRunRow,
 } from "@/components/leads/timeline-utils"
 import { supabaseBrowser } from "@/lib/supabase"
-import { Badge, Button, Card, CardContent, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow } from "@/components/ui-custom"
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeaderCell,
+  TableRow,
+} from "@/components/ui-custom"
 import { StatCard } from "@/components/ui-custom/stat-card"
 
-const timeFormatter = new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit" })
-const dateFormatter = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" })
-
-const MOCK_LEAD = {
-  id: "mock-lead",
-  email: "mock@example.com",
-  phone: "+34 600 000 000",
-  state: "Engaged",
-  last_touched_at: "2024-11-03T09:00:00Z",
-  last_channel: "email",
-}
-
-const MOCK_STEPS: TouchRunRow[] = [
-  {
-    id: "mock-1",
-    campaign_id: null,
-    campaign_run_id: null,
-    lead_id: "mock-lead",
-    step: 1,
-    channel: "email",
-    status: "sent",
-    payload: { subject: "Bienvenida", message: "¡Hola! Gracias por tu interés" },
-    scheduled_at: "2024-11-01T08:00:00Z",
-    sent_at: "2024-11-01T08:00:00Z",
-    created_at: "2024-11-01T08:00:00Z",
-    error: null,
-    meta: null,
-  },
-  {
-    id: "mock-2",
-    campaign_id: null,
-    campaign_run_id: null,
-    lead_id: "mock-lead",
-    step: 2,
-    channel: "voice",
-    status: "failed",
-    payload: { note: "No respondió" },
-    scheduled_at: null,
-    sent_at: null,
-    created_at: "2024-11-02T10:15:00Z",
-    error: "Sin respuesta",
-    meta: null,
-  },
-  {
-    id: "mock-3",
-    campaign_id: null,
-    campaign_run_id: null,
-    lead_id: "mock-lead",
-    step: 3,
-    channel: "sms",
-    status: "scheduled",
-    payload: { body: "Te llamaremos pronto" },
-    scheduled_at: "2024-11-03T09:00:00Z",
-    sent_at: null,
-    created_at: "2024-11-02T18:45:00Z",
-    error: null,
-    meta: null,
-  },
-]
+const timeFormatter = new Intl.DateTimeFormat("en-US", {
+  hour: "2-digit",
+  minute: "2-digit",
+})
+const dateFormatter = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+})
 
 type LeadRecord = {
   id: string
+  full_name: string | null
   email: string | null
   phone: string | null
   state: string | null
-  last_touched_at: string | null
-  last_channel: string | null
+  last_touch_at: string | null
+  channel_last: string | null
 }
 
 type NormalizedStep = TouchRunRow & {
@@ -98,13 +67,18 @@ function normalizeSteps(steps: TouchRunRow[]): NormalizedStep[] {
     .map((step) => {
       const when = getWhen(step)
       const whenDate = when ? new Date(when) : null
-      const dateKey = whenDate && !Number.isNaN(whenDate.getTime()) ? whenDate.toISOString().slice(0, 10) : "unknown"
+      const valid = whenDate && !Number.isNaN(whenDate.getTime())
+
+      const dateKey = valid ? whenDate!.toISOString().slice(0, 10) : "unknown"
+
       return {
         ...step,
         when,
         dateKey,
-        dateLabel: whenDate && !Number.isNaN(whenDate.getTime()) ? dateFormatter.format(whenDate) : "Fecha desconocida",
-        timeLabel: whenDate && !Number.isNaN(whenDate.getTime()) ? timeFormatter.format(whenDate) : "—",
+        dateLabel: valid
+          ? dateFormatter.format(whenDate!)
+          : "Fecha desconocida",
+        timeLabel: valid ? timeFormatter.format(whenDate!) : "—",
         preview: formatPreview(step.payload),
       }
     })
@@ -129,13 +103,29 @@ function channelIcon(channel?: string | null) {
   return <Clock4 size={16} />
 }
 
+function deriveLeadTitle(lead: LeadRecord | null) {
+  if (!lead) return "Sin nombre"
+  return lead.full_name || lead.email || lead.phone || "Sin nombre"
+}
+
+function deriveLeadSubtitle(lead: LeadRecord | null) {
+  if (!lead) return "Sin contacto"
+  const email = lead.email ?? "Sin email"
+  const phone = lead.phone ?? "Sin teléfono"
+  return `${email} · ${phone}`
+}
+
 export default function LeadDetailPage() {
   const params = useParams<{ id: string }>()
   const router = useRouter()
   const leadId = params?.id ?? ""
 
   const supabaseReady = useMemo(
-    () => Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+    () =>
+      Boolean(
+        process.env.NEXT_PUBLIC_SUPABASE_URL &&
+          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+      ),
     [],
   )
 
@@ -150,86 +140,171 @@ export default function LeadDetailPage() {
 
     async function loadLead() {
       if (!leadId) return
+
       setLoading(true)
       setError(null)
 
-      if (!supabaseReady) {
-        setLead({ ...MOCK_LEAD, id: leadId })
-        setSteps(normalizeSteps(MOCK_STEPS))
+      const isMockId = leadId.startsWith("MOCK-")
+
+      // 🔹 Modo mock (IDs MOCK-xxxx o sin Supabase)
+      if (!supabaseReady || isMockId) {
+        if (!alive) return
+
+        setLead({
+          id: leadId,
+          full_name: "Sin nombre",
+          email: null,
+          phone: null,
+          state: null,
+          last_touch_at: null,
+          channel_last: null,
+        })
+        setSteps([])
         setUsingMock(true)
         setLoading(false)
         return
       }
 
+      // 🔹 Flujo real (UUIDs con Supabase)
       const client = supabaseBrowser()
-      const [{ data: leadData, error: leadError }, { data: stepData, error: stepsError }] = await Promise.all([
-        client.from("leads").select("id, email, phone, state, last_touched_at, last_channel").eq("id", leadId).single(),
-        fetchLeadTouchRuns(client, leadId),
-      ])
 
-      if (!alive) return
+      try {
+        const [
+          { data: enriched, error: enrichedError },
+          stepsResult,
+        ] = await Promise.all([
+          client
+            .from("lead_enriched")
+            .select(
+              "id, full_name, email, phone, state, last_touch_at, channel_last",
+            )
+            .eq("id", leadId)
+            .maybeSingle(),
+          fetchLeadTouchRuns(client, leadId),
+        ])
 
-      if (leadError) {
-        console.error(leadError)
-        setError("No se pudo obtener la ficha del lead.")
+        if (!alive) return
+
+        if (enrichedError) {
+          console.warn("lead_enriched error", enrichedError)
+        }
+
+        const { data: stepsData, error: stepsError } = stepsResult
+
+        if (stepsError) {
+          console.error("touch_runs error", stepsError)
+          setError(
+            "No se pudo obtener el timeline de touch_runs para este lead. Revisa la configuración o intenta más tarde.",
+          )
+        }
+
+        if (enriched) {
+          setLead({
+            id: enriched.id,
+            full_name: enriched.full_name ?? null,
+            email: enriched.email ?? null,
+            phone: enriched.phone ?? null,
+            state: enriched.state ?? null,
+            last_touch_at: enriched.last_touch_at ?? null,
+            channel_last: enriched.channel_last ?? null,
+          })
+        } else {
+          setLead({
+            id: leadId,
+            full_name: "Sin nombre",
+            email: null,
+            phone: null,
+            state: null,
+            last_touch_at: null,
+            channel_last: null,
+          })
+        }
+
+        setSteps(
+          stepsError || !stepsData
+            ? []
+            : normalizeSteps(stepsData as TouchRunRow[]),
+        )
+        setUsingMock(false)
+      } catch (e) {
+        if (!alive) return
+        console.error("loadLead unexpected error", e)
+        setError(
+          "No se pudo obtener el timeline de touch_runs para este lead. Revisa la configuración o vuelve a intentar.",
+        )
+        setSteps([])
+      } finally {
+        if (!alive) return
+        setLoading(false)
       }
-
-      if (stepsError) {
-        console.error(stepsError)
-        setError("No se pudo obtener el timeline de touch_runs para este lead.")
-      }
-
-      if (leadData) {
-        setLead(leadData as LeadRecord)
-      } else {
-        setLead({ ...MOCK_LEAD, id: leadId })
-      }
-
-      setSteps(normalizeSteps((stepData ?? []) as TouchRunRow[]))
-      setUsingMock(false)
-      setLoading(false)
     }
 
     loadLead()
+
     return () => {
       alive = false
     }
   }, [leadId, supabaseReady])
 
   const totalSteps = steps.length
-  const sentSteps = steps.filter((step) => step.status?.toLowerCase() === "sent").length
+  const sentSteps = steps.filter(
+    (step) => step.status?.toLowerCase() === "sent",
+  ).length
   const errorSteps = steps.filter((step) => {
     const normalized = step.status?.toLowerCase()
     return normalized === "failed" || normalized === "error"
   }).length
 
   const grouped = useMemo(() => {
-    const groups = new Map<string, { date: string; label: string; items: NormalizedStep[] }>()
+    const groups = new Map<
+      string,
+      { date: string; label: string; items: NormalizedStep[] }
+    >()
 
     steps.forEach((step) => {
-      const group = groups.get(step.dateKey) ?? { date: step.dateKey, label: step.dateLabel, items: [] }
+      const group =
+        groups.get(step.dateKey) ?? {
+          date: step.dateKey,
+          label: step.dateLabel,
+          items: [] as NormalizedStep[],
+        }
       group.items.push(step)
       groups.set(step.dateKey, group)
     })
 
-    return Array.from(groups.values()).sort((a, b) => (a.date > b.date ? -1 : 1))
+    return Array.from(groups.values()).sort((a, b) =>
+      a.date > b.date ? -1 : 1,
+    )
   }, [steps])
+
+  const title = deriveLeadTitle(lead)
+  const subtitle = deriveLeadSubtitle(lead)
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <Button variant="outline" size="sm" onClick={() => router.push("/leads-inbox")}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => router.push("/leads-inbox")}
+          >
             <ArrowLeft size={16} />
             Back
           </Button>
           <div>
             <div className="flex items-center gap-3">
-              <h1 className="text-3xl font-semibold text-white">Lead timeline</h1>
+              <h1 className="text-3xl font-semibold text-white">
+                Lead timeline
+              </h1>
               <Badge variant="neutral">Detalle</Badge>
               {usingMock ? <Badge variant="warning">Mock</Badge> : null}
             </div>
-            <p className="text-sm text-white/60">ID: {leadId}</p>
+            <p className="text-sm text-white/80">{title}</p>
+            <p className="text-xs text-white/60">
+              {subtitle} · ID: {leadId}
+            </p>
           </div>
         </div>
         {lead?.state ? (
@@ -239,30 +314,55 @@ export default function LeadDetailPage() {
         ) : null}
       </div>
 
+      {/* Error banner solo en error real */}
       {error ? (
         <div className="flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-100">
           <AlertTriangle size={18} className="mt-0.5" />
           <div>
             <p className="font-semibold">{error}</p>
-            <p className="text-sm text-red-200/90">Se cargó un mock para continuar con el QA visual.</p>
+            <p className="text-sm text-red-200/90">
+              Revisa la configuración de touch_runs o vuelve a intentar más
+              tarde.
+            </p>
           </div>
         </div>
       ) : null}
 
+      {/* Stats */}
       <div className="grid gap-4 md:grid-cols-3">
-        <StatCard label="Total steps" value={totalSteps.toString()} helper="Pasos registrados en touch_runs" />
-        <StatCard label="Sent" value={sentSteps.toString()} helper="Pasos marcados como sent" />
-        <StatCard label="Errores" value={errorSteps.toString()} helper="failed o error" />
+        <StatCard
+          label="Total steps"
+          value={totalSteps.toString()}
+          helper="Pasos registrados en touch_runs"
+        />
+        <StatCard
+          label="Sent"
+          value={sentSteps.toString()}
+          helper="Pasos marcados como sent"
+        />
+        <StatCard
+          label="Errores"
+          value={errorSteps.toString()}
+          helper="failed o error"
+        />
       </div>
 
+      {/* Last touch card */}
       <Card>
         <CardContent className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
             <p className="text-sm text-white/70">
-              Last touch: {lead?.last_touched_at ? new Date(lead.last_touched_at).toLocaleString() : "No touches yet"}
+              Last touch:{" "}
+              {lead?.last_touch_at
+                ? new Date(lead.last_touch_at).toLocaleString()
+                : "No touches yet"}
             </p>
-            <p className="text-xs text-white/50">Último canal: {lead?.last_channel ?? "—"}</p>
-            <p className="text-xs text-white/50">Email: {lead?.email ?? "—"} · Phone: {lead?.phone ?? "—"}</p>
+            <p className="text-xs text-white/50">
+              Último canal: {lead?.channel_last ?? "—"}
+            </p>
+            <p className="text-xs text-white/50">
+              Email: {lead?.email ?? "—"} · Phone: {lead?.phone ?? "—"}
+            </p>
           </div>
           <Badge variant="outline" className="capitalize">
             {lead?.state ?? "Sin estado"}
@@ -270,7 +370,8 @@ export default function LeadDetailPage() {
         </CardContent>
       </Card>
 
-      {loading ? (
+      {/* Loading skeleton */}
+      {loading && !usingMock ? (
         <div className="space-y-3">
           <div className="h-10 animate-pulse rounded-xl bg-white/5" />
           <div className="h-52 animate-pulse rounded-2xl bg-white/5" />
@@ -278,17 +379,20 @@ export default function LeadDetailPage() {
         </div>
       ) : null}
 
+      {/* Empty state */}
       {!loading && steps.length === 0 ? (
         <Card>
           <CardContent className="space-y-3">
             <p className="text-lg font-semibold text-white">No steps yet</p>
             <p className="text-sm text-white/70">
-              No steps yet. Lanza una campaña para que el motor genere toques para este lead.
+              No steps yet. Lanza una campaña para que el motor genere toques
+              para este lead.
             </p>
           </CardContent>
         </Card>
       ) : null}
 
+      {/* Timeline */}
       {!loading && steps.length > 0 ? (
         <div className="space-y-6">
           {grouped.map((group) => (
@@ -312,22 +416,36 @@ export default function LeadDetailPage() {
                 <TableBody>
                   {group.items.map((item) => (
                     <TableRow key={item.id}>
-                      <TableCell className="whitespace-nowrap text-white/70">{item.timeLabel}</TableCell>
-                      <TableCell className="text-white">#{item.step ?? "—"}</TableCell>
+                      <TableCell className="whitespace-nowrap text-white/70">
+                        {item.timeLabel}
+                      </TableCell>
+                      <TableCell className="text-white">
+                        #{item.step ?? "—"}
+                      </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2 text-white">
-                          <span className="rounded-full bg-white/5 p-2 text-emerald-300">{channelIcon(item.channel)}</span>
-                          <Badge variant={channelBadgeVariant(item.channel)} className="capitalize">
+                          <span className="rounded-full bg-white/5 p-2 text-emerald-300">
+                            {channelIcon(item.channel)}
+                          </span>
+                          <Badge
+                            variant={channelBadgeVariant(item.channel)}
+                            className="capitalize"
+                          >
                             {channelLabel[item.channel ?? ""] ?? "Canal"}
                           </Badge>
                         </div>
                       </TableCell>
                       <TableCell>
-                        <Badge variant={statusVariant(item.status)} className="capitalize">
+                        <Badge
+                          variant={statusVariant(item.status)}
+                          className="capitalize"
+                        >
                           {item.status ?? "Sin estado"}
                         </Badge>
                       </TableCell>
-                      <TableCell className="text-white/80">{item.preview}</TableCell>
+                      <TableCell className="text-white/80">
+                        {item.preview}
+                      </TableCell>
                       <TableCell className="text-sm text-red-200">
                         {item.error ? (
                           <span className="flex items-center gap-2">
@@ -346,7 +464,6 @@ export default function LeadDetailPage() {
           ))}
         </div>
       ) : null}
-
     </div>
   )
 }
