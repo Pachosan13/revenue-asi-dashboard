@@ -5,6 +5,18 @@ import { CalendarClock, Mail, Phone, RadioTower, StickyNote, Eye } from "lucide-
 import type { LeadEnriched } from "@/types/lead"
 import { Badge, Button, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow } from "@/components/ui-custom"
 
+export function deriveLeadDisplayName(lead: LeadEnriched): string {
+  const fullName = lead.full_name?.trim()
+  if (fullName && fullName !== "Sin nombre") return fullName
+
+  const company = lead.company_name?.trim()
+  if (company) return company
+
+  if (lead.phone) return lead.phone
+
+  return "Sin datos"
+}
+
 function fmtDate(iso?: string) {
   if (!iso) return ""
   try {
@@ -22,7 +34,7 @@ const SORTABLE_FIELDS = [
   { key: "last_touch_at", label: "Último toque" },
 ] as const
 
-type SortKey = (typeof SORTABLE_FIELDS)[number]["key"]
+type SortKey = (typeof SORTABLE_FIELDS)[number]["key"] | "__custom"
 
 type LeadTableProps = {
   leads: LeadEnriched[]
@@ -32,10 +44,12 @@ type LeadTableProps = {
 }
 
 export default function LeadTable({ leads, loading = false, onSelect, deriveStatus }: LeadTableProps) {
-  const [sortKey, setSortKey] = useState<SortKey>("last_touch_at")
+  const [sortKey, setSortKey] = useState<SortKey>("__custom")
   const [direction, setDirection] = useState<"asc" | "desc">("desc")
 
   const sortedLeads = useMemo(() => {
+    if (sortKey === "__custom") return leads
+
     const cloned = [...leads]
     cloned.sort((a, b) => {
       const aVal = (a as unknown as Record<string, unknown>)[sortKey]
@@ -110,17 +124,17 @@ export default function LeadTable({ leads, loading = false, onSelect, deriveStat
           </TableHead>
           <TableBody>
             {sortedLeads.map((lead) => (
-              <TableRow key={lead.id} className="group cursor-pointer" onClick={() => onSelect?.(lead)}>
-                <TableCell>
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-sm font-semibold text-white/80">
-                      {(lead.full_name ?? "?").slice(0, 2).toUpperCase()}
+                <TableRow key={lead.id} className="group cursor-pointer" onClick={() => onSelect?.(lead)}>
+                  <TableCell>
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-sm font-semibold text-white/80">
+                        {deriveLeadDisplayName(lead).slice(0, 2).toUpperCase()}
+                      </div>
+                      <div>
+                        <p className="font-semibold text-white">{deriveLeadDisplayName(lead)}</p>
+                        <p className="text-xs text-white/50">{renderStatus(lead)}</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="font-semibold text-white">{lead.full_name ?? "—"}</p>
-                      <p className="text-xs text-white/50">{renderStatus(lead)}</p>
-                    </div>
-                  </div>
                 </TableCell>
                 <TableCell className="text-white/80">{lead.email ?? "—"}</TableCell>
                 <TableCell className="text-white/80">{lead.state ?? "—"}</TableCell>
@@ -162,10 +176,10 @@ export default function LeadTable({ leads, loading = false, onSelect, deriveStat
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-sm font-semibold text-white/80">
-                  {(lead.full_name ?? "?").slice(0, 2).toUpperCase()}
+                  {deriveLeadDisplayName(lead).slice(0, 2).toUpperCase()}
                 </div>
                 <div>
-                  <p className="font-semibold text-white">{lead.full_name ?? "—"}</p>
+                  <p className="font-semibold text-white">{deriveLeadDisplayName(lead)}</p>
                   {renderStatus(lead)}
                 </div>
               </div>

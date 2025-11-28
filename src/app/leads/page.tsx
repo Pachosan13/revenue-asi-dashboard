@@ -5,7 +5,7 @@ import { AlertTriangle, Filter, RefreshCw } from "lucide-react"
 import { useRouter } from "next/navigation"
 
 import { supabaseBrowser } from "@/lib/supabase"
-import LeadTable from "@/components/LeadTable"
+import LeadTable, { deriveLeadDisplayName } from "@/components/LeadTable"
 import type { LeadEnriched } from "@/types/lead"
 import {
   Badge,
@@ -68,6 +68,15 @@ const MOCK_LEADS: LeadEnriched[] = [
 
 function getLeadStatus(lead: LeadEnriched) {
   return (lead.state ?? "new").toLowerCase()
+}
+
+const STATE_ORDER: Record<string, number> = {
+  booked: 1,
+  engaged: 2,
+  enriched: 3,
+  attempting: 4,
+  new: 5,
+  dead: 6,
 }
 
 // tipo para la view lead_activity_summary
@@ -176,8 +185,11 @@ export default function LeadsPage() {
   const filtered = leads.filter((lead) => {
     const searchText = q.trim().toLowerCase()
 
+    const displayName = deriveLeadDisplayName(lead)
+
     if (searchText) {
       const matchesSearch =
+        displayName.toLowerCase().includes(searchText) ||
         (lead.full_name ?? "").toLowerCase().includes(searchText) ||
         (lead.email ?? "").toLowerCase().includes(searchText) ||
         (lead.phone ?? "").toLowerCase().includes(searchText) ||
@@ -211,6 +223,28 @@ export default function LeadsPage() {
 
     return true
   })
+
+  const orderedLeads = useMemo(() => {
+    return [...filtered].sort((a, b) => {
+      const stateA = getLeadStatus(a)
+      const stateB = getLeadStatus(b)
+      const orderA = STATE_ORDER[stateA] ?? 99
+      const orderB = STATE_ORDER[stateB] ?? 99
+
+      if (orderA !== orderB) return orderA - orderB
+
+      const timeA = a.last_touch_at ? new Date(a.last_touch_at).getTime() : NaN
+      const timeB = b.last_touch_at ? new Date(b.last_touch_at).getTime() : NaN
+
+      const validA = Number.isFinite(timeA)
+      const validB = Number.isFinite(timeB)
+
+      if (validA && validB) return timeB - timeA
+      if (validA) return -1
+      if (validB) return 1
+      return 0
+    })
+  }, [filtered])
 
   // --------- HANDLERS ----------
   const handleSelectLead = (lead: LeadEnriched) => {
@@ -368,7 +402,7 @@ export default function LeadsPage() {
           />
           <CardContent className="p-0">
             <LeadTable
-              leads={filtered}
+              leads={orderedLeads}
               loading={loading}
               deriveStatus={getLeadStatus}
               onSelect={handleSelectLead}
