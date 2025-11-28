@@ -15,6 +15,7 @@ import {
   CardHeader,
   Input,
   Select,
+  Textarea,
 } from "@/components/ui-custom"
 import NewLeadModal from "./new-lead-modal"
 
@@ -105,6 +106,7 @@ export default function LeadsPage() {
   const [dateFrom, setDateFrom] = useState("")
   const [dateTo, setDateTo] = useState("")
   const [newLeadOpen, setNewLeadOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
 
   // --------- LOAD LEADS (reusable) ----------
   const loadLeads = useCallback(
@@ -221,6 +223,11 @@ export default function LeadsPage() {
     loadLeads()
   }
 
+  const handleImported = (inserted: number) => {
+    console.log("Imported leads", inserted)
+    loadLeads()
+  }
+
   // --------- RENDER ----------
   return (
     <>
@@ -252,6 +259,13 @@ export default function LeadsPage() {
             >
               <RefreshCw size={16} />
               Refresh
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setImportOpen(true)}
+            >
+              Import leads
             </Button>
             <Button
               variant="primary"
@@ -370,6 +384,138 @@ export default function LeadsPage() {
         supabase={supabase}
         onCreated={loadLeads}
       />
+
+      <ImportLeadsModal
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        onImported={handleImported}
+        supabase={supabase}
+      />
     </>
+  )
+}
+
+type ImportLeadsModalProps = {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onImported: (inserted: number) => void
+  supabase: ReturnType<typeof supabaseBrowser> | null
+}
+
+function ImportLeadsModal({
+  open,
+  onOpenChange,
+  onImported,
+  supabase,
+}: ImportLeadsModalProps) {
+  const [payload, setPayload] = useState("")
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  if (!open) return null
+
+  const handleImport = async () => {
+    setErrorMessage(null)
+
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(payload)
+    } catch (err) {
+      console.error("Invalid JSON", err)
+      setErrorMessage("El JSON no es válido o no es un array de objetos.")
+      return
+    }
+
+    if (
+      !Array.isArray(parsed) ||
+      !parsed.every((item) => item && typeof item === "object")
+    ) {
+      setErrorMessage("El JSON no es válido o no es un array de objetos.")
+      return
+    }
+
+    if (!supabase) return
+
+    setLoading(true)
+    const { data, error } = await supabase.rpc("import_leads_simple", {
+      p_leads: parsed,
+    })
+
+    if (error) {
+      console.error(error)
+      setErrorMessage(
+        "No se pudo importar los leads, revisa el formato o prueba con un batch más pequeño."
+      )
+      setLoading(false)
+      return
+    }
+
+    if (data && data.ok === true) {
+      onImported(data.inserted ?? 0)
+      setPayload("")
+      setErrorMessage(null)
+      onOpenChange(false)
+    }
+
+    setLoading(false)
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+      <Card className="w-full max-w-3xl">
+        <CardHeader
+          title="Import leads (JSON)"
+          description="Pega un array JSON de leads con campos básicos como source, niche, company_name, contact_name, phone, email, city, country."
+        />
+        <CardContent className="space-y-3">
+          {!supabase ? (
+            <p className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-100">
+              Supabase no está configurado (faltan env vars).
+            </p>
+          ) : null}
+
+          <Textarea
+            value={payload}
+            onChange={(e) => setPayload(e.target.value)}
+            placeholder={`[
+  {
+    "source": "joe_dentists_q1",
+    "niche": "dentist",
+    "company_name": "Smile Pro Clinic",
+    "contact_name": "Dr. Jane Doe",
+    "phone": "+13055550001",
+    "email": "jane@smilepro.com",
+    "city": "Miami",
+    "country": "US"
+  }
+]`}
+            className="h-72 font-mono"
+          />
+
+          {errorMessage ? (
+            <p className="text-sm text-red-300">{errorMessage}</p>
+          ) : null}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setErrorMessage(null)
+                onOpenChange(false)
+              }}
+              disabled={loading}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleImport}
+              disabled={loading || !supabase}
+            >
+              {loading ? "Importing..." : "Import"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   )
 }
