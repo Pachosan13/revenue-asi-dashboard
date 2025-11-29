@@ -34,7 +34,8 @@ type VoiceCall = {
 
 type Lead = {
   id: string
-  name: string | null
+  contact_name: string | null
+  company: string | null
   phone: string | null
   state: string | null
   email: string | null
@@ -84,7 +85,8 @@ export default function VoiceInsightsPage() {
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [touchRuns, setTouchRuns] = useState<TouchRun[]>([])
   const [intentFilter, setIntentFilter] = useState<IntentFilter>("all")
-  const [appointmentFilter, setAppointmentFilter] = useState<AppointmentFilter>("all")
+  const [appointmentFilter, setAppointmentFilter] =
+    useState<AppointmentFilter>("all")
   const [cadenceFilter, setCadenceFilter] = useState<CadenceFilter>("all")
   const [search, setSearch] = useState("")
   const [loading, setLoading] = useState(true)
@@ -95,7 +97,9 @@ export default function VoiceInsightsPage() {
 
     async function loadData() {
       if (!supabaseReady) {
-        setError("Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to load data.")
+        setError(
+          "Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to load data.",
+        )
         setLoading(false)
         return
       }
@@ -115,15 +119,16 @@ export default function VoiceInsightsPage() {
 
       if (!alive) return
       if (callsError) {
+        console.error(callsError)
         setError("Unable to fetch voice calls.")
         setLoading(false)
         return
       }
 
-      const safeCalls = callsData ?? []
-      setCalls(safeCalls as VoiceCall[])
+      const safeCalls = (callsData ?? []) as VoiceCall[]
+      setCalls(safeCalls)
 
-      const leadIds = Array.from(new Set((safeCalls ?? []).map((call) => call.lead_id)))
+      const leadIds = Array.from(new Set(safeCalls.map((call) => call.lead_id)))
 
       if (leadIds.length === 0) {
         setLeads({})
@@ -134,26 +139,35 @@ export default function VoiceInsightsPage() {
         return
       }
 
-      const [leadsResult, eventsResult, appointmentsResult, touchRunsResult] = await Promise.all([
-        client.from("leads").select("id, name, phone, state, email").in("id", leadIds),
-        client
-          .from("lead_events")
-          .select("id, lead_id, event_type, payload, created_at")
-          .in("event_type", ["voice_completed", "voice_failed", "appointment_created"])
-          .order("created_at", { ascending: false })
-          .limit(200),
-        client
-          .from("appointments")
-          .select("id, lead_id, scheduled_for, status")
-          .in("lead_id", leadIds),
-        client.from("touch_runs").select("id, lead_id, status, error").in("lead_id", leadIds),
-      ])
+      const [leadsResult, eventsResult, appointmentsResult, touchRunsResult] =
+        await Promise.all([
+          client
+            .from("leads")
+            .select("id, contact_name, company, phone, state, email")
+            .in("id", leadIds),
+          client
+            .from("lead_events")
+            .select("id, lead_id, event_type, payload, created_at")
+            .in("event_type", ["voice_completed", "voice_failed", "appointment_created"])
+            .order("created_at", { ascending: false })
+            .limit(200),
+          client
+            .from("appointments")
+            .select("id, lead_id, scheduled_for, status")
+            .in("lead_id", leadIds),
+          client
+            .from("touch_runs")
+            .select("id, lead_id, status, error")
+            .in("lead_id", leadIds),
+        ])
 
       if (!alive) return
 
       if (leadsResult.error) {
         console.error(leadsResult.error)
-        setError("Unable to fetch leads for voice calls.")
+        setError(
+          `Unable to fetch leads for voice calls. DB says: ${leadsResult.error.message}`,
+        )
       }
 
       if (eventsResult.error) {
@@ -210,10 +224,13 @@ export default function VoiceInsightsPage() {
   const callRows = useMemo(() => {
     return calls.map((call) => {
       const voiceWebhook =
-        (call.meta as { voice_webhook?: { transcript?: string } } | null)?.voice_webhook ?? null
+        (call.meta as { voice_webhook?: { transcript?: string } } | null)
+          ?.voice_webhook ?? null
       const transcript = voiceWebhook?.transcript
       const relevantEvent = events.find(
-        (event) => event.lead_id === call.lead_id && event.event_type.startsWith("voice_"),
+        (event) =>
+          event.lead_id === call.lead_id &&
+          event.event_type.startsWith("voice_"),
       )
       const intent =
         (relevantEvent?.payload as { intent?: string } | null)?.intent ??
@@ -238,7 +255,9 @@ export default function VoiceInsightsPage() {
       if (cadenceFilter === "active" && row.cadenceStopped) return false
       if (search) {
         const lead = leads[row.lead_id]
-        const haystack = `${lead?.name ?? ""} ${lead?.email ?? ""} ${lead?.phone ?? ""}`.toLowerCase()
+        const haystack = `${lead?.contact_name ?? ""} ${lead?.company ?? ""} ${
+          lead?.email ?? ""
+        } ${lead?.phone ?? ""}`.toLowerCase()
         if (!haystack.includes(search.toLowerCase())) return false
       }
       return true
@@ -249,10 +268,15 @@ export default function VoiceInsightsPage() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-sm uppercase tracking-[0.16em] text-white/50">Voice</p>
-          <h1 className="text-3xl font-semibold text-white">Voice & intents monitor</h1>
+          <p className="text-sm uppercase tracking-[0.16em] text-white/50">
+            Voice
+          </p>
+          <h1 className="text-3xl font-semibold text-white">
+            Voice & intents monitor
+          </h1>
           <p className="text-white/60">
-            Latest 100 voice calls with transcript previews, intent signals, and appointment status.
+            Latest 100 voice calls with transcript previews, intent signals,
+            and appointment status.
           </p>
         </div>
         <div className="flex gap-2">
@@ -289,7 +313,9 @@ export default function VoiceInsightsPage() {
             </Select>
             <Select
               value={appointmentFilter}
-              onChange={(e) => setAppointmentFilter(e.target.value as AppointmentFilter)}
+              onChange={(e) =>
+                setAppointmentFilter(e.target.value as AppointmentFilter)
+              }
               className="w-48"
             >
               <option value="all">Appointment?</option>
@@ -298,7 +324,9 @@ export default function VoiceInsightsPage() {
             </Select>
             <Select
               value={cadenceFilter}
-              onChange={(e) => setCadenceFilter(e.target.value as CadenceFilter)}
+              onChange={(e) =>
+                setCadenceFilter(e.target.value as CadenceFilter)
+              }
               className="w-48"
             >
               <option value="all">Cadence</option>
@@ -306,7 +334,7 @@ export default function VoiceInsightsPage() {
               <option value="active">Active</option>
             </Select>
             <Input
-              placeholder="Search lead name/email"
+              placeholder="Search lead/company/email/phone"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-64"
@@ -314,12 +342,15 @@ export default function VoiceInsightsPage() {
           </div>
 
           {error ? (
-            <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-rose-100">{error}</div>
+            <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-rose-100">
+              {error}
+            </div>
           ) : null}
 
           {loading ? (
             <div className="flex items-center gap-2 text-white/60">
-              <Loader2 className="h-4 w-4 animate-spin" /> Loading voice calls...
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading voice
+              calls...
             </div>
           ) : null}
 
@@ -348,12 +379,27 @@ export default function VoiceInsightsPage() {
                   {filtered.map((row) => {
                     const lead = leads[row.lead_id]
                     const voiceWebhook =
-                      (row.meta as { voice_webhook?: { transcript?: string } } | null)?.voice_webhook ?? null
+                      (row.meta as {
+                        voice_webhook?: { transcript?: string }
+                      } | null)?.voice_webhook ?? null
                     const transcriptPreview =
-                      row.transcript ?? voiceWebhook?.transcript ?? ""
-                    const preview = transcriptPreview ? `${transcriptPreview.slice(0, 140)}${transcriptPreview.length > 140 ? "…" : ""}` : "—"
+                      (row as any).transcript ??
+                      voiceWebhook?.transcript ??
+                      ""
+                    const preview = transcriptPreview
+                      ? `${transcriptPreview.slice(0, 140)}${
+                          transcriptPreview.length > 140 ? "…" : ""
+                        }`
+                      : "—"
                     const updated = new Date(row.updated_at)
                     const appointment = appointmentByLead[row.lead_id]
+
+                    const displayName =
+                      lead?.contact_name ||
+                      lead?.company ||
+                      lead?.phone ||
+                      lead?.email ||
+                      "Unknown lead"
 
                     return (
                       <TableRow key={row.id}>
@@ -363,43 +409,63 @@ export default function VoiceInsightsPage() {
                               href={`/leads/${row.lead_id}`}
                               className="font-semibold text-emerald-200 hover:text-emerald-100"
                             >
-                              {lead?.name ?? "Unknown lead"}
+                              {displayName}
                             </a>
                             <LeadStateBadge state={lead?.state} />
                           </div>
                         </TableCell>
-                        <TableCell className="text-white/80">{lead?.phone ?? row.to_phone ?? "—"}</TableCell>
+                        <TableCell className="text-white/80">
+                          {lead?.phone ?? row.to_phone ?? "—"}
+                        </TableCell>
                         <TableCell>
                           <Badge variant="outline" className="capitalize">
                             {row.status ?? "—"}
                           </Badge>
                         </TableCell>
-                        <TableCell className="max-w-md text-white/80">{preview}</TableCell>
-                        <TableCell>
-                          <IntentBadge intent={row.intent} />
+                        <TableCell className="max-w-md text-white/80">
+                          {preview}
                         </TableCell>
                         <TableCell>
-                          {row.hasAppointment ? (
-                            <Badge variant="outline" className="gap-2 border-emerald-400/50 text-emerald-100">
+                          <IntentBadge intent={(row as any).intent} />
+                        </TableCell>
+                        <TableCell>
+                          {(row as any).hasAppointment ? (
+                            <Badge
+                              variant="outline"
+                              className="gap-2 border-emerald-400/50 text-emerald-100"
+                            >
                               <CalendarIcon />
                               Upcoming
                               <span className="text-xs text-white/60">
-                                {appointment ? dateFormatter.format(new Date(appointment.scheduled_for)) : null}
+                                {appointment
+                                  ? dateFormatter.format(
+                                      new Date(appointment.scheduled_for),
+                                    )
+                                  : null}
                               </span>
                             </Badge>
                           ) : (
-                            <Badge variant="outline" className="text-white/70">
+                            <Badge
+                              variant="outline"
+                              className="text-white/70"
+                            >
                               No appointment
                             </Badge>
                           )}
                         </TableCell>
                         <TableCell>
-                          {row.cadenceStopped ? (
-                            <Badge variant="outline" className="border-amber-400/60 text-amber-100">
+                          {(row as any).cadenceStopped ? (
+                            <Badge
+                              variant="outline"
+                              className="border-amber-400/60 text-amber-100"
+                            >
                               Cadence stopped
                             </Badge>
                           ) : (
-                            <Badge variant="outline" className="border-emerald-400/60 text-emerald-100">
+                            <Badge
+                              variant="outline"
+                              className="border-emerald-400/60 text-emerald-100"
+                            >
                               Active
                             </Badge>
                           )}

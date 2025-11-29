@@ -37,7 +37,7 @@ type Appointment = {
 
 type Lead = {
   id: string
-  name: string | null
+  contact_name: string | null
   company: string | null
   phone: string | null
   state: string | null
@@ -71,7 +71,9 @@ export default function AppointmentsPage() {
 
     async function loadAppointments() {
       if (!supabaseReady) {
-        setError("Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to load data.")
+        setError(
+          "Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to load data.",
+        )
         setLoading(false)
         return
       }
@@ -91,15 +93,16 @@ export default function AppointmentsPage() {
       if (!alive) return
 
       if (appointmentsError) {
+        console.error(appointmentsError)
         setError("Unable to fetch appointments. Please try again later.")
         setLoading(false)
         return
       }
 
-      const safeAppointments = appointmentsData ?? []
-      setAppointments(safeAppointments as Appointment[])
+      const safeAppointments = (appointmentsData ?? []) as Appointment[]
+      setAppointments(safeAppointments)
 
-      const leadIds = Array.from(new Set((safeAppointments ?? []).map((a) => a.lead_id)))
+      const leadIds = Array.from(new Set(safeAppointments.map((a) => a.lead_id)))
       if (leadIds.length === 0) {
         setLeads({})
         setLoading(false)
@@ -108,14 +111,16 @@ export default function AppointmentsPage() {
 
       const { data: leadsData, error: leadsError } = await client
         .from("leads")
-        .select("id, name, company, phone, state, email")
+        .select("id, contact_name, company, phone, state, email")
         .in("id", leadIds)
 
       if (!alive) return
 
       if (leadsError) {
         console.error(leadsError)
-        setError("Unable to fetch related leads.")
+        setError(
+          `Unable to fetch related leads. DB says: ${leadsError.message}`,
+        )
       }
 
       const leadMap = (leadsData ?? []).reduce((acc, lead) => {
@@ -150,14 +155,17 @@ export default function AppointmentsPage() {
       if (dateFilter === "upcoming" && scheduledDate < now) return false
       if (
         dateFilter === "today" &&
-        (scheduledDate < startOfToday || scheduledDate > new Date(startOfToday.getTime() + 86400000))
+        (scheduledDate < startOfToday ||
+          scheduledDate > new Date(startOfToday.getTime() + 86400000))
       )
         return false
       if (dateFilter === "past7" && scheduledDate < sevenDaysAgo) return false
 
       if (search) {
         const lead = leads[appt.lead_id]
-        const haystack = `${lead?.name ?? ""} ${lead?.company ?? ""} ${lead?.email ?? ""}`.toLowerCase()
+        const haystack = `${lead?.contact_name ?? ""} ${lead?.company ?? ""} ${
+          lead?.email ?? ""
+        }`.toLowerCase()
         if (!haystack.includes(search.toLowerCase())) return false
       }
 
@@ -196,27 +204,64 @@ export default function AppointmentsPage() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-sm uppercase tracking-[0.16em] text-white/50">Bookings</p>
-          <h1 className="text-3xl font-semibold text-white">Appointments cockpit</h1>
+          <p className="text-sm uppercase tracking-[0.16em] text-white/50">
+            Bookings
+          </p>
+          <h1 className="text-3xl font-semibold text-white">
+            Appointments cockpit
+          </h1>
           <p className="text-white/60">
-            Track booked meetings by channel and status. Showing the latest 100 records.
+            Track booked meetings by channel and status. Showing the latest 100
+            records.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setDateFilter("upcoming")}
-            className={dateFilter === "upcoming" ? "border-emerald-400/60 text-emerald-100" : undefined}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setDateFilter("upcoming")}
+            className={
+              dateFilter === "upcoming"
+                ? "border-emerald-400/60 text-emerald-100"
+                : undefined
+            }
+          >
             Upcoming
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setDateFilter("today")}
-            className={dateFilter === "today" ? "border-emerald-400/60 text-emerald-100" : undefined}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setDateFilter("today")}
+            className={
+              dateFilter === "today"
+                ? "border-emerald-400/60 text-emerald-100"
+                : undefined
+            }
+          >
             Today
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setDateFilter("past7")}
-            className={dateFilter === "past7" ? "border-emerald-400/60 text-emerald-100" : undefined}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setDateFilter("past7")}
+            className={
+              dateFilter === "past7"
+                ? "border-emerald-400/60 text-emerald-100"
+                : undefined
+            }
+          >
             Past 7 days
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setDateFilter("all")}
-            className={dateFilter === "all" ? "border-emerald-400/60 text-emerald-100" : undefined}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setDateFilter("all")}
+            className={
+              dateFilter === "all"
+                ? "border-emerald-400/60 text-emerald-100"
+                : undefined
+            }
+          >
             All
           </Button>
         </div>
@@ -230,7 +275,9 @@ export default function AppointmentsPage() {
             </div>
             <div>
               <p className="text-sm text-white/70">Upcoming</p>
-              <p className="text-2xl font-semibold text-white">{summary.upcoming}</p>
+              <p className="text-2xl font-semibold text-white">
+                {summary.upcoming}
+              </p>
             </div>
           </CardContent>
         </Card>
@@ -241,7 +288,9 @@ export default function AppointmentsPage() {
             </div>
             <div>
               <p className="text-sm text-white/70">Today</p>
-              <p className="text-2xl font-semibold text-white">{summary.today}</p>
+              <p className="text-2xl font-semibold text-white">
+                {summary.today}
+              </p>
             </div>
           </CardContent>
         </Card>
@@ -253,9 +302,15 @@ export default function AppointmentsPage() {
                 <Badge variant="outline">No data</Badge>
               ) : (
                 summary.channelEntries.map(([channel, value]) => (
-                  <Badge key={channel} variant="outline" className="gap-2 bg-white/5">
+                  <Badge
+                    key={channel}
+                    variant="outline"
+                    className="gap-2 bg-white/5"
+                  >
                     <span className="capitalize">{channel}</span>
-                    <span className="rounded-full bg-white/10 px-2 text-xs">{value}</span>
+                    <span className="rounded-full bg-white/10 px-2 text-xs">
+                      {value}
+                    </span>
                   </Badge>
                 ))
               )}
@@ -338,6 +393,14 @@ export default function AppointmentsPage() {
                   {filtered.map((appt) => {
                     const lead = leads[appt.lead_id]
                     const scheduled = new Date(appt.scheduled_for)
+
+                    const displayName =
+                      lead?.contact_name ||
+                      lead?.company ||
+                      lead?.phone ||
+                      lead?.email ||
+                      "Unknown lead"
+
                     return (
                       <TableRow key={appt.id}>
                         <TableCell>
@@ -346,12 +409,16 @@ export default function AppointmentsPage() {
                               href={`/leads/${appt.lead_id}`}
                               className="font-semibold text-emerald-200 hover:text-emerald-100"
                             >
-                              {lead?.name ?? "Unknown lead"}
+                              {displayName}
                             </a>
-                            <span className="text-xs text-white/50">{lead?.email ?? "No email"}</span>
+                            <span className="text-xs text-white/50">
+                              {lead?.email ?? lead?.phone ?? "No contact"}
+                            </span>
                           </div>
                         </TableCell>
-                        <TableCell className="text-white/80">{lead?.company ?? "—"}</TableCell>
+                        <TableCell className="text-white/80">
+                          {lead?.company ?? "—"}
+                        </TableCell>
                         <TableCell>
                           <ChannelBadge channel={appt.channel ?? undefined} />
                         </TableCell>
@@ -364,7 +431,7 @@ export default function AppointmentsPage() {
                         <TableCell>
                           <LeadStateBadge state={lead?.state} />
                         </TableCell>
-                        <TableCell className="text-white/60 text-sm">
+                        <TableCell className="text-sm text-white/60">
                           {appt.created_by ?? "—"}
                         </TableCell>
                       </TableRow>
