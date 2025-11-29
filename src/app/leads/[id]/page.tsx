@@ -19,6 +19,11 @@ import {
   statusVariant,
   type TouchRunRow,
 } from "@/components/leads/timeline-utils"
+import {
+  AppointmentStatusBadge,
+  IntentBadge,
+  LeadStateBadge,
+} from "@/components/leads/badges"
 import { supabaseBrowser } from "@/lib/supabase"
 import {
   Badge,
@@ -115,6 +120,29 @@ function deriveLeadSubtitle(lead: LeadRecord | null) {
   return `${email} · ${phone}`
 }
 
+type VoiceCall = {
+  id: string
+  status: string | null
+  provider_call_id: string | null
+  meta: Record<string, unknown> | null
+  updated_at: string
+}
+
+type Appointment = {
+  id: string
+  scheduled_for: string
+  status: string
+  channel: string | null
+  created_by: string | null
+}
+
+type LeadEvent = {
+  id: string
+  event_type: string
+  payload: Record<string, unknown> | null
+  created_at: string
+}
+
 export default function LeadDetailPage() {
   const params = useParams<{ id: string }>()
   const router = useRouter()
@@ -131,6 +159,9 @@ export default function LeadDetailPage() {
 
   const [lead, setLead] = useState<LeadRecord | null>(null)
   const [steps, setSteps] = useState<NormalizedStep[]>([])
+  const [voiceCalls, setVoiceCalls] = useState<VoiceCall[]>([])
+  const [appointments, setAppointments] = useState<Appointment[]>([])
+  const [leadEvents, setLeadEvents] = useState<LeadEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [usingMock, setUsingMock] = useState(false)
@@ -160,6 +191,9 @@ export default function LeadDetailPage() {
           channel_last: null,
         })
         setSteps([])
+        setVoiceCalls([])
+        setAppointments([])
+        setLeadEvents([])
         setUsingMock(true)
         setLoading(false)
         return
@@ -172,6 +206,9 @@ export default function LeadDetailPage() {
         const [
           { data: enriched, error: enrichedError },
           stepsResult,
+          voiceResult,
+          appointmentsResult,
+          eventsResult,
         ] = await Promise.all([
           client
             .from("lead_enriched")
@@ -181,6 +218,24 @@ export default function LeadDetailPage() {
             .eq("id", leadId)
             .maybeSingle(),
           fetchLeadTouchRuns(client, leadId),
+          client
+            .from("voice_calls")
+            .select("id, status, provider_call_id, meta, updated_at")
+            .eq("lead_id", leadId)
+            .order("updated_at", { ascending: false })
+            .limit(20),
+          client
+            .from("appointments")
+            .select("id, scheduled_for, status, channel, created_by")
+            .eq("lead_id", leadId)
+            .order("scheduled_for", { ascending: false })
+            .limit(20),
+          client
+            .from("lead_events")
+            .select("id, event_type, payload, created_at")
+            .eq("lead_id", leadId)
+            .order("created_at", { ascending: false })
+            .limit(50),
         ])
 
         if (!alive) return
@@ -225,6 +280,21 @@ export default function LeadDetailPage() {
             ? []
             : normalizeSteps(stepsData as TouchRunRow[]),
         )
+        if (voiceResult.error) {
+          console.error(voiceResult.error)
+        }
+
+        if (appointmentsResult.error) {
+          console.error(appointmentsResult.error)
+        }
+
+        if (eventsResult.error) {
+          console.error(eventsResult.error)
+        }
+
+        setVoiceCalls((voiceResult.data ?? []) as VoiceCall[])
+        setAppointments((appointmentsResult.data ?? []) as Appointment[])
+        setLeadEvents((eventsResult.data ?? []) as LeadEvent[])
         setUsingMock(false)
       } catch (e) {
         if (!alive) return
@@ -254,6 +324,10 @@ export default function LeadDetailPage() {
     const normalized = step.status?.toLowerCase()
     return normalized === "failed" || normalized === "error"
   }).length
+
+  const cadenceStopped = steps.some(
+    (step) => step.status === "stopped" && step.error === "appointment_created",
+  )
 
   const grouped = useMemo(() => {
     const groups = new Map<
@@ -367,6 +441,165 @@ export default function LeadDetailPage() {
           <Badge variant="outline" className="capitalize">
             {lead?.state ?? "Sin estado"}
           </Badge>
+        </CardContent>
+      </Card>
+
+      {/* Voice & appointments */}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardContent className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.14em] text-white/50">Voice</p>
+                <h3 className="text-lg font-semibold text-white">Voice history</h3>
+              </div>
+              <Badge variant="outline" className="gap-2 text-white/70">
+                <Clock4 size={14} /> Last {voiceCalls.length} calls
+              </Badge>
+            </div>
+            {voiceCalls.length === 0 ? (
+              <p className="text-sm text-white/60">No voice calls yet.</p>
+            ) : (
+              <div className="overflow-auto">
+                <Table>
+                  <TableHead>
+                    <tr>
+                      <TableHeaderCell>Date</TableHeaderCell>
+                      <TableHeaderCell>Status</TableHeaderCell>
+                      <TableHeaderCell>Intent</TableHeaderCell>
+                      <TableHeaderCell>Transcript</TableHeaderCell>
+                      <TableHeaderCell>Provider ID</TableHeaderCell>
+                    </tr>
+                  </TableHead>
+                  <TableBody>
+                    {voiceCalls.map((call) => {
+                      const voiceWebhook =
+                        (call.meta as { voice_webhook?: { transcript?: string; intent?: string } } | null)
+                          ?.voice_webhook ?? null
+                      const transcript = voiceWebhook?.transcript ?? "—"
+                      const intent =
+                        voiceWebhook?.intent ??
+                        (call.meta as { intent?: string } | null)?.intent ??
+                        "unknown"
+                      return (
+                        <TableRow key={call.id}>
+                          <TableCell className="whitespace-nowrap text-white/70">
+                            {call.updated_at ? new Date(call.updated_at).toLocaleString() : "—"}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={statusVariant(call.status)} className="capitalize">
+                              {call.status ?? "—"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <IntentBadge intent={intent} />
+                          </TableCell>
+                          <TableCell className="max-w-md text-white/80">
+                            {transcript ? `${transcript.slice(0, 120)}${transcript.length > 120 ? "…" : ""}` : "—"}
+                          </TableCell>
+                          <TableCell className="text-white/60 text-sm">{call.provider_call_id ?? "—"}</TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="space-y-3">
+            <div className="space-y-1">
+              <p className="text-xs uppercase tracking-[0.14em] text-white/50">State</p>
+              <h3 className="text-lg font-semibold text-white">State & cadence</h3>
+            </div>
+            <div className="flex items-center gap-3">
+              <LeadStateBadge state={lead?.state} />
+              <Badge variant="outline" className="gap-2 text-white/70">
+                <Clock4 size={14} /> {lead?.last_touch_at ? new Date(lead.last_touch_at).toLocaleString() : "No touches"}
+              </Badge>
+            </div>
+            {cadenceStopped ? (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                Cadence stopped because an appointment was created.
+              </div>
+            ) : (
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+                Cadence active.
+              </div>
+            )}
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-[0.14em] text-white/50">Appointments</p>
+              {appointments.length === 0 ? (
+                <p className="text-sm text-white/60">No appointments yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {appointments.map((appt) => (
+                    <div
+                      key={appt.id}
+                      className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                    >
+                      <div>
+                        <p className="text-sm text-white/80">
+                          {appt.scheduled_for
+                            ? new Date(appt.scheduled_for).toLocaleString()
+                            : "Unknown"}
+                        </p>
+                        <p className="text-xs text-white/50">
+                          Channel: {appt.channel ?? "—"} · {appt.created_by ?? "—"}
+                        </p>
+                      </div>
+                      <AppointmentStatusBadge status={appt.status} />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardContent className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-[0.14em] text-white/50">Events</p>
+              <h3 className="text-lg font-semibold text-white">Recent events</h3>
+            </div>
+            <Badge variant="outline" className="text-white/70">
+              Last {leadEvents.length} events
+            </Badge>
+          </div>
+          {leadEvents.length === 0 ? (
+            <p className="text-sm text-white/60">No events logged for this lead.</p>
+          ) : (
+            <div className="overflow-auto">
+              <Table>
+                <TableHead>
+                  <tr>
+                    <TableHeaderCell>Type</TableHeaderCell>
+                    <TableHeaderCell>Payload</TableHeaderCell>
+                    <TableHeaderCell>When</TableHeaderCell>
+                  </tr>
+                </TableHead>
+                <TableBody>
+                  {leadEvents.map((event) => (
+                    <TableRow key={event.id}>
+                      <TableCell className="capitalize text-white">{event.event_type}</TableCell>
+                      <TableCell className="max-w-xl text-white/80">
+                        <pre className="whitespace-pre-wrap text-xs text-white/60">
+                          {JSON.stringify(event.payload ?? {}, null, 2)}
+                        </pre>
+                      </TableCell>
+                      <TableCell className="text-white/60">
+                        {new Date(event.created_at).toLocaleString()}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
         </CardContent>
       </Card>
 
