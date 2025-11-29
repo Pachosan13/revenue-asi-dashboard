@@ -362,7 +362,7 @@ export default function LeadDetailPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => router.push("/leads-inbox")}
+            onClick={() => router.push("/leads")}
           >
             <ArrowLeft size={16} />
             Back
