@@ -110,7 +110,8 @@ export default function VoiceInsightsPage() {
       const client = supabaseBrowser()
 
       const { data: callsData, error: callsError } = await client
-        .from("voice_calls")
+        // use view backed by public.calls to ensure consistent shape
+        .from("voice_insights_calls_v1")
         .select(
           "id, lead_id, touch_run_id, status, provider, provider_call_id, to_phone, meta, updated_at",
         )
