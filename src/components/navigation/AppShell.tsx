@@ -8,16 +8,9 @@ import { Button, Input } from "@/components/ui-custom"
 
 const navItems = [
   { label: "Dashboard", href: "/dashboard", icon: Home, subtitle: "Operating picture" },
-const navItems = [
-  { label: "Dashboard", href: "/dashboard", icon: Home, subtitle: "Operating picture" },
   { label: "Leads Inbox", href: "/leads-inbox", icon: Mails, subtitle: "Inbox & actions" },
   { label: "Voice Insights", href: "/voice-insights", icon: Activity, subtitle: "Calls & intents" },
   { label: "Appointments", href: "/appointments", icon: Send, subtitle: "Bookings" },
-  { label: "Campaigns", href: "/campaigns", icon: Send, subtitle: "Outbound" },
-  { label: "Prompt Lab", href: "/prompt-lab", icon: FlaskConical, subtitle: "Experiments" },
-  { label: "Health", href: "/health", icon: Activity, subtitle: "Systems" },
-  { label: "Settings", href: "/settings", icon: Settings, subtitle: "Org" },
-]
   { label: "Campaigns", href: "/campaigns", icon: Send, subtitle: "Outbound" },
   { label: "Prompt Lab", href: "/prompt-lab", icon: FlaskConical, subtitle: "Experiments" },
   { label: "Health", href: "/health", icon: Activity, subtitle: "Systems" },
@@ -28,7 +21,10 @@ export function AppShell({ children }: React.PropsWithChildren) {
   const pathname = usePathname()
   const [open, setOpen] = useState(false)
 
-  const current = useMemo(() => navItems.find((item) => pathname?.startsWith(item.href)), [pathname])
+  const current = useMemo(
+    () => navItems.find((item) => pathname?.startsWith(item.href)),
+    [pathname],
+  )
 
   return (
     <div className="relative isolate min-h-screen bg-[#05060a] text-white">
@@ -68,7 +64,10 @@ export function AppShell({ children }: React.PropsWithChildren) {
                       : "text-white/70 hover:bg-white/5",
                   )}
                 >
-                  <item.icon size={18} className={active ? "text-emerald-300" : "text-white/60"} />
+                  <item.icon
+                    size={18}
+                    className={active ? "text-emerald-300" : "text-white/60"}
+                  />
                   <div className="flex flex-col">
                     <span className="font-semibold">{item.label}</span>
                     <span className="text-xs text-white/50">{item.subtitle}</span>
@@ -108,8 +107,12 @@ export function AppShell({ children }: React.PropsWithChildren) {
                 {open ? <X size={18} /> : <Menu size={18} />}
               </Button>
               <div>
-                <p className="text-xs uppercase tracking-[0.16em] text-white/50">{current?.subtitle ?? "Overview"}</p>
-                <h1 className="text-xl font-semibold text-white">{current?.label ?? "Revenue OS"}</h1>
+                <p className="text-xs uppercase tracking-[0.16em] text-white/50">
+                  {current?.subtitle ?? "Overview"}
+                </p>
+                <h1 className="text-xl font-semibold text-white">
+                  {current?.label ?? "Revenue OS"}
+                </h1>
               </div>
             </div>
             <div className="flex items-center gap-3">
@@ -121,9 +124,7 @@ export function AppShell({ children }: React.PropsWithChildren) {
             </div>
           </header>
 
-          <main className="flex-1 px-4 pb-10 pt-6 sm:px-6 lg:px-8">
-            {children}
-          </main>
+          <main className="flex-1 px-4 pb-10 pt-6 sm:px-6 lg:px-8">{children}</main>
         </div>
       </div>
     </div>
