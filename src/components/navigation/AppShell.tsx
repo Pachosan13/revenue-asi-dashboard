@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from "react"
 import { usePathname } from "next/navigation"
-import { Menu, X, Home, Mails, Send, Activity, FlaskConical, Settings } from "lucide-react"
+import { Menu, X, Home, Mails, Send, Activity, FlaskConical, Settings, Gauge } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button, Input } from "@/components/ui-custom"
 
@@ -12,6 +12,7 @@ const navItems = [
   { label: "Campaigns", href: "/campaigns", icon: Send, subtitle: "Outbound" },
   { label: "Prompt Lab", href: "/prompt-lab", icon: FlaskConical, subtitle: "Experiments" },
   { label: "Health", href: "/health", icon: Activity, subtitle: "Systems" },
+  { label: "Director", href: "/director", icon: Gauge, subtitle: "Overview" },
   { label: "Settings", href: "/settings", icon: Settings, subtitle: "Org" },
 ]
 
