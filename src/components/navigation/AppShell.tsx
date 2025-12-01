@@ -2,19 +2,70 @@
 
 import React, { useMemo, useState } from "react"
 import { usePathname } from "next/navigation"
-import { Menu, X, Home, Mails, Send, Activity, FlaskConical, Settings, Gauge } from "lucide-react"
+import {
+  Activity,
+  FlaskConical,
+  Home,
+  Mails,
+  Send,
+  Settings,
+  CalendarDays,
+  X,
+  Menu,
+} from "lucide-react";
 import { cn } from "@/lib/utils"
 import { Button, Input } from "@/components/ui-custom"
 
 const navItems = [
-  { label: "Dashboard", href: "/dashboard", icon: Home, subtitle: "Operating picture" },
-  { label: "Leads Inbox", href: "/leads-inbox", icon: Mails, subtitle: "Inbox & actions" },
-  { label: "Campaigns", href: "/campaigns", icon: Send, subtitle: "Outbound" },
-  { label: "Prompt Lab", href: "/prompt-lab", icon: FlaskConical, subtitle: "Experiments" },
-  { label: "Health", href: "/health", icon: Activity, subtitle: "Systems" },
-  { label: "Director", href: "/director", icon: Gauge, subtitle: "Overview" },
-  { label: "Settings", href: "/settings", icon: Settings, subtitle: "Org" },
-]
+  {
+    label: "Dashboard",
+    href: "/dashboard",
+    icon: Home,
+    subtitle: "Operating picture",
+  },
+  {
+    label: "Leads",
+    href: "/leads",
+    icon: Mails,
+    subtitle: "Pipeline & actions",
+  },
+  {
+    label: "Appointments",
+    href: "/appointments",
+    icon: CalendarDays,
+    subtitle: "Bookings & outcomes",
+  },
+  {
+    label: "Voice Insights",
+    href: "/voice-insights",
+    icon: Activity,
+    subtitle: "Calls & intents",
+  },
+  {
+    label: "Campaigns",
+    href: "/campaigns",
+    icon: Send,
+    subtitle: "Outbound",
+  },
+  {
+    label: "Prompt Lab",
+    href: "/prompt-lab",
+    icon: FlaskConical,
+    subtitle: "Experiments",
+  },
+  {
+    label: "Health",
+    href: "/health",
+    icon: Activity,
+    subtitle: "Systems",
+  },
+  {
+    label: "Settings",
+    href: "/settings",
+    icon: Settings,
+    subtitle: "Org",
+  },
+];
 
 export function AppShell({ children }: React.PropsWithChildren) {
   const pathname = usePathname()

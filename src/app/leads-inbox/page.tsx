@@ -2,8 +2,16 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react"
 import { AlertTriangle, RefreshCw } from "lucide-react"
+
 import { supabaseBrowser } from "@/lib/supabase"
-import { Card, CardContent, CardHeader, Input, Badge, Button } from "@/components/ui-custom"
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  Input,
+} from "@/components/ui-custom"
 import type { LeadEnriched } from "@/types/lead"
 import { LeadInboxTable, type LeadInboxEntry } from "@/components/leads/LeadInboxTable"
 
@@ -124,7 +132,15 @@ function collectMissingFields(leads: LeadInboxEntry[]) {
 }
 
 export default function LeadsInboxPage() {
-  const supabaseReady = useMemo(() => Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY), [])
+  const supabaseReady = useMemo(
+    () =>
+      Boolean(
+        process.env.NEXT_PUBLIC_SUPABASE_URL &&
+          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+      ),
+    [],
+  )
+
   const [leads, setLeads] = useState<LeadInboxEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -136,6 +152,7 @@ export default function LeadsInboxPage() {
   const [page, setPage] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
+
   const activeQuery = debouncedQuery.trim()
 
   useEffect(() => {
@@ -147,10 +164,11 @@ export default function LeadsInboxPage() {
     const client = supabaseBrowser()
     const from = pageIndex * PAGE_SIZE
     const to = from + PAGE_SIZE - 1
+
     return client
       .from("inbox_events")
       .select(
-        "lead_id, lead_name, lead_email, lead_phone, lead_state, last_step_at, campaign_id, campaign_name, channel_last, created_at"
+        "lead_id, lead_name, lead_email, lead_phone, lead_state, last_step_at, campaign_id, campaign_name, channel_last, created_at",
       )
       .order("last_step_at", { ascending: false })
       .range(from, to)
@@ -179,7 +197,9 @@ export default function LeadsInboxPage() {
 
       if (dbError) {
         console.error(dbError)
-        setError("No se pudo acceder a inbox_events. Proporciona el SQL/contrato o usa el mock.")
+        setError(
+          "No se pudo acceder a inbox_events. Proporciona el SQL/contrato o usa el mock.",
+        )
         setLeads(MOCK_LEADS)
         setMissingFields(collectMissingFields(MOCK_LEADS))
         setUsingMock(true)
@@ -199,7 +219,8 @@ export default function LeadsInboxPage() {
       setHasMore((data?.length ?? 0) === PAGE_SIZE)
     }
 
-    loadLeads()
+    void loadLeads()
+
     return () => {
       alive = false
     }
@@ -207,6 +228,7 @@ export default function LeadsInboxPage() {
 
   const loadMore = useCallback(async () => {
     if (!supabaseReady || !hasMore || isLoadingMore) return
+
     setIsLoadingMore(true)
     const nextPage = page + 1
     const { data, error: dbError } = await fetchInboxPage(nextPage)
@@ -221,9 +243,11 @@ export default function LeadsInboxPage() {
     const mapped = (data ?? []).map(mapLead)
     setLeads((prev) => [...prev, ...mapped])
     setPage(nextPage)
+
     if ((data?.length ?? 0) < PAGE_SIZE) {
       setHasMore(false)
     }
+
     setIsLoadingMore(false)
   }, [fetchInboxPage, hasMore, isLoadingMore, page, supabaseReady])
 
@@ -261,39 +285,57 @@ export default function LeadsInboxPage() {
             <h1 className="text-3xl font-semibold text-white">Leads Inbox</h1>
             <Badge variant="neutral">Listado</Badge>
           </div>
-          <p className="text-sm text-white/60">Campos mínimos: {REQUIRED_FIELDS.join(", ")}</p>
+          <p className="text-sm text-white/60">
+            Campos mínimos: {REQUIRED_FIELDS.join(", ")}
+          </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => window.location.reload()} aria-label="Refrescar leads">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.location.reload()}
+            aria-label="Refrescar leads"
+          >
             <RefreshCw size={16} />
             Refresh
           </Button>
         </div>
       </div>
 
-      {!supabaseReady ? (
+      {!supabaseReady && (
         <div className="flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-100">
           <AlertTriangle size={18} />
           <div>
-            <p className="font-semibold">Supabase not configured, showing mock data</p>
-            <p className="text-sm text-amber-200/90">Define NEXT_PUBLIC_SUPABASE_URL y NEXT_PUBLIC_SUPABASE_ANON_KEY para usar datos reales.</p>
+            <p className="font-semibold">
+              Supabase not configured, showing mock data
+            </p>
+            <p className="text-sm text-amber-200/90">
+              Define NEXT_PUBLIC_SUPABASE_URL y NEXT_PUBLIC_SUPABASE_ANON_KEY
+              para usar datos reales.
+            </p>
           </div>
         </div>
-      ) : null}
+      )}
 
-      {error ? (
+      {error && (
         <div className="flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-100">
           <AlertTriangle size={18} className="mt-0.5" />
           <div>
             <p className="font-semibold">{error}</p>
-            <p className="text-sm text-red-200/90">Si la tabla no existe, comparte el contrato exacto. Se muestran mocks temporalmente.</p>
+            <p className="text-sm text-red-200/90">
+              Si la tabla no existe, comparte el contrato exacto. Se muestran
+              mocks temporalmente.
+            </p>
           </div>
         </div>
-      ) : null}
+      )}
 
-      {missingFields.length > 0 ? (
+      {missingFields.length > 0 && (
         <Card>
-          <CardHeader title="Campos faltantes" description="Se devuelven como null y se muestran en la tabla." />
+          <CardHeader
+            title="Campos faltantes"
+            description="Se devuelven como null y se muestran en la tabla."
+          />
           <CardContent className="flex flex-wrap gap-2">
             {missingFields.map((field) => (
               <Badge key={field} variant="warning">
@@ -302,13 +344,23 @@ export default function LeadsInboxPage() {
             ))}
           </CardContent>
         </Card>
-      ) : null}
+      )}
 
       <Card>
         <CardHeader
           title="Leads"
-          description={usingMock ? "Mostrando mock para permitir QA." : "Datos listados desde inbox_events."}
-          action={<Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar por nombre, email o teléfono" />}
+          description={
+            usingMock
+              ? "Mostrando mock para permitir QA."
+              : "Datos listados desde inbox_events."
+          }
+          action={
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Buscar por nombre, email o teléfono"
+            />
+          }
         />
         <CardContent>
           <div className="space-y-4">
@@ -332,15 +384,16 @@ export default function LeadsInboxPage() {
               })}
             </div>
 
-            {activeQuery.length > 0 ? (
+            {activeQuery.length > 0 && (
               <p className="text-xs text-white/60">
-                Mostrando {filteredLeads.length} de {leads.length} leads (filtro: “{activeQuery}”)
+                Mostrando {filteredLeads.length} de {leads.length} leads (filtro: “
+                {activeQuery}”)
               </p>
-            ) : null}
+            )}
 
             <LeadInboxTable leads={filteredLeads} loading={loading} />
 
-            {hasMore ? (
+            {hasMore && (
               <div className="flex justify-center">
                 <Button
                   variant="outline"
@@ -352,7 +405,7 @@ export default function LeadsInboxPage() {
                   {isLoadingMore ? "Cargando..." : "Load more"}
                 </Button>
               </div>
-            ) : null}
+            )}
           </div>
         </CardContent>
       </Card>
