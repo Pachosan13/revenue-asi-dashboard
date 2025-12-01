@@ -138,14 +138,14 @@ export default function LeadsPage() {
         // mapear la view -> tipo LeadEnriched que usa la tabla
         const mapped: LeadEnriched[] = rows.map((row) => ({
           id: row.lead_id,
-          full_name: null, // aún no tenemos nombre, solo id + estado + canal
+          full_name: row.lead_id, // aún no tenemos nombre, solo id + estado + canal
           email: null,
           phone: null,
           state: (row.state ?? "new") as LeadEnriched["state"],
           last_touch_at: row.last_touch_at,
           campaign_id: null,
           campaign_name: null,
-          channel_last: row.last_channel ?? undefined,
+          channel_last: row.last_channel ?? null,
         }))
 
         setLeads(mapped)
