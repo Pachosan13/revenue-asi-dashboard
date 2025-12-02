@@ -30,7 +30,7 @@ export interface LeadTimelineEvent {
   label: string
   description?: string | null
   status?: string | null
-  meta?: Record<string, any>
+  meta?: Record<string, unknown>
 }
 
 function formatDateTime(value: string) {

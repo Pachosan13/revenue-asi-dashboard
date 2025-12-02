@@ -1,4 +1,49 @@
-import { formatPreview, type TouchRunRow } from "./timeline-utils"
+import { type TouchRunRow } from "./timeline-utils"
+
+export function formatTouchPreview(payload: unknown): string {
+  if (!payload) return ""
+
+  const payloadObject =
+    typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : null
+
+  const source = typeof payloadObject?.source === "string" ? payloadObject.source : null
+
+  if (source === "appointment_reminder") {
+    const kind = typeof payloadObject?.kind === "string" ? payloadObject.kind : null
+    if (kind === "appointment_reminder_24h") return "Recordatorio 24h antes de la cita"
+    if (kind === "appointment_reminder_1h") return "Recordatorio 1h antes de la cita"
+    if (kind === "appointment_reminder_10m") return "Recordatorio 10m antes de la cita"
+  }
+
+  if (source === "appointment_outcome") {
+    const kind = typeof payloadObject?.kind === "string" ? payloadObject.kind : null
+    if (kind === "no_show_followup_15m") return "Follow-up por no-show (15 min después)"
+    if (kind === "attended_followup_30m") return "Follow-up después de cita atendida (30 min)"
+  }
+
+  const script = payloadObject?.script
+  if (typeof script === "string") {
+    const trimmed = script.trim()
+    return trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed
+  }
+
+  const maybeMessage = payloadObject?.message ?? payloadObject?.body ?? payloadObject?.subject
+  if (typeof maybeMessage === "string") {
+    const trimmed = maybeMessage.trim()
+    if (trimmed) return trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed
+  }
+
+  if (typeof payload === "string") {
+    const trimmed = payload.trim()
+    return trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed
+  }
+
+  if (typeof payloadObject?.reason === "string") {
+    return `Motivo interno: ${payloadObject.reason}`
+  }
+
+  return ""
+}
 
 type ReminderKind =
   | "appointment_reminder_24h"
@@ -21,7 +66,7 @@ export function describeTouchRun(step: TouchRunRow) {
     const reminderLabel = describeReminder(kind)
     return {
       label: reminderLabel ?? "Appointment reminder", // fallback
-      description: formatPreview(step.payload),
+      description: formatTouchPreview(step.payload),
     }
   }
 
@@ -34,13 +79,13 @@ export function describeTouchRun(step: TouchRunRow) {
         : attended
           ? "Attended follow-up"
           : "Appointment outcome follow-up",
-      description: formatPreview(step.payload),
+      description: formatTouchPreview(step.payload),
     }
   }
 
   return {
     label: stepNumber ? `Cadence touch (step ${stepNumber})` : "Cadence touch",
-    description: formatPreview(step.payload),
+    description: formatTouchPreview(step.payload),
   }
 }
 
