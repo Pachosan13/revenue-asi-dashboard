@@ -154,7 +154,8 @@ export default function LeadTable({ leads, loading }: LeadTableProps) {
                     <div className="flex justify-end gap-2">
                       <Button
                         variant="ghost"
-                        size="icon"
+                        size="sm"
+                        className="h-9 w-9 p-0"
                         onClick={(event) => {
                           event.stopPropagation();
                           handleNavigate(lead.id);
@@ -165,25 +166,27 @@ export default function LeadTable({ leads, loading }: LeadTableProps) {
                       {email && email !== "—" && (
                         <Button
                           variant="ghost"
-                          size="icon"
-                          asChild
-                          onClick={(event) => event.stopPropagation()}
+                          size="sm"
+                          className="h-9 w-9 p-0"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            window.location.href = `mailto:${email}`
+                          }}
                         >
-                          <a href={`mailto:${email}`}>
-                            <Mail className="h-4 w-4" />
-                          </a>
+                          <Mail className="h-4 w-4" />
                         </Button>
                       )}
                       {lead.phone && (
                         <Button
                           variant="ghost"
-                          size="icon"
-                          asChild
-                          onClick={(event) => event.stopPropagation()}
+                          size="sm"
+                          className="h-9 w-9 p-0"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            window.location.href = `tel:${lead.phone}`
+                          }}
                         >
-                          <a href={`tel:${lead.phone}`}>
-                            <Phone className="h-4 w-4" />
-                          </a>
+                          <Phone className="h-4 w-4" />
                         </Button>
                       )}
                     </div>

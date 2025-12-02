@@ -81,7 +81,7 @@ export default function AppointmentOutcomeButtons({
       <div className="flex gap-2">
         <Button
           type="button"
-          size="xs"
+          size="sm"
           variant={isAttended ? "primary" : "ghost"}
           disabled={pending !== null}
           onClick={() => handleClick("show")}
@@ -93,11 +93,11 @@ export default function AppointmentOutcomeButtons({
 
         <Button
           type="button"
-          size="xs"
-          variant={isNoShow ? "destructive" : "ghost"}
+          size="sm"
+          variant="ghost"
           disabled={pending !== null}
           onClick={() => handleClick("no_show")}
-          className="inline-flex items-center gap-1 rounded-full border border-rose-500/40 bg-rose-500/10 px-3 py-1 text-rose-100 hover:bg-rose-500/20"
+          className={`inline-flex items-center gap-1 rounded-full border border-rose-500/40 px-3 py-1 text-rose-100 hover:bg-rose-500/20 ${isNoShow ? "bg-rose-500/20" : "bg-rose-500/10"}`}
         >
           <XIcon className="h-3 w-3" />
           <span>No-show</span>
