@@ -1,132 +1,374 @@
 # Revenue ASI — Director Engine v1
 
-## Rol del sistema
+Revenue ASI is a **Growth Director AI** for SMBs selling to the Hispanic market.
 
-Revenue ASI es un **Director de Crecimiento** para SMBs que vende a hispanos:
-- Define nicho, oferta, mensaje y canales.
-- Orquesta campañas de outbound (voice, email, WhatsApp, SMS).
-- Enriquce leads y prioriza follow-ups.
-- Alimenta un CRM basado en conversaciones, no en campos.
+It:
 
-> Meta: 10–20 citas calificadas por mes por cliente, con margen alto y operación lo más autónoma posible.
+- Defines niche, offer, messaging, and channels.
+- Orchestrates outbound campaigns (voice, email, WhatsApp, SMS, voice SDR).
+- Enriches leads and prioritizes follow-ups.
+- Runs a conversational CRM instead of a field-based CRM.
+- Drives appointments and pipeline, not vanity metrics.
 
----
-
-## 1. ICP actual (primer foco)
-
-### Tipo de cliente
-- SMBs en USA que venden a mercado hispano.
-- Nichos prioritarios (v1): **dealers de autos**, **dentistas**, **financial loaners**, **agencias de marketing**.
-
-### Tamaño
-- 3–50 empleados.
-- Dueño todavía metido en ventas.
+> Core target: SMBs in the US who sell to Hispanics and want **10–20 qualified appointments per month** on autopilot, at a price point around **$3k/month**.
 
 ---
 
-## 2. Arquitectura mental del sistema
+## 1. ICP (first focus)
 
-1. **Input**
-   - Listas de leads (csv, Google Sheet, CRM externo).
-   - Parámetros de campaña (nicho, oferta, mercado, objetivo de citas/día).
-   - Preferencias del cliente (horarios, tono, canales permitidos).
+### 1.1 Company profile
 
-2. **Director Engine**
-   - Define estrategia: nicho + promesa + canal principal + secuencia.
-   - Genera campañas: scripts de voz, emails, WhatsApp, SMS.
-   - Decide qué leads atacar primero (priorización por intent, señal, fit).
-   - Ajusta según resultados (más llamadas, más email, cambiar mensajes, etc).
+- SMBs in USA selling to Hispanic markets.
+- Headcount: **3–50 employees**.
+- Owner still involved in **sales** or revenue decisions.
+- Has leads but **no consistent outbound system**.
 
-3. **Execution Layer (más adelante)**
-   - Voice SDR (Twilio).
-   - Email (Elastic / otro).
-   - WhatsApp / SMS.
-   - Integraciones con CRM externo si aplica.
+### 1.2 Priority verticals (v1)
 
-4. **Output**
-   - Citas agendadas.
-   - Pipeline de leads con estado claro.
-   - Reporte de KPIs de campaña (calls, contacts, appointments, shows, closes).
+- **Auto dealers**
+- **Dentists / clinics**
+- **Financial loan providers**
+- **Agencies that sell to Hispanics**
+
+These are “pattern-matching” ICPs: high ticket, recurring need for leads, pain around follow-up, and chaos in CRM.
 
 ---
 
-## 3. Módulos del Director Engine (sin código todavía)
+## 2. Mental architecture of the system
 
-### 3.1. Campaign Designer
-- Toma: nicho + oferta + ICP.
-- Devuelve:
-  - Mensaje central.
-  - 1 promesa principal + 2 secundarias.
-  - 1 ángulo de urgencia.
-  - 1 objeción principal + respuesta.
+Think of Revenue ASI as a **stacked brain**:
 
-### 3.2. Outreach Orchestrator
-- Define:
-  - Cadencia de canales: voz + email + WhatsApp.
-  - Número de toques por lead y timing.
-  - Reglas de pausa (no seguir insistiendo si X).
+1. **Input layer**
 
-### 3.3. Lead Enrichment Planner
-- Define:
-  - Qué datos mínimos necesita por lead (email, phone, website, etc).
-  - De dónde sacarlos (scraping / APIs).
-  - Cómo guardarlos (schema de lead).
+   - Lead lists (CSV, Google Sheet, CRM import).
+   - Campaign parameters: niche, offer, geography, target #appointments/month.
+   - Client preferences: schedules, tone, allowed channels, compliance constraints.
 
-### 3.4. CRM Conversacional (v1 concept)
-- El CRM se piensa así:
-  - Cada lead = hilo de conversación.
-  - Todo se controla por chat tipo:
-    - “Muéstrame leads calientes de los últimos 3 días.”
-    - “Crea campaña para 20 citas al mes con dentistas en Florida.”
-- El “director” responde con:
-  - Plan.
-  - Estado.
-  - Acciones disparadas.
+2. **Director Engine (strategic brain)**
+
+   - Chooses:
+     - Niche + core promise.
+     - Primary channel (voice / WhatsApp / email).
+     - Cadence (sequence of touches).
+   - Generates:
+     - Voice scripts.
+     - Email sequences.
+     - WhatsApp/SMS scripts.
+   - Prioritizes:
+     - Which leads to attack first (fit, recency, behavior).
+   - Adapts:
+     - More calls, fewer emails, different copy, intensifies or slows down cadences.
+
+3. **Execution layer**
+
+   - Runs the actual touches:
+     - Voice SDR (Twilio / voice agent).
+     - Email (Elastic / similar).
+     - WhatsApp / SMS.
+   - Schedules and dispatches:
+     - cadences,
+     - retries,
+     - fallbacks when one channel fails.
+   - Updates the **lead state machine** based on outcomes.
+
+4. **Memory & analytics layer**
+
+   - Central log of:
+     - Leads
+     - Touches
+     - Appointments
+     - Outcomes
+     - Campaign runs
+   - Powers:
+     - Lead timelines.
+     - Operator dashboard.
+     - Director dashboard (system health, queues, failures).
+   - Feeds back into the Director Engine for strategy adjustments.
+
+5. **Experience layer (UI)**
+
+   - **Operator cockpit**:
+     - Leads, inbox, timelines, appointments, tasks.
+   - **Director dashboard**:
+     - Engine health, queues, errors, campaign performance.
+   - **Client portal (light)**:
+     - New leads, booked appointments, core KPIs.
 
 ---
 
-## 4. Roadmap técnico (cuando haya APIs y budget)
+## 3. Core modules (logical, not just code)
 
-1. Conectar OpenAI API.
-2. Conectar Twilio (voz).
-3. Conectar proveedor de email.
-4. Guardar todo en Supabase con esquema:
-   - `leads`
-   - `campaigns`
-   - `campaign_runs`
-   - `touches`
-   - `appointments`
+### 3.1 Lead State Machine
+
+A deterministic state machine that tracks where each lead is in the lifecycle.
+
+Typical states:
+
+- `new`
+- `enriched`
+- `attempting` (in cadence)
+- `engaged` (responded)
+- `appointment_scheduled`
+- `appointment_completed`
+- `unqualified`
+- `do_not_contact`
+
+The state:
+
+- Is updated by triggers (touch results, appointments, outcomes).
+- Drives which cadences are allowed.
+- Prevents double-touching, loops and spam.
+
+### 3.2 Touch Orchestrator
+
+Responsible for **what happens next** for each lead.
+
+- Inputs:
+  - lead_id
+  - campaign_id
+  - cadence definition (steps, channels, timing)
+- Writes into `touch_runs`:
+  - `lead_id`
+  - `channel`
+  - `step`
+  - `status`
+  - `scheduled_at`
+  - `payload` (context)
+
+It:
+
+- Orchestrates multichannel (voice, email, WhatsApp/SMS).
+- Applies fallbacks:
+  - if voice fails → email
+  - if email bounces → SMS
+- Respects throttling and per-client rules.
+
+### 3.3 Appointments Engine & Reminders
+
+Manages bookings, reminders and outcomes.
+
+- `appointments` table:
+  - `id`
+  - `lead_id`
+  - `channel`
+  - `status` (scheduled, completed, no_show, cancelled)
+  - `outcome` (show, no_show, rescheduled, unqualified, cancelled)
+  - `scheduled_for` / `starts_at`
+
+- `appointments_notifications`:
+  - 24h, 1h and 10m reminders.
+  - Each reminder becomes a `touch_runs` record (`step` 200/201/202 with payload).
+
+- Triggers:
+  - `schedule_appointment_notifications(id)` after insert.
+  - `handle_appointment_outcome` → writes follow-up `touch_runs` (e.g. no-show follow-up).
+
+### 3.4 Director Engine (AGI-like layer, v1)
+
+This is the “AGI Director” you want:
+
+- Has access to:
+  - ICP definition.
+  - Lead data.
+  - Campaigns & performance.
+  - Appointments & show/no-show data.
+- Can:
+  - Propose new cadences.
+  - Adjust messaging.
+  - Flag broken campaigns.
+  - Recommend where to focus (which leads, which market, which offer).
+
+Implementation wise:
+
+- Director prompts stored in the repo.
+- Runs on OpenAI API when connected.
+- Writes back decisions as:
+  - `programs` / `playbooks`
+  - `campaigns`
+  - `director_events` / `core_memory_events`.
 
 ---
 
-## 5. Estado actual
+## 4. Data contracts
 
-- Este documento es la **fuente de verdad** del producto.
-- Google Docs es solo borrador; aquí va lo oficial.
-- Hasta que haya budget para API, seguimos:
-  - Refinando prompts.
-  - Refinando módulos.
-  - Definiendo esquemas de datos.
-  - Diseñando el CRM basado en chat.
+### 4.1 `lead_enriched` view (contract)
 
+`lead_enriched` is a SQL view that enriches leads with last touch and campaign metadata using **existing** tables:
 
-## lead_enriched — Contract
+- `leads`
+- `touch_runs`
+- `campaigns`
 
-`lead_enriched` es una vista SQL que enriquece los leads con el último touch y metadatos de campaña usando únicamente tablas existentes (`leads`, `touch_runs`, `campaigns`). Sirve como fuente principal para Leads Inbox y Leads Page.
+Exposed columns:
 
-Columnas expuestas:
-- `id` — Identificador del lead.
-- `full_name` — Nombre calculado combinando `lead_enriched.name`, `leads.contact_name` o `leads.company_name`.
-- `email` — Email del lead.
-- `phone` — Teléfono del lead.
-- `state` — Estado actual del lead.
-- `last_touch_at` — Fecha/hora del último touch.
-- `campaign_id` — Campaña del último touch.
-- `campaign_name` — Nombre de la campaña.
-- `channel_last` — Canal del último touch.
+- `id` — Lead ID.
+- `full_name` — Computed from `name`, `contact_name` or `company_name`.
+- `email`
+- `phone`
+- `state` — current lead state.
+- `last_touch_at` — timestamp of last relevant touch.
+- `campaign_id`
+- `campaign_name`
+- `channel_last` — last touch channel.
 
-Expectativa del Leads Inbox / Leads Page:
-- Consumir `supabase.from("lead_enriched").select("*")`.
-- Mostrar `state` como status y permitir filtros por este campo.
-- Usar `last_touch_at`, `campaign_name` y `channel_last` para contexto del último contacto.
-- Si la vista falla, caer a mocks y mostrar banner de error.
+Leads Inbox / Leads Page expectations:
+
+- Read from: `supabase.from("lead_enriched").select("*")`.
+- Display `state` as status (with filters).
+- Display `last_touch_at`, `campaign_name`, `channel_last` as context.
+- If the view fails, UI can fall back to mocks and show an error banner.
+
+### 4.2 `touch_runs`
+
+Execution log for the orchestrator.
+
+Key fields:
+
+- `id`
+- `lead_id`
+- `campaign_id`
+- `channel` (email, voice, whatsapp, sms)
+- `step` (integer, cadence step id)
+- `status` (queued, sent, failed, cancelled)
+- `scheduled_at`
+- `sent_at`
+- `payload` (jsonb: message, template, reason, kind)
+- `error`
+
+This feeds:
+
+- Lead timeline.
+- Director dashboard (volume / failures).
+- Operator cockpit.
+
+---
+
+## 5. Current status (reality check)
+
+### 5.1 Built & working (backend)
+
+- Lead state machine with triggers.
+- Touch orchestrator v4 (multi-channel, queued, using `touch_runs`).
+- Appointments engine + outcomes + reminders → reminders become `touch_runs`.
+- Cron-based dispatch for:
+  - campaign engine.
+  - enrichment.
+  - cadence / dispatch-touch.
+  - appointment notifications.
+- Views:
+  - `lead_enriched`
+  - `voice_insights_calls_v1`
+- Edge functions:
+  - campaign engine
+  - run-enrichment
+  - touch orchestrator
+  - dispatch appointment notifications.
+
+### 5.2 Built & working (UI)
+
+- Leads / Leads Inbox pages using `lead_enriched`.
+- Lead detail with timeline (touch-based, now showing cleaner previews).
+- Appointments dashboard:
+  - server-rendered bookings
+  - inline outcome buttons → `set_appointment_outcome` RPC.
+- Voice Insights page using `voice_insights_calls_v1`.
+- Director dashboard (PR) exposing:
+  - engine schedules.
+  - core KPIs (appointments, lead flow).
+
+### 5.3 Not wired yet / next
+
+- Twilio / voice agent (outbound & inbound hooks).
+- Elastic / email provider (sends, bounces, opens).
+- WhatsApp/SMS provider.
+- OpenAI Director fully connected to live data.
+- Multi-tenant boundaries (org_id / client_id everywhere).
+- Client-facing mini portal.
+
+---
+
+## 6. DEFCON-1 roadmap (build the real thing, not a toy)
+
+This is the **canonical plan** going forward.  
+
+We split the work in **4 blocks** that can be iterated fast:
+
+### Block 1 — Hardening & Observability (where we are now)
+
+Goal: make sure the brain never lies and we always know what’s happening.
+
+- Finalize Director dashboard:
+  - engine health (crons, queues, failures)
+  - appointments funnel
+  - lead state distribution
+- Normalize logging:
+  - all edge functions log to a central table (`core_memory_events` / similar).
+  - tags: engine, campaign_id, lead_id, appointment_id, error_code.
+- Stabilize:
+  - appointment reminders → `touch_runs` → timelines.
+  - outcome follow-ups (210/220 steps).
+
+### Block 2 — Providers & channels (make it talk for real)
+
+Goal: plug in the external world.
+
+- Twilio voice:
+  - outbound calls using `touch_runs`.
+  - webhooks for call status & recordings.
+- SMS / WhatsApp:
+  - same model, via provider of choice.
+- Email provider:
+  - unify send logic behind a single “SendEmail” edge function.
+  - track bounces & constraints per client.
+
+### Block 3 — Skin: Operator cockpit & light client portal
+
+Goal: make this **sellable**.
+
+- Operator cockpit:
+  - leads, inbox, timelines, appointments, tasks.
+  - filters by state, campaign, intent.
+- Client mini-portal:
+  - new leads
+  - booked appointments
+  - 3–5 KPIs only
+- Director dashboard polished:
+  - ready for demos and sales screenshare.
+
+### Block 4 — Multi-tenant + AGI Director v1
+
+Goal: turn this into an actual product, not a lab.
+
+- Add `org_id` / `client_id` everywhere.
+- Per-client limits and throttling.
+- Simple onboarding & billing hooks (Stripe or similar).
+- Director “AGI”:
+  - can read metrics and suggest:
+    - campaigns to pause.
+    - ICPs to double-down on.
+    - cadences to tweak.
+
+---
+
+## 7. How this compares to “flow-builder” tools (like n8n)
+
+Revenue ASI is **not** a drag-and-drop flow builder.
+
+It is:
+
+- A **productized** outbound machine:
+  - opinionated lead state machine.
+  - opinionated touch orchestrator.
+  - opinionated appointment engine.
+- A **Director AI** that:
+  - sees the whole funnel.
+  - writes and rewrites the strategy.
+- Built to handle:
+  - many clients,
+  - many campaigns,
+  - with logs, retries, and safety.
+
+Flow builders are great for prototyping.  
+Revenue ASI is designed for **owning the pipe** end-to-end.
+
+---

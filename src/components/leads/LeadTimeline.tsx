@@ -5,7 +5,14 @@ import { AlertTriangle, Clock4, Mail, PhoneCall, ServerCrash } from "lucide-reac
 
 import { supabaseBrowser } from "@/lib/supabase"
 import { Badge, Card, CardContent, CardHeader } from "@/components/ui-custom"
-import { channelLabel, fetchLeadTouchRuns, formatPreview, getWhen, statusVariant, type TouchRunRow } from "./timeline-utils"
+import {
+  channelLabel,
+  fetchLeadTouchRuns,
+  formatPreview,
+  getWhen,
+  statusVariant,
+  type TouchRunRow,
+} from "./timeline-utils"
 
 type LeadTimelineProps = {
   leadId: string
@@ -105,7 +112,7 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
 
       if (dbError) {
         console.error(dbError)
-        setError("No se pudo obtener el timeline de touch_runs para el lead")
+        setError("No se pudo obtener el timeline de touch_runs para el lead.")
         setTouches([])
         setLoading(false)
         return
@@ -125,7 +132,7 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
     <Card>
       <CardHeader
         title={`Timeline de ${leadName ?? leadId}`}
-        description="Eventos recientes de touch_runs ordenados por envío o creación"
+        description="Eventos recientes de touch_runs ordenados por envío o creación."
       />
       <CardContent className="space-y-4">
         {error ? (
@@ -149,27 +156,37 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
                 key={touch.id}
                 className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/5 p-4 shadow-[0_8px_30px_rgba(0,0,0,0.3)]"
               >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 text-white">
-                      <div className="rounded-full bg-white/10 p-2 text-emerald-300">{channelIcon(touch.channel)}</div>
-                      <div>
-                        <p className="font-semibold">{channelLabel[touch.channel ?? ""] ?? "Evento"}</p>
-                        <p className="text-xs text-white/60">Paso #{touch.step ?? "—"}</p>
-                      </div>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-white">
+                    <div className="rounded-full bg-white/10 p-2 text-emerald-300">
+                      {channelIcon(touch.channel)}
                     </div>
-                    <div className="flex items-center gap-2">
-                      <Badge variant={statusVariant(touch.status)} className="capitalize">
-                        {touch.status ?? "Sin estado"}
-                      </Badge>
-                      <span className="text-xs text-white/60">{timestamp}</span>
+                    <div>
+                      <p className="font-semibold">
+                        {channelLabel[touch.channel ?? ""] ?? "Evento"}
+                      </p>
+                      <p className="text-xs text-white/60">
+                        Paso #{touch.step ?? "—"}
+                      </p>
                     </div>
                   </div>
+                  <div className="flex items-center gap-2">
+                    <Badge variant={statusVariant(touch.status)} className="capitalize">
+                      {touch.status ?? "Sin estado"}
+                    </Badge>
+                    <span className="text-xs text-white/60">{timestamp}</span>
+                  </div>
+                </div>
 
-                  <div className="space-y-1 text-sm text-white/80">
-                    <div className="flex items-start gap-2">
-                      <span className="text-xs uppercase tracking-[0.14em] text-white/50">Payload</span>
-                      <span className="flex-1 break-words text-white/80">{formatPreview(touch.payload)}</span>
-                    </div>
+                <div className="space-y-1 text-sm text-white/80">
+                  <div className="flex items-start gap-2">
+                    <span className="text-xs uppercase tracking-[0.14em] text-white/50">
+                      Payload
+                    </span>
+                    <span className="flex-1 break-words text-white/80">
+                      {formatPreview(touch.payload)}
+                    </span>
+                  </div>
                   {touch.error ? (
                     <div className="flex items-start gap-2 text-amber-200">
                       <ServerCrash size={16} />

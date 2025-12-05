@@ -4,22 +4,24 @@ import React, { useEffect, useMemo, useState } from "react"
 import {
   AlertTriangle,
   ArrowLeft,
-  Clock4,
-  Mail,
   PhoneCall,
-  ServerCrash,
+  Mail,
+  Clock4
 } from "lucide-react"
 import { useParams, useRouter } from "next/navigation"
 
+import { supabaseBrowser } from "@/lib/supabase"
+import { LeadTimeline } from "@/components/leads/LeadTimeline"
+
 import {
-  channelLabel,
   fetchLeadTouchRuns,
   formatPreview,
   getWhen,
   statusVariant,
+  channelLabel,         // 👈 AQUI ESTÁ EL FALTANTE
   type TouchRunRow,
 } from "@/components/leads/timeline-utils"
-import { supabaseBrowser } from "@/lib/supabase"
+
 import {
   Badge,
   Button,
@@ -32,6 +34,7 @@ import {
   TableHeaderCell,
   TableRow,
 } from "@/components/ui-custom"
+
 import { StatCard } from "@/components/ui-custom/stat-card"
 
 const timeFormatter = new Intl.DateTimeFormat("en-US", {
@@ -392,78 +395,19 @@ export default function LeadDetailPage() {
         </Card>
       ) : null}
 
-      {/* Timeline */}
-      {!loading && steps.length > 0 ? (
-        <div className="space-y-6">
-          {grouped.map((group) => (
-            <div key={group.date} className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold text-white">
-                  {group.label} — {group.items.length} touches
-                </h3>
-              </div>
-              <Table>
-                <TableHead>
-                  <tr>
-                    <TableHeaderCell>Hora</TableHeaderCell>
-                    <TableHeaderCell>Paso</TableHeaderCell>
-                    <TableHeaderCell>Canal</TableHeaderCell>
-                    <TableHeaderCell>Estado</TableHeaderCell>
-                    <TableHeaderCell>Preview</TableHeaderCell>
-                    <TableHeaderCell>Error</TableHeaderCell>
-                  </tr>
-                </TableHead>
-                <TableBody>
-                  {group.items.map((item) => (
-                    <TableRow key={item.id}>
-                      <TableCell className="whitespace-nowrap text-white/70">
-                        {item.timeLabel}
-                      </TableCell>
-                      <TableCell className="text-white">
-                        #{item.step ?? "—"}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-2 text-white">
-                          <span className="rounded-full bg-white/5 p-2 text-emerald-300">
-                            {channelIcon(item.channel)}
-                          </span>
-                          <Badge
-                            variant={channelBadgeVariant(item.channel)}
-                            className="capitalize"
-                          >
-                            {channelLabel[item.channel ?? ""] ?? "Canal"}
-                          </Badge>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={statusVariant(item.status)}
-                          className="capitalize"
-                        >
-                          {item.status ?? "Sin estado"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-white/80">
-                        {item.preview}
-                      </TableCell>
-                      <TableCell className="text-sm text-red-200">
-                        {item.error ? (
-                          <span className="flex items-center gap-2">
-                            <ServerCrash size={16} />
-                            {item.error}
-                          </span>
-                        ) : (
-                          "—"
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          ))}
-        </div>
-      ) : null}
+           {/* Timeline unificado de actividad del lead */}
+           <div className="mt-6">
+        <LeadTimeline
+          leadId={leadId}
+          leadName={
+            lead?.contact_name ??
+            lead?.company_name ??
+            lead?.email ??
+            undefined
+          }
+        />
+      </div>
     </div>
   )
 }
+
