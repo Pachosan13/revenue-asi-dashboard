@@ -22,6 +22,7 @@ import {
   channelLabel,         // 👈 AQUI ESTÁ EL FALTANTE
   type TouchRunRow,
 } from "@/components/leads/timeline-utils"
+<<<<<<< HEAD
 
 =======
   describeAppointmentOutcome,
@@ -30,6 +31,14 @@ import {
 } from "@/components/leads/lead-activity-labels"
 import { touchRunSelect, type TouchRunRow } from "@/components/leads/timeline-utils"
 >>>>>>> origin/codex/implement-lead-detail-timeline-2.0
+=======
+import {
+  AppointmentStatusBadge,
+  IntentBadge,
+  LeadStateBadge,
+} from "@/components/leads/badges"
+import { supabaseBrowser } from "@/lib/supabase"
+>>>>>>> origin/director-engine-core
 import {
   Badge,
   Button,
@@ -96,6 +105,7 @@ function deriveLeadSubtitle(lead: LeadDetail | null) {
   return `${email} · ${phone}`
 }
 
+<<<<<<< HEAD
 function appointmentTime(appt: AppointmentRow) {
   return appt.starts_at ?? appt.scheduled_for ?? appt.created_at
 }
@@ -114,6 +124,195 @@ function mapTouchRuns(touchRuns: TouchRunRow[]): LeadTimelineEvent[] {
       description,
       status: touch.status,
       meta: touch.meta ?? undefined,
+=======
+type VoiceCall = {
+  id: string
+  status: string | null
+  provider_call_id: string | null
+  meta: Record<string, unknown> | null
+  updated_at: string
+}
+
+type Appointment = {
+  id: string
+  scheduled_for: string
+  status: string
+  channel: string | null
+  created_by: string | null
+}
+
+type LeadEvent = {
+  id: string
+  event_type: string
+  payload: Record<string, unknown> | null
+  created_at: string
+}
+
+export default function LeadDetailPage() {
+  const params = useParams<{ id: string }>()
+  const router = useRouter()
+  const leadId = params?.id ?? ""
+
+  const supabaseReady = useMemo(
+    () =>
+      Boolean(
+        process.env.NEXT_PUBLIC_SUPABASE_URL &&
+          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+      ),
+    [],
+  )
+
+  const [lead, setLead] = useState<LeadRecord | null>(null)
+  const [steps, setSteps] = useState<NormalizedStep[]>([])
+  const [voiceCalls, setVoiceCalls] = useState<VoiceCall[]>([])
+  const [appointments, setAppointments] = useState<Appointment[]>([])
+  const [leadEvents, setLeadEvents] = useState<LeadEvent[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [usingMock, setUsingMock] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+
+    async function loadLead() {
+      if (!leadId) return
+
+      setLoading(true)
+      setError(null)
+
+      const isMockId = leadId.startsWith("MOCK-")
+
+      // 🔹 Modo mock (IDs MOCK-xxxx o sin Supabase)
+      if (!supabaseReady || isMockId) {
+        if (!alive) return
+
+        setLead({
+          id: leadId,
+          full_name: "Sin nombre",
+          email: null,
+          phone: null,
+          state: null,
+          last_touch_at: null,
+          channel_last: null,
+        })
+        setSteps([])
+        setVoiceCalls([])
+        setAppointments([])
+        setLeadEvents([])
+        setUsingMock(true)
+        setLoading(false)
+        return
+      }
+
+      // 🔹 Flujo real (UUIDs con Supabase)
+      const client = supabaseBrowser()
+
+      try {
+        const [
+          { data: enriched, error: enrichedError },
+          stepsResult,
+          voiceResult,
+          appointmentsResult,
+          eventsResult,
+        ] = await Promise.all([
+          client
+            .from("lead_enriched")
+            .select(
+              "id, full_name, email, phone, state, last_touch_at, channel_last",
+            )
+            .eq("id", leadId)
+            .maybeSingle(),
+          fetchLeadTouchRuns(client, leadId),
+          client
+            .from("voice_calls")
+            .select("id, status, provider_call_id, meta, updated_at")
+            .eq("lead_id", leadId)
+            .order("updated_at", { ascending: false })
+            .limit(20),
+          client
+            .from("appointments")
+            .select("id, scheduled_for, status, channel, created_by")
+            .eq("lead_id", leadId)
+            .order("scheduled_for", { ascending: false })
+            .limit(20),
+          client
+            .from("lead_events")
+            .select("id, event_type, payload, created_at")
+            .eq("lead_id", leadId)
+            .order("created_at", { ascending: false })
+            .limit(50),
+        ])
+
+        if (!alive) return
+
+        if (enrichedError) {
+          console.warn("lead_enriched error", enrichedError)
+        }
+
+        const { data: stepsData, error: stepsError } = stepsResult
+
+        if (stepsError) {
+          console.error("touch_runs error", stepsError)
+          setError(
+            "No se pudo obtener el timeline de touch_runs para este lead. Revisa la configuración o intenta más tarde.",
+          )
+        }
+
+        if (enriched) {
+          setLead({
+            id: enriched.id,
+            full_name: enriched.full_name ?? null,
+            email: enriched.email ?? null,
+            phone: enriched.phone ?? null,
+            state: enriched.state ?? null,
+            last_touch_at: enriched.last_touch_at ?? null,
+            channel_last: enriched.channel_last ?? null,
+          })
+        } else {
+          setLead({
+            id: leadId,
+            full_name: "Sin nombre",
+            email: null,
+            phone: null,
+            state: null,
+            last_touch_at: null,
+            channel_last: null,
+          })
+        }
+
+        setSteps(
+          stepsError || !stepsData
+            ? []
+            : normalizeSteps(stepsData as TouchRunRow[]),
+        )
+        if (voiceResult.error) {
+          console.error(voiceResult.error)
+        }
+
+        if (appointmentsResult.error) {
+          console.error(appointmentsResult.error)
+        }
+
+        if (eventsResult.error) {
+          console.error(eventsResult.error)
+        }
+
+        setVoiceCalls((voiceResult.data ?? []) as VoiceCall[])
+        setAppointments((appointmentsResult.data ?? []) as Appointment[])
+        setLeadEvents((eventsResult.data ?? []) as LeadEvent[])
+        setUsingMock(false)
+      } catch (e) {
+        if (!alive) return
+        console.error("loadLead unexpected error", e)
+        setError(
+          "No se pudo obtener el timeline de touch_runs para este lead. Revisa la configuración o vuelve a intentar.",
+        )
+        setSteps([])
+      } finally {
+        if (!alive) return
+        setLoading(false)
+      }
+>>>>>>> origin/director-engine-core
     }
   })
 }
@@ -151,6 +350,7 @@ function mapAppointmentOutcomes(appointments: AppointmentRow[]): LeadTimelineEve
         ? `Outcome for appointment on ${formatted}`
         : "Appointment outcome updated"
 
+<<<<<<< HEAD
       return {
         id: `appointment-outcome-${appointment.id}`,
         occurredAt: when,
@@ -162,6 +362,27 @@ function mapAppointmentOutcomes(appointments: AppointmentRow[]): LeadTimelineEve
         status: appointment.outcome,
         meta: { appointmentId: appointment.id },
       }
+=======
+  const cadenceStopped = steps.some(
+    (step) => step.status === "stopped" && step.error === "appointment_created",
+  )
+
+  const grouped = useMemo(() => {
+    const groups = new Map<
+      string,
+      { date: string; label: string; items: NormalizedStep[] }
+    >()
+
+    steps.forEach((step) => {
+      const group =
+        groups.get(step.dateKey) ?? {
+          date: step.dateKey,
+          label: step.dateLabel,
+          items: [] as NormalizedStep[],
+        }
+      group.items.push(step)
+      groups.set(step.dateKey, group)
+>>>>>>> origin/director-engine-core
     })
 }
 
@@ -289,12 +510,23 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
+<<<<<<< HEAD
           <Link href="/leads-inbox">
             <Button variant="outline" size="sm">
               <span className="sr-only">Back to leads</span>
               Back
             </Button>
           </Link>
+=======
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => router.push("/leads")}
+          >
+            <ArrowLeft size={16} />
+            Back
+          </Button>
+>>>>>>> origin/director-engine-core
           <div>
             <p className="text-sm uppercase tracking-[0.16em] text-white/50">Lead</p>
             <h1 className="text-3xl font-semibold text-white">Lead timeline</h1>
@@ -348,11 +580,181 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
         </CardContent>
       </Card>
 
+<<<<<<< HEAD
       <div className="grid gap-4 md:grid-cols-3">
         <StatCard label="Total activity" value={events.length.toString()} helper="Touches, appointments and reminders" />
         <StatCard label="Touch runs" value={stats.touches.toString()} helper="touch_runs registrados" />
         <StatCard label="Appointments" value={stats.appointments.toString()} helper="Incluye outcomes y reminders" />
       </div>
+=======
+      {/* Voice & appointments */}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardContent className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.14em] text-white/50">Voice</p>
+                <h3 className="text-lg font-semibold text-white">Voice history</h3>
+              </div>
+              <Badge variant="outline" className="gap-2 text-white/70">
+                <Clock4 size={14} /> Last {voiceCalls.length} calls
+              </Badge>
+            </div>
+            {voiceCalls.length === 0 ? (
+              <p className="text-sm text-white/60">No voice calls yet.</p>
+            ) : (
+              <div className="overflow-auto">
+                <Table>
+                  <TableHead>
+                    <tr>
+                      <TableHeaderCell>Date</TableHeaderCell>
+                      <TableHeaderCell>Status</TableHeaderCell>
+                      <TableHeaderCell>Intent</TableHeaderCell>
+                      <TableHeaderCell>Transcript</TableHeaderCell>
+                      <TableHeaderCell>Provider ID</TableHeaderCell>
+                    </tr>
+                  </TableHead>
+                  <TableBody>
+                    {voiceCalls.map((call) => {
+                      const voiceWebhook =
+                        (call.meta as { voice_webhook?: { transcript?: string; intent?: string } } | null)
+                          ?.voice_webhook ?? null
+                      const transcript = voiceWebhook?.transcript ?? "—"
+                      const intent =
+                        voiceWebhook?.intent ??
+                        (call.meta as { intent?: string } | null)?.intent ??
+                        "unknown"
+                      return (
+                        <TableRow key={call.id}>
+                          <TableCell className="whitespace-nowrap text-white/70">
+                            {call.updated_at ? new Date(call.updated_at).toLocaleString() : "—"}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={statusVariant(call.status)} className="capitalize">
+                              {call.status ?? "—"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <IntentBadge intent={intent} />
+                          </TableCell>
+                          <TableCell className="max-w-md text-white/80">
+                            {transcript ? `${transcript.slice(0, 120)}${transcript.length > 120 ? "…" : ""}` : "—"}
+                          </TableCell>
+                          <TableCell className="text-white/60 text-sm">{call.provider_call_id ?? "—"}</TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="space-y-3">
+            <div className="space-y-1">
+              <p className="text-xs uppercase tracking-[0.14em] text-white/50">State</p>
+              <h3 className="text-lg font-semibold text-white">State & cadence</h3>
+            </div>
+            <div className="flex items-center gap-3">
+              <LeadStateBadge state={lead?.state} />
+              <Badge variant="outline" className="gap-2 text-white/70">
+                <Clock4 size={14} /> {lead?.last_touch_at ? new Date(lead.last_touch_at).toLocaleString() : "No touches"}
+              </Badge>
+            </div>
+            {cadenceStopped ? (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                Cadence stopped because an appointment was created.
+              </div>
+            ) : (
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+                Cadence active.
+              </div>
+            )}
+            <div className="space-y-2">
+              <p className="text-xs uppercase tracking-[0.14em] text-white/50">Appointments</p>
+              {appointments.length === 0 ? (
+                <p className="text-sm text-white/60">No appointments yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {appointments.map((appt) => (
+                    <div
+                      key={appt.id}
+                      className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+                    >
+                      <div>
+                        <p className="text-sm text-white/80">
+                          {appt.scheduled_for
+                            ? new Date(appt.scheduled_for).toLocaleString()
+                            : "Unknown"}
+                        </p>
+                        <p className="text-xs text-white/50">
+                          Channel: {appt.channel ?? "—"} · {appt.created_by ?? "—"}
+                        </p>
+                      </div>
+                      <AppointmentStatusBadge status={appt.status} />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardContent className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-[0.14em] text-white/50">Events</p>
+              <h3 className="text-lg font-semibold text-white">Recent events</h3>
+            </div>
+            <Badge variant="outline" className="text-white/70">
+              Last {leadEvents.length} events
+            </Badge>
+          </div>
+          {leadEvents.length === 0 ? (
+            <p className="text-sm text-white/60">No events logged for this lead.</p>
+          ) : (
+            <div className="overflow-auto">
+              <Table>
+                <TableHead>
+                  <tr>
+                    <TableHeaderCell>Type</TableHeaderCell>
+                    <TableHeaderCell>Payload</TableHeaderCell>
+                    <TableHeaderCell>When</TableHeaderCell>
+                  </tr>
+                </TableHead>
+                <TableBody>
+                  {leadEvents.map((event) => (
+                    <TableRow key={event.id}>
+                      <TableCell className="capitalize text-white">{event.event_type}</TableCell>
+                      <TableCell className="max-w-xl text-white/80">
+                        <pre className="whitespace-pre-wrap text-xs text-white/60">
+                          {JSON.stringify(event.payload ?? {}, null, 2)}
+                        </pre>
+                      </TableCell>
+                      <TableCell className="text-white/60">
+                        {new Date(event.created_at).toLocaleString()}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Loading skeleton */}
+      {loading && !usingMock ? (
+        <div className="space-y-3">
+          <div className="h-10 animate-pulse rounded-xl bg-white/5" />
+          <div className="h-52 animate-pulse rounded-2xl bg-white/5" />
+          <div className="h-32 animate-pulse rounded-2xl bg-white/5" />
+        </div>
+      ) : null}
+>>>>>>> origin/director-engine-core
 
       <LeadActivityTimeline events={events} />
     </div>

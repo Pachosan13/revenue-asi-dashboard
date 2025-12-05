@@ -59,7 +59,11 @@ async function fetchAppointments() {
     return { appointments: [] as AppointmentWithLead[], error: "Unable to fetch appointments." }
   }
 
+<<<<<<< HEAD
   const rows = (data ?? []) as unknown as AppointmentRow[]
+=======
+  const rows = (data ?? []) as AppointmentRow[]
+>>>>>>> origin/director-engine-core
 
   const appointments: AppointmentWithLead[] = rows.map((row) => ({
     id: row.id,
@@ -149,6 +153,7 @@ export default async function AppointmentsPage() {
                         <TableCell>
                           <AppointmentOutcomeButtons
                             appointmentId={appointment.id}
+<<<<<<< HEAD
                             currentOutcome={
                               appointment.outcome === "attended"
                                 ? "show"
@@ -156,6 +161,9 @@ export default async function AppointmentsPage() {
                                   ? "no_show"
                                   : null
                             }
+=======
+                            initialOutcome={appointment.outcome}
+>>>>>>> origin/director-engine-core
                           />
                         </TableCell>
                       </TableRow>

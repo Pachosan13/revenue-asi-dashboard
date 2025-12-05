@@ -75,6 +75,7 @@ const dateFormatter = new Intl.DateTimeFormat("en-US", {
 })
 
 export default function VoiceInsightsPage() {
+<<<<<<< HEAD
   const supabaseReady = useMemo(
     () =>
       Boolean(
@@ -82,6 +83,10 @@ export default function VoiceInsightsPage() {
           process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
       ),
     [],
+=======
+  const supabaseReady = Boolean(
+    process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+>>>>>>> origin/director-engine-core
   )
 
   const [calls, setCalls] = useState<VoiceCall[]>([])
@@ -114,8 +119,13 @@ export default function VoiceInsightsPage() {
 
       const client = supabaseBrowser()
 
+<<<<<<< HEAD
       // 🔹 Vista consolidada para llamadas de voz
       const { data: callsData, error: callsError } = await client
+=======
+      const { data: callsData, error: callsError } = await client
+        // use view backed by public.calls to ensure consistent shape
+>>>>>>> origin/director-engine-core
         .from("voice_insights_calls_v1")
         .select(
           "id, lead_id, touch_run_id, status, provider, provider_call_id, to_phone, meta, updated_at",
@@ -124,7 +134,10 @@ export default function VoiceInsightsPage() {
         .limit(100)
 
       if (!alive) return
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
       if (callsError) {
         console.error(callsError)
         setError("Unable to fetch voice calls.")
@@ -189,6 +202,7 @@ export default function VoiceInsightsPage() {
         console.error(touchRunsResult.error)
       }
 
+<<<<<<< HEAD
       const leadMap = (leadsResult.data ?? []).reduce(
         (acc, lead) => {
           acc[lead.id] = lead as Lead
@@ -196,6 +210,12 @@ export default function VoiceInsightsPage() {
         },
         {} as Record<string, Lead>,
       )
+=======
+      const leadMap = (leadsResult.data ?? []).reduce((acc, lead) => {
+        acc[lead.id] = lead as Lead
+        return acc
+      }, {} as Record<string, Lead>)
+>>>>>>> origin/director-engine-core
 
       setLeads(leadMap)
       setEvents((eventsResult.data ?? []) as LeadEvent[])
@@ -204,7 +224,11 @@ export default function VoiceInsightsPage() {
       setLoading(false)
     }
 
+<<<<<<< HEAD
     void loadData()
+=======
+    loadData()
+>>>>>>> origin/director-engine-core
 
     return () => {
       alive = false
@@ -213,6 +237,7 @@ export default function VoiceInsightsPage() {
 
   const appointmentByLead = useMemo(() => {
     const now = new Date()
+<<<<<<< HEAD
     return appointments.reduce(
       (acc, appt) => {
         if (appt.status === "scheduled" && new Date(appt.scheduled_for) >= now) {
@@ -222,6 +247,14 @@ export default function VoiceInsightsPage() {
       },
       {} as Record<string, Appointment>,
     )
+=======
+    return appointments.reduce((acc, appt) => {
+      if (appt.status === "scheduled" && new Date(appt.scheduled_for) >= now) {
+        acc[appt.lead_id] = appt
+      }
+      return acc
+    }, {} as Record<string, Appointment>)
+>>>>>>> origin/director-engine-core
   }, [appointments])
 
   const cadenceStoppedByLead = useMemo(() => {
@@ -240,13 +273,19 @@ export default function VoiceInsightsPage() {
         (call.meta as { voice_webhook?: { transcript?: string } } | null)
           ?.voice_webhook ?? null
       const transcript = voiceWebhook?.transcript
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
       const relevantEvent = events.find(
         (event) =>
           event.lead_id === call.lead_id &&
           event.event_type.startsWith("voice_"),
       )
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
       const intent =
         (relevantEvent?.payload as { intent?: string } | null)?.intent ??
         (call.meta as { intent?: string } | null)?.intent
@@ -268,7 +307,10 @@ export default function VoiceInsightsPage() {
       if (appointmentFilter === "no" && row.hasAppointment) return false
       if (cadenceFilter === "stopped" && !row.cadenceStopped) return false
       if (cadenceFilter === "active" && row.cadenceStopped) return false
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
       if (search) {
         const lead = leads[row.lead_id]
         const haystack = `${lead?.contact_name ?? ""} ${lead?.company ?? ""} ${
@@ -276,14 +318,20 @@ export default function VoiceInsightsPage() {
         } ${lead?.phone ?? ""}`.toLowerCase()
         if (!haystack.includes(search.toLowerCase())) return false
       }
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
       return true
     })
   }, [appointmentFilter, callRows, cadenceFilter, intentFilter, leads, search])
 
   return (
     <div className="space-y-6">
+<<<<<<< HEAD
       {/* Header */}
+=======
+>>>>>>> origin/director-engine-core
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm uppercase tracking-[0.16em] text-white/50">
@@ -293,7 +341,12 @@ export default function VoiceInsightsPage() {
             Voice & intents monitor
           </h1>
           <p className="text-white/60">
+<<<<<<< HEAD
             Latest 100 voice calls with transcript previews, intent signals, and appointment status.
+=======
+            Latest 100 voice calls with transcript previews, intent signals,
+            and appointment status.
+>>>>>>> origin/director-engine-core
           </p>
         </div>
         <div className="flex gap-2">
@@ -312,7 +365,10 @@ export default function VoiceInsightsPage() {
         </div>
       </div>
 
+<<<<<<< HEAD
       {/* Filters + search */}
+=======
+>>>>>>> origin/director-engine-core
       <Card>
         <CardContent className="space-y-4">
           <div className="flex flex-wrap items-center gap-3">
@@ -320,7 +376,10 @@ export default function VoiceInsightsPage() {
               <Filter size={16} />
               <span>Filters</span>
             </div>
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
             <Select
               value={intentFilter}
               onChange={(e) => setIntentFilter(e.target.value as IntentFilter)}
@@ -330,7 +389,10 @@ export default function VoiceInsightsPage() {
               <option value="appointment">Appointment</option>
               <option value="unknown">Unknown</option>
             </Select>
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
             <Select
               value={appointmentFilter}
               onChange={(e) =>
@@ -342,7 +404,10 @@ export default function VoiceInsightsPage() {
               <option value="yes">Has upcoming</option>
               <option value="no">No appointment</option>
             </Select>
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
             <Select
               value={cadenceFilter}
               onChange={(e) =>
@@ -354,7 +419,10 @@ export default function VoiceInsightsPage() {
               <option value="stopped">Stopped</option>
               <option value="active">Active</option>
             </Select>
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
             <Input
               placeholder="Search lead/company/email/phone"
               value={search}
@@ -371,7 +439,12 @@ export default function VoiceInsightsPage() {
 
           {loading ? (
             <div className="flex items-center gap-2 text-white/60">
+<<<<<<< HEAD
               <Loader2 className="h-4 w-4 animate-spin" /> Loading voice calls...
+=======
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading voice
+              calls...
+>>>>>>> origin/director-engine-core
             </div>
           ) : null}
 
@@ -399,20 +472,32 @@ export default function VoiceInsightsPage() {
                 <TableBody>
                   {filtered.map((row) => {
                     const lead = leads[row.lead_id]
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
                     const voiceWebhook =
                       (row.meta as {
                         voice_webhook?: { transcript?: string }
                       } | null)?.voice_webhook ?? null
                     const transcriptPreview =
+<<<<<<< HEAD
                       (row as any).transcript ?? voiceWebhook?.transcript ?? ""
 
+=======
+                      (row as any).transcript ??
+                      voiceWebhook?.transcript ??
+                      ""
+>>>>>>> origin/director-engine-core
                     const preview = transcriptPreview
                       ? `${transcriptPreview.slice(0, 140)}${
                           transcriptPreview.length > 140 ? "…" : ""
                         }`
                       : "—"
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/director-engine-core
                     const updated = new Date(row.updated_at)
                     const appointment = appointmentByLead[row.lead_id]
 
