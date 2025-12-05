@@ -2,22 +2,15 @@
 
 import React, { useMemo, useState } from "react"
 import { usePathname } from "next/navigation"
-import { Menu, X, Home, Mails, Send, Activity, FlaskConical, Settings } from "lucide-react"
+import { Menu, X, Home, Mails, Send, Activity, FlaskConical, Settings, CalendarDays } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button, Input } from "@/components/ui-custom"
 
 const navItems = [
   { label: "Dashboard", href: "/dashboard", icon: Home, subtitle: "Operating picture" },
-const navItems = [
-  { label: "Dashboard", href: "/dashboard", icon: Home, subtitle: "Operating picture" },
   { label: "Leads Inbox", href: "/leads-inbox", icon: Mails, subtitle: "Inbox & actions" },
   { label: "Voice Insights", href: "/voice-insights", icon: Activity, subtitle: "Calls & intents" },
-  { label: "Appointments", href: "/appointments", icon: Send, subtitle: "Bookings" },
-  { label: "Campaigns", href: "/campaigns", icon: Send, subtitle: "Outbound" },
-  { label: "Prompt Lab", href: "/prompt-lab", icon: FlaskConical, subtitle: "Experiments" },
-  { label: "Health", href: "/health", icon: Activity, subtitle: "Systems" },
-  { label: "Settings", href: "/settings", icon: Settings, subtitle: "Org" },
-]
+  { label: "Appointments", href: "/appointments", icon: CalendarDays, subtitle: "Bookings" },
   { label: "Campaigns", href: "/campaigns", icon: Send, subtitle: "Outbound" },
   { label: "Prompt Lab", href: "/prompt-lab", icon: FlaskConical, subtitle: "Experiments" },
   { label: "Health", href: "/health", icon: Activity, subtitle: "Systems" },
