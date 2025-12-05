@@ -2,11 +2,26 @@
 
 import React, { useMemo, useState } from "react"
 import { usePathname } from "next/navigation"
+<<<<<<< HEAD
 import { Menu, X, Home, Mails, Send, Activity, FlaskConical, Settings, Crown } from "lucide-react"
+=======
+import {
+  Activity,
+  FlaskConical,
+  Home,
+  Mails,
+  Send,
+  Settings,
+  CalendarDays,
+  X,
+  Menu,
+} from "lucide-react";
+>>>>>>> origin/plan-joe-dashboard-v1
 import { cn } from "@/lib/utils"
 import { Button, Input } from "@/components/ui-custom"
 
 const navItems = [
+<<<<<<< HEAD
   { label: "Dashboard", href: "/dashboard", icon: Home, subtitle: "Operating picture" },
   { label: "Director Console", href: "/director", icon: Crown, subtitle: "CEO overview" },
   { label: "Leads Inbox", href: "/leads-inbox", icon: Mails, subtitle: "Inbox & actions" },
@@ -15,6 +30,57 @@ const navItems = [
   { label: "Health", href: "/health", icon: Activity, subtitle: "Systems" },
   { label: "Settings", href: "/settings", icon: Settings, subtitle: "Org" },
 ]
+=======
+  {
+    label: "Dashboard",
+    href: "/dashboard",
+    icon: Home,
+    subtitle: "Operating picture",
+  },
+  {
+    label: "Leads",
+    href: "/leads",
+    icon: Mails,
+    subtitle: "Pipeline & actions",
+  },
+  {
+    label: "Appointments",
+    href: "/appointments",
+    icon: CalendarDays,
+    subtitle: "Bookings & outcomes",
+  },
+  {
+    label: "Voice Insights",
+    href: "/voice-insights",
+    icon: Activity,
+    subtitle: "Calls & intents",
+  },
+  {
+    label: "Campaigns",
+    href: "/campaigns",
+    icon: Send,
+    subtitle: "Outbound",
+  },
+  {
+    label: "Prompt Lab",
+    href: "/prompt-lab",
+    icon: FlaskConical,
+    subtitle: "Experiments",
+  },
+  {
+    label: "Health",
+    href: "/health",
+    icon: Activity,
+    subtitle: "Systems",
+  },
+  {
+    label: "Settings",
+    href: "/settings",
+    icon: Settings,
+    subtitle: "Org",
+  },
+];
+>>>>>>> origin/plan-joe-dashboard-v1
 
 export function AppShell({ children }: React.PropsWithChildren) {
   const pathname = usePathname()

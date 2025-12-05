@@ -31,13 +31,15 @@ export function TableBody({ children }: React.PropsWithChildren) {
   return <tbody className="divide-y divide-white/5">{children}</tbody>
 }
 
-export function TableRow({ children, className, ...props }: React.HTMLAttributes<HTMLTableRowElement>) {
-  return (
-    <tr className={cn("transition hover:bg-white/5", className)} {...props}>
+export const TableRow = React.forwardRef<HTMLTableRowElement, React.HTMLAttributes<HTMLTableRowElement>>(
+  ({ children, className, ...props }, ref) => (
+    <tr ref={ref} className={cn("transition hover:bg-white/5", className)} {...props}>
       {children}
     </tr>
-  )
-}
+  ),
+)
+
+TableRow.displayName = "TableRow"
 
 export function TableCell({ children, className, ...props }: React.TdHTMLAttributes<HTMLTableCellElement>) {
   return (

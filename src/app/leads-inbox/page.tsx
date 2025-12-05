@@ -1,23 +1,71 @@
 "use client"
 
-import React, { useEffect, useMemo, useState } from "react"
+import React, { useCallback, useEffect, useMemo, useState } from "react"
 import { AlertTriangle, RefreshCw } from "lucide-react"
+
 import { supabaseBrowser } from "@/lib/supabase"
+<<<<<<< HEAD
 import { Card, CardContent, CardHeader, Input, Badge, Button } from "@/components/ui-custom"
 import type { LeadEnriched, LeadState } from "@/types/lead"
+=======
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  Input,
+} from "@/components/ui-custom"
+import type { LeadEnriched } from "@/types/lead"
+>>>>>>> origin/plan-joe-dashboard-v1
 import { LeadInboxTable, type LeadInboxEntry } from "@/components/leads/LeadInboxTable"
 
+type LeadState =
+  | "New"
+  | "Enriched"
+  | "Attempting"
+  | "Engaged"
+  | "Qualified"
+  | "Booked"
+  | "Dead"
+  | string
+
+type InboxRow = {
+  lead_id: string
+  lead_name: string | null
+  lead_email: string | null
+  lead_phone: string | null
+  lead_state: LeadState | null
+  last_step_at: string | null
+  campaign_id: string | null
+  campaign_name: string | null
+  channel_last: string | null
+  created_at: string | null
+}
+
+const PAGE_SIZE = 25
+
 const REQUIRED_FIELDS = [
+<<<<<<< HEAD
   "id",
   "name/full_name",
   "email",
   "phone",
   "state",
   "last_touch_at",
+=======
+  "lead_id",
+  "lead_name",
+  "lead_email",
+  "lead_phone",
+  "lead_state",
+  "last_step_at",
+>>>>>>> origin/plan-joe-dashboard-v1
   "campaign_id/name",
   "channel_last",
 ]
 
+<<<<<<< HEAD
 const STATE_FILTERS: (LeadState | "All")[] = [
   "All",
   "new",
@@ -27,6 +75,17 @@ const STATE_FILTERS: (LeadState | "All")[] = [
   "qualified",
   "booked",
   "dead",
+=======
+const STATE_FILTERS = [
+  { label: "All", value: "all" },
+  { label: "New", value: "new" },
+  { label: "Enriched", value: "enriched" },
+  { label: "Attempting", value: "attempting" },
+  { label: "Engaged", value: "engaged" },
+  { label: "Qualified", value: "qualified" },
+  { label: "Booked", value: "booked" },
+  { label: "Dead", value: "dead" },
+>>>>>>> origin/plan-joe-dashboard-v1
 ]
 
 const MOCK_LEADS: LeadInboxEntry[] = [
@@ -47,7 +106,11 @@ const MOCK_LEADS: LeadInboxEntry[] = [
     name: "Carlos Soto",
     email: "carlos.soto@example.com",
     phone: "+34 600 333 444",
+<<<<<<< HEAD
     state: "attempting",
+=======
+    status: "Attempting",
+>>>>>>> origin/plan-joe-dashboard-v1
     last_touch_at: "2024-11-01T16:45:00Z",
     campaign_id: "CMP-18",
     campaign_name: "ABM EMEA",
@@ -68,6 +131,7 @@ const MOCK_LEADS: LeadInboxEntry[] = [
   },
 ]
 
+<<<<<<< HEAD
 type SupabaseLeadRow = Partial<LeadEnriched> & { data?: Record<string, unknown> | null }
 
 function mapLead(row: SupabaseLeadRow): LeadInboxEntry {
@@ -87,6 +151,20 @@ function mapLead(row: SupabaseLeadRow): LeadInboxEntry {
     created_at: row.created_at ?? null,
   }
 }
+=======
+const mapLead = (row: Partial<LeadEnriched & InboxRow>): LeadInboxEntry => ({
+  id: row.lead_id ?? row.id ?? "",
+  name: row.lead_name ?? row.full_name ?? null,
+  email: row.lead_email ?? row.email ?? null,
+  phone: row.lead_phone ?? row.phone ?? null,
+  status: row.lead_state ?? row.state ?? null,
+  last_touch_at: row.last_step_at ?? row.last_touch_at ?? null,
+  campaign_id: row.campaign_id ?? null,
+  campaign_name: row.campaign_name ?? null,
+  channel_last: row.channel_last ?? null,
+  created_at: row.created_at ?? null,
+})
+>>>>>>> origin/plan-joe-dashboard-v1
 
 function collectMissingFields(leads: LeadInboxEntry[]) {
   const missing = new Set<string>()
@@ -96,7 +174,11 @@ function collectMissingFields(leads: LeadInboxEntry[]) {
     if (!lead.name) missing.add("name/full_name")
     if (!lead.email) missing.add("email")
     if (!lead.phone) missing.add("phone")
+<<<<<<< HEAD
     if (!lead.state) missing.add("state")
+=======
+    if (!lead.status) missing.add("state")
+>>>>>>> origin/plan-joe-dashboard-v1
     if (!lead.last_touch_at) missing.add("last_touch_at")
     if (!lead.campaign_id && !lead.campaign_name) missing.add("campaign_id/name")
     if (!lead.channel_last) missing.add("channel_last")
@@ -106,14 +188,51 @@ function collectMissingFields(leads: LeadInboxEntry[]) {
 }
 
 export default function LeadsInboxPage() {
-  const supabaseReady = useMemo(() => Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY), [])
+  const supabaseReady = useMemo(
+    () =>
+      Boolean(
+        process.env.NEXT_PUBLIC_SUPABASE_URL &&
+          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+      ),
+    [],
+  )
+
   const [leads, setLeads] = useState<LeadInboxEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [missingFields, setMissingFields] = useState<string[]>([])
   const [usingMock, setUsingMock] = useState(!supabaseReady)
   const [query, setQuery] = useState("")
+<<<<<<< HEAD
   const [stateFilter, setStateFilter] = useState<LeadState | "All">("All")
+=======
+  const [debouncedQuery, setDebouncedQuery] = useState("")
+  const [stateFilter, setStateFilter] = useState("all")
+  const [page, setPage] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
+
+  const activeQuery = debouncedQuery.trim()
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query), 275)
+    return () => clearTimeout(timer)
+  }, [query])
+
+  const fetchInboxPage = useCallback(async (pageIndex: number) => {
+    const client = supabaseBrowser()
+    const from = pageIndex * PAGE_SIZE
+    const to = from + PAGE_SIZE - 1
+
+    return client
+      .from("inbox_events")
+      .select(
+        "lead_id, lead_name, lead_email, lead_phone, lead_state, last_step_at, campaign_id, campaign_name, channel_last, created_at",
+      )
+      .order("last_step_at", { ascending: false })
+      .range(from, to)
+  }, [])
+>>>>>>> origin/plan-joe-dashboard-v1
 
   useEffect(() => {
     let alive = true
@@ -121,46 +240,62 @@ export default function LeadsInboxPage() {
     async function loadLeads() {
       if (!supabaseReady) {
         if (!alive) return
+        setError(null)
         setLeads(MOCK_LEADS)
         setMissingFields(collectMissingFields(MOCK_LEADS))
         setLoading(false)
         setUsingMock(true)
+        setHasMore(false)
+        setPage(0)
         return
       }
 
       setLoading(true)
+<<<<<<< HEAD
       const client = supabaseBrowser()
       const { data, error: dbError } = await client
         .from("lead_enriched")
         .select("id, full_name, email, phone, created_at, lead_raw_id, data, state")
         .order("created_at", { ascending: false })
         .limit(100)
+=======
+      const { data, error: dbError } = await fetchInboxPage(0)
+>>>>>>> origin/plan-joe-dashboard-v1
 
       if (!alive) return
 
       if (dbError) {
         console.error(dbError)
-        setError("No se pudo acceder a lead_enriched. Proporciona el SQL/contrato o usa el mock.")
+        setError(
+          "No se pudo acceder a inbox_events. Proporciona el SQL/contrato o usa el mock.",
+        )
         setLeads(MOCK_LEADS)
         setMissingFields(collectMissingFields(MOCK_LEADS))
         setUsingMock(true)
         setLoading(false)
+        setHasMore(false)
+        setPage(0)
         return
       }
 
       const mapped = (data ?? []).map(mapLead)
+      setError(null)
       setLeads(mapped)
       setMissingFields(collectMissingFields(mapped))
       setUsingMock(false)
       setLoading(false)
+      setPage(0)
+      setHasMore((data?.length ?? 0) === PAGE_SIZE)
     }
 
-    loadLeads()
+    void loadLeads()
+
     return () => {
       alive = false
     }
-  }, [supabaseReady])
+  }, [fetchInboxPage, supabaseReady])
 
+<<<<<<< HEAD
   const filteredLeads = leads.filter((lead) => {
     const term = query.trim().toLowerCase()
     if (stateFilter !== "All" && lead.state !== stateFilter) return false
@@ -175,6 +310,58 @@ export default function LeadsInboxPage() {
 
     return matchesQuery
   })
+=======
+  const loadMore = useCallback(async () => {
+    if (!supabaseReady || !hasMore || isLoadingMore) return
+
+    setIsLoadingMore(true)
+    const nextPage = page + 1
+    const { data, error: dbError } = await fetchInboxPage(nextPage)
+
+    if (dbError) {
+      console.error(dbError)
+      setHasMore(false)
+      setIsLoadingMore(false)
+      return
+    }
+
+    const mapped = (data ?? []).map(mapLead)
+    setLeads((prev) => [...prev, ...mapped])
+    setPage(nextPage)
+
+    if ((data?.length ?? 0) < PAGE_SIZE) {
+      setHasMore(false)
+    }
+
+    setIsLoadingMore(false)
+  }, [fetchInboxPage, hasMore, isLoadingMore, page, supabaseReady])
+
+  const stateCounts = useMemo(() => {
+    const counts: Record<string, number> = { all: leads.length }
+    leads.forEach((lead) => {
+      const key = lead.status?.toLowerCase() ?? "unknown"
+      counts[key] = (counts[key] ?? 0) + 1
+    })
+    return counts
+  }, [leads])
+
+  const filteredLeads = useMemo(() => {
+    const term = activeQuery.toLowerCase()
+
+    return leads.filter((lead) => {
+      const matchesQuery =
+        term.length === 0 ||
+        lead.name?.toLowerCase().includes(term) ||
+        lead.email?.toLowerCase().includes(term) ||
+        lead.phone?.toLowerCase().includes(term)
+
+      const normalizedState = lead.status?.toLowerCase()
+      const matchesState = stateFilter === "all" || normalizedState === stateFilter
+
+      return matchesQuery && matchesState
+    })
+  }, [activeQuery, leads, stateFilter])
+>>>>>>> origin/plan-joe-dashboard-v1
 
   return (
     <div className="space-y-5">
@@ -184,39 +371,57 @@ export default function LeadsInboxPage() {
             <h1 className="text-3xl font-semibold text-white">Leads Inbox</h1>
             <Badge variant="neutral">Listado</Badge>
           </div>
-          <p className="text-sm text-white/60">Campos mínimos: {REQUIRED_FIELDS.join(", ")}</p>
+          <p className="text-sm text-white/60">
+            Campos mínimos: {REQUIRED_FIELDS.join(", ")}
+          </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => window.location.reload()} aria-label="Refrescar leads">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.location.reload()}
+            aria-label="Refrescar leads"
+          >
             <RefreshCw size={16} />
             Refresh
           </Button>
         </div>
       </div>
 
-      {!supabaseReady ? (
+      {!supabaseReady && (
         <div className="flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-100">
           <AlertTriangle size={18} />
           <div>
-            <p className="font-semibold">Supabase not configured, showing mock data</p>
-            <p className="text-sm text-amber-200/90">Define NEXT_PUBLIC_SUPABASE_URL y NEXT_PUBLIC_SUPABASE_ANON_KEY para usar datos reales.</p>
+            <p className="font-semibold">
+              Supabase not configured, showing mock data
+            </p>
+            <p className="text-sm text-amber-200/90">
+              Define NEXT_PUBLIC_SUPABASE_URL y NEXT_PUBLIC_SUPABASE_ANON_KEY
+              para usar datos reales.
+            </p>
           </div>
         </div>
-      ) : null}
+      )}
 
-      {error ? (
+      {error && (
         <div className="flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-100">
           <AlertTriangle size={18} className="mt-0.5" />
           <div>
             <p className="font-semibold">{error}</p>
-            <p className="text-sm text-red-200/90">Si la tabla no existe, comparte el contrato exacto. Se muestran mocks temporalmente.</p>
+            <p className="text-sm text-red-200/90">
+              Si la tabla no existe, comparte el contrato exacto. Se muestran
+              mocks temporalmente.
+            </p>
           </div>
         </div>
-      ) : null}
+      )}
 
-      {missingFields.length > 0 ? (
+      {missingFields.length > 0 && (
         <Card>
-          <CardHeader title="Campos faltantes" description="Se devuelven como null y se muestran en la tabla." />
+          <CardHeader
+            title="Campos faltantes"
+            description="Se devuelven como null y se muestran en la tabla."
+          />
           <CardContent className="flex flex-wrap gap-2">
             {missingFields.map((field) => (
               <Badge key={field} variant="warning">
@@ -225,15 +430,26 @@ export default function LeadsInboxPage() {
             ))}
           </CardContent>
         </Card>
-      ) : null}
+      )}
 
       <Card>
         <CardHeader
           title="Leads"
-          description={usingMock ? "Mostrando mock para permitir QA." : "Datos listados desde lead_enriched."}
-          action={<Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar por nombre, email o campaña" />}
+          description={
+            usingMock
+              ? "Mostrando mock para permitir QA."
+              : "Datos listados desde inbox_events."
+          }
+          action={
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Buscar por nombre, email o teléfono"
+            />
+          }
         />
         <CardContent>
+<<<<<<< HEAD
           <div className="mb-4 flex flex-wrap gap-2">
             {STATE_FILTERS.map((state) => {
               const active = stateFilter === state
@@ -252,6 +468,52 @@ export default function LeadsInboxPage() {
             })}
           </div>
           <LeadInboxTable leads={filteredLeads} loading={loading} />
+=======
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2">
+              {STATE_FILTERS.map((option) => {
+                const isActive = stateFilter === option.value
+                const count = stateCounts[option.value] ?? 0
+                const variant = isActive ? "primary" : "outline"
+
+                return (
+                  <Button
+                    key={option.value}
+                    size="sm"
+                    variant={variant}
+                    className="rounded-full transition duration-150 hover:scale-[1.02]"
+                    onClick={() => setStateFilter(option.value)}
+                  >
+                    {option.label} ({count})
+                  </Button>
+                )
+              })}
+            </div>
+
+            {activeQuery.length > 0 && (
+              <p className="text-xs text-white/60">
+                Mostrando {filteredLeads.length} de {leads.length} leads (filtro: “
+                {activeQuery}”)
+              </p>
+            )}
+
+            <LeadInboxTable leads={filteredLeads} loading={loading} />
+
+            {hasMore && (
+              <div className="flex justify-center">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={isLoadingMore}
+                  onClick={loadMore}
+                  className="min-w-[140px]"
+                >
+                  {isLoadingMore ? "Cargando..." : "Load more"}
+                </Button>
+              </div>
+            )}
+          </div>
+>>>>>>> origin/plan-joe-dashboard-v1
         </CardContent>
       </Card>
     </div>

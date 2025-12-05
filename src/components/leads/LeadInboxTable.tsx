@@ -1,7 +1,8 @@
 "use client"
 
-import React, { useState } from "react"
+import React from "react"
 import { Mail, Phone, RadioTower, Timer, UserRound } from "lucide-react"
+import { useRouter } from "next/navigation"
 import {
   Badge,
   Button,
@@ -14,9 +15,13 @@ import {
   TableHeaderCell,
   TableRow,
 } from "@/components/ui-custom"
+<<<<<<< HEAD
 import type { LeadState } from "@/types/lead"
 
 import { LeadTimeline } from "./LeadTimeline"
+=======
+import { cn } from "@/lib/utils"
+>>>>>>> origin/plan-joe-dashboard-v1
 
 export type LeadInboxEntry = {
   id: string
@@ -43,6 +48,7 @@ const formatDateTime = (value: string | null) => {
   return date.toLocaleString()
 }
 
+<<<<<<< HEAD
 function stateBadge(state: LeadState | null) {
   switch (state) {
     case "new":
@@ -62,10 +68,24 @@ function stateBadge(state: LeadState | null) {
     default:
       return { label: "Sin estado", className: "bg-white/10 text-white/80" }
   }
+=======
+function statusVariant(status: string | null) {
+  const normalized = status?.toLowerCase()
+  if (!normalized) return "neutral" as const
+  if (["new", "open", "enriched"].includes(normalized)) return "info" as const
+  if (["contacted", "in progress", "active", "attempting", "engaged"].includes(normalized)) return "warning" as const
+  if (["qualified", "won", "converted", "booked"].includes(normalized)) return "success" as const
+  if (["dead", "lost"].includes(normalized)) return "destructive" as const
+  return "neutral" as const
+>>>>>>> origin/plan-joe-dashboard-v1
 }
 
 export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
-  const [selectedLead, setSelectedLead] = useState<LeadInboxEntry | null>(null)
+  const router = useRouter()
+
+  const handleNavigate = (leadId: string) => {
+    router.push(`/leads/${leadId}`)
+  }
 
   if (!loading && leads.length === 0) {
     return (
@@ -101,7 +121,7 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
           </TableHead>
           <TableBody>
             {leads.map((lead) => (
-              <TableRow key={lead.id}>
+              <TableRow key={lead.id} className="cursor-pointer" onClick={() => handleNavigate(lead.id)}>
                 <TableCell>
                   <div className="flex flex-col">
                     <span className="font-semibold text-white">{lead.name ?? "—"}</span>
@@ -111,10 +131,27 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
                 <TableCell className="text-white/80">{lead.email ?? "—"}</TableCell>
                 <TableCell className="text-white/80">{lead.phone ?? "—"}</TableCell>
                 <TableCell>
+<<<<<<< HEAD
                   {(() => {
                     const { label, className } = stateBadge(lead.state)
                     return <Badge className={className}>{label}</Badge>
                   })()}
+=======
+                  <Badge
+                    variant={statusVariant(lead.status)}
+                    className={cn(
+                      "flex items-center gap-2 transition duration-200 hover:scale-105 hover:brightness-110",
+                      ["engaged", "qualified", "booked"].includes(lead.status?.toLowerCase() ?? "")
+                        ? "shadow-[0_0_12px_rgba(16,185,129,0.4)] ring-1 ring-emerald-400/60"
+                        : undefined,
+                    )}
+                  >
+                    {["attempting", "engaged"].includes(lead.status?.toLowerCase() ?? "") ? (
+                      <span className="h-2 w-2 animate-pulse rounded-full bg-current" />
+                    ) : null}
+                    <span className="leading-tight">{lead.status ?? "Sin dato"}</span>
+                  </Badge>
+>>>>>>> origin/plan-joe-dashboard-v1
                 </TableCell>
                 <TableCell className="text-white/70">{formatDateTime(lead.last_touch_at ?? lead.created_at)}</TableCell>
                 <TableCell className="text-white/80">
@@ -123,9 +160,23 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
                     <span className="text-xs text-white/50">{lead.campaign_id ?? ""}</span>
                   </div>
                 </TableCell>
-                <TableCell className="text-white/80">{lead.channel_last ?? "—"}</TableCell>
+                <TableCell className="text-white/80">
+                  <Badge
+                    variant="outline"
+                    className="transition duration-200 hover:scale-105 hover:bg-white/10 hover:text-white"
+                  >
+                    {lead.channel_last ?? "—"}
+                  </Badge>
+                </TableCell>
                 <TableCell>
-                  <Button variant="ghost" size="sm" onClick={() => setSelectedLead(lead)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      handleNavigate(lead.id)
+                    }}
+                  >
                     Ver timeline
                   </Button>
                 </TableCell>
@@ -146,17 +197,35 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
         {leads.map((lead) => (
           <div
             key={lead.id}
-            className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.35)]"
+            className="cursor-pointer rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.35)]"
+            onClick={() => handleNavigate(lead.id)}
           >
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-base font-semibold text-white">{lead.name ?? "—"}</p>
                 <p className="text-xs text-white/50">ID: {lead.id}</p>
               </div>
+<<<<<<< HEAD
               {(() => {
                 const { label, className } = stateBadge(lead.state)
                 return <Badge className={className}>{label}</Badge>
               })()}
+=======
+              <Badge
+                variant={statusVariant(lead.status)}
+                className={cn(
+                  "flex items-center gap-2 transition duration-200 hover:scale-105 hover:brightness-110",
+                  ["engaged", "qualified", "booked"].includes(lead.status?.toLowerCase() ?? "")
+                    ? "shadow-[0_0_12px_rgba(16,185,129,0.4)] ring-1 ring-emerald-400/60"
+                    : undefined,
+                )}
+              >
+                {["attempting", "engaged"].includes(lead.status?.toLowerCase() ?? "") ? (
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-current" />
+                ) : null}
+                <span className="leading-tight">{lead.status ?? "Sin dato"}</span>
+              </Badge>
+>>>>>>> origin/plan-joe-dashboard-v1
             </div>
 
             <div className="mt-3 space-y-2 text-sm text-white/70">
@@ -174,7 +243,12 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
               </div>
               <div className="flex items-center gap-2">
                 <RadioTower size={16} className="text-white/50" />
-                <span>{lead.channel_last ?? "Sin canal"}</span>
+                <Badge
+                  variant="outline"
+                  className="transition duration-200 hover:scale-105 hover:bg-white/10 hover:text-white"
+                >
+                  {lead.channel_last ?? "Sin canal"}
+                </Badge>
               </div>
               <div className="flex items-center gap-2">
                 <UserRound size={16} className="text-white/50" />
@@ -182,7 +256,14 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
               </div>
             </div>
             <div className="mt-3">
-              <Button variant="outline" size="sm" onClick={() => setSelectedLead(lead)}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  handleNavigate(lead.id)
+                }}
+              >
                 Ver timeline
               </Button>
             </div>
@@ -190,12 +271,6 @@ export function LeadInboxTable({ leads, loading }: LeadInboxTableProps) {
         ))}
         {loading ? <p className="text-center text-sm text-white/60">Cargando leads...</p> : null}
       </div>
-
-      {selectedLead ? (
-        <div className="pt-2">
-          <LeadTimeline leadId={selectedLead.id} leadName={selectedLead.name ?? selectedLead.email ?? selectedLead.id} />
-        </div>
-      ) : null}
     </div>
   )
 }
