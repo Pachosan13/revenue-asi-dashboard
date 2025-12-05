@@ -75,7 +75,7 @@ export default function LeadsPage() {
         created_at
       `,
       )
-      .order("last_step_at", { ascending: false, nullsLast: true })
+      .order("last_step_at", { ascending: false, nullsLast: true } as any)
       .range(from, to)
   }, [])
 

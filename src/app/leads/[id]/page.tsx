@@ -1,7 +1,8 @@
-"use client"
+import Link from "next/link"
 
-import React, { useEffect, useMemo, useState } from "react"
+import { LeadActivityTimeline, type LeadTimelineEvent } from "@/components/leads/LeadActivityTimeline"
 import {
+<<<<<<< HEAD
   AlertTriangle,
   ArrowLeft,
   PhoneCall,
@@ -22,391 +23,338 @@ import {
   type TouchRunRow,
 } from "@/components/leads/timeline-utils"
 
+=======
+  describeAppointmentOutcome,
+  describeReminder,
+  describeTouchRun,
+} from "@/components/leads/lead-activity-labels"
+import { touchRunSelect, type TouchRunRow } from "@/components/leads/timeline-utils"
+>>>>>>> origin/codex/implement-lead-detail-timeline-2.0
 import {
   Badge,
   Button,
   Card,
   CardContent,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeaderCell,
-  TableRow,
+  CardHeader,
 } from "@/components/ui-custom"
 
 import { StatCard } from "@/components/ui-custom/stat-card"
+import { supabaseServer } from "@/lib/supabase-server"
+import type { LeadEnriched } from "@/types/lead"
+import { Building2, Mail, MapPin, PhoneCall, User } from "lucide-react"
 
-const timeFormatter = new Intl.DateTimeFormat("en-US", {
-  hour: "2-digit",
-  minute: "2-digit",
-})
-const dateFormatter = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-})
+type LeadDetail = LeadEnriched & { company?: string | null; notes?: string | null }
 
-type LeadRecord = {
+type AppointmentRow = {
   id: string
-  full_name: string | null
-  email: string | null
-  phone: string | null
-  state: string | null
-  last_touch_at: string | null
-  channel_last: string | null
+  lead_id: string | null
+  channel: string | null
+  status: string | null
+  outcome: string | null
+  notes: string | null
+  starts_at: string | null
+  scheduled_for: string | null
+  created_at: string | null
+  updated_at: string | null
 }
 
-type NormalizedStep = TouchRunRow & {
-  when: string | null
-  dateKey: string
-  dateLabel: string
-  timeLabel: string
-  preview: string
+type AppointmentNotificationRow = {
+  id: string
+  appointment_id: string | null
+  notify_at: string | null
+  status: string | null
+  payload: Record<string, any> | null
+  created_at?: string | null
 }
 
-function normalizeSteps(steps: TouchRunRow[]): NormalizedStep[] {
-  return steps
-    .map((step) => {
-      const when = getWhen(step)
-      const whenDate = when ? new Date(when) : null
-      const valid = whenDate && !Number.isNaN(whenDate.getTime())
-
-      const dateKey = valid ? whenDate!.toISOString().slice(0, 10) : "unknown"
-
-      return {
-        ...step,
-        when,
-        dateKey,
-        dateLabel: valid
-          ? dateFormatter.format(whenDate!)
-          : "Fecha desconocida",
-        timeLabel: valid ? timeFormatter.format(whenDate!) : "—",
-        preview: formatPreview(step.payload),
-      }
-    })
-    .sort((a, b) => {
-      const aDate = new Date(a.when ?? 0).getTime()
-      const bDate = new Date(b.when ?? 0).getTime()
-      return bDate - aDate
-    })
+type LeadDataResult = {
+  lead: LeadDetail | null
+  events: LeadTimelineEvent[]
+  stats: {
+    touches: number
+    appointments: number
+    reminders: number
+  }
 }
 
-function channelBadgeVariant(channel: string | null) {
-  const normalized = channel?.toLowerCase()
-  if (normalized === "email") return "info" as const
-  if (normalized === "voice") return "warning" as const
-  if (normalized === "sms" || normalized === "whatsapp") return "success" as const
-  return "neutral" as const
+function formatDateTime(value: string | null) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return date.toLocaleString()
 }
 
-function channelIcon(channel?: string | null) {
-  if (channel === "voice") return <PhoneCall size={16} />
-  if (channel === "email") return <Mail size={16} />
-  return <Clock4 size={16} />
-}
-
-function deriveLeadTitle(lead: LeadRecord | null) {
+function deriveLeadTitle(lead: LeadDetail | null) {
   if (!lead) return "Sin nombre"
   return lead.full_name || lead.email || lead.phone || "Sin nombre"
 }
 
-function deriveLeadSubtitle(lead: LeadRecord | null) {
+function deriveLeadSubtitle(lead: LeadDetail | null) {
   if (!lead) return "Sin contacto"
   const email = lead.email ?? "Sin email"
   const phone = lead.phone ?? "Sin teléfono"
   return `${email} · ${phone}`
 }
 
-export default function LeadDetailPage() {
-  const params = useParams<{ id: string }>()
-  const router = useRouter()
-  const leadId = params?.id ?? ""
+function appointmentTime(appt: AppointmentRow) {
+  return appt.starts_at ?? appt.scheduled_for ?? appt.created_at
+}
 
-  const supabaseReady = useMemo(
-    () =>
-      Boolean(
-        process.env.NEXT_PUBLIC_SUPABASE_URL &&
-          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-      ),
-    [],
-  )
-
-  const [lead, setLead] = useState<LeadRecord | null>(null)
-  const [steps, setSteps] = useState<NormalizedStep[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [usingMock, setUsingMock] = useState(false)
-
-  useEffect(() => {
-    let alive = true
-
-    async function loadLead() {
-      if (!leadId) return
-
-      setLoading(true)
-      setError(null)
-
-      const isMockId = leadId.startsWith("MOCK-")
-
-      // 🔹 Modo mock (IDs MOCK-xxxx o sin Supabase)
-      if (!supabaseReady || isMockId) {
-        if (!alive) return
-
-        setLead({
-          id: leadId,
-          full_name: "Sin nombre",
-          email: null,
-          phone: null,
-          state: null,
-          last_touch_at: null,
-          channel_last: null,
-        })
-        setSteps([])
-        setUsingMock(true)
-        setLoading(false)
-        return
-      }
-
-      // 🔹 Flujo real (UUIDs con Supabase)
-      const client = supabaseBrowser()
-
-      try {
-        const [
-          { data: enriched, error: enrichedError },
-          stepsResult,
-        ] = await Promise.all([
-          client
-            .from("lead_enriched")
-            .select(
-              "id, full_name, email, phone, state, last_touch_at, channel_last",
-            )
-            .eq("id", leadId)
-            .maybeSingle(),
-          fetchLeadTouchRuns(client, leadId),
-        ])
-
-        if (!alive) return
-
-        if (enrichedError) {
-          console.warn("lead_enriched error", enrichedError)
-        }
-
-        const { data: stepsData, error: stepsError } = stepsResult
-
-        if (stepsError) {
-          console.error("touch_runs error", stepsError)
-          setError(
-            "No se pudo obtener el timeline de touch_runs para este lead. Revisa la configuración o intenta más tarde.",
-          )
-        }
-
-        if (enriched) {
-          setLead({
-            id: enriched.id,
-            full_name: enriched.full_name ?? null,
-            email: enriched.email ?? null,
-            phone: enriched.phone ?? null,
-            state: enriched.state ?? null,
-            last_touch_at: enriched.last_touch_at ?? null,
-            channel_last: enriched.channel_last ?? null,
-          })
-        } else {
-          setLead({
-            id: leadId,
-            full_name: "Sin nombre",
-            email: null,
-            phone: null,
-            state: null,
-            last_touch_at: null,
-            channel_last: null,
-          })
-        }
-
-        setSteps(
-          stepsError || !stepsData
-            ? []
-            : normalizeSteps(stepsData as TouchRunRow[]),
-        )
-        setUsingMock(false)
-      } catch (e) {
-        if (!alive) return
-        console.error("loadLead unexpected error", e)
-        setError(
-          "No se pudo obtener el timeline de touch_runs para este lead. Revisa la configuración o vuelve a intentar.",
-        )
-        setSteps([])
-      } finally {
-        if (!alive) return
-        setLoading(false)
-      }
+function mapTouchRuns(touchRuns: TouchRunRow[]): LeadTimelineEvent[] {
+  return touchRuns.map((touch) => {
+    const occurredAt = touch.scheduled_at ?? touch.created_at
+    const { label, description } = describeTouchRun(touch)
+    return {
+      id: `touch-${touch.id}`,
+      occurredAt: occurredAt ?? new Date().toISOString(),
+      type: "touch_run",
+      channel: touch.channel,
+      step: touch.step,
+      label,
+      description,
+      status: touch.status,
+      meta: touch.meta ?? undefined,
     }
+  })
+}
 
-    loadLead()
+function mapAppointments(appointments: AppointmentRow[]): LeadTimelineEvent[] {
+  return appointments.map((appointment) => {
+    const when = appointmentTime(appointment) ?? new Date().toISOString()
+    const formatted = formatDateTime(when)
+    const description = formatted
+      ? `Scheduled for ${formatted}${appointment.notes ? ` · ${appointment.notes}` : ""}`
+      : appointment.notes
 
-    return () => {
-      alive = false
+    return {
+      id: `appointment-${appointment.id}`,
+      occurredAt: when,
+      type: "appointment",
+      channel: appointment.channel,
+      step: null,
+      label: "Appointment scheduled",
+      description,
+      status: appointment.status,
+      meta: { appointmentId: appointment.id },
     }
-  }, [leadId, supabaseReady])
+  })
+}
 
-  const totalSteps = steps.length
-  const sentSteps = steps.filter(
-    (step) => step.status?.toLowerCase() === "sent",
-  ).length
-  const errorSteps = steps.filter((step) => {
-    const normalized = step.status?.toLowerCase()
-    return normalized === "failed" || normalized === "error"
-  }).length
+function mapAppointmentOutcomes(appointments: AppointmentRow[]): LeadTimelineEvent[] {
+  return appointments
+    .filter((appointment) => Boolean(appointment.outcome))
+    .map((appointment) => {
+      const label = describeAppointmentOutcome(appointment.outcome)
+      const when = appointment.updated_at ?? appointmentTime(appointment) ?? new Date().toISOString()
+      const formatted = formatDateTime(appointmentTime(appointment))
+      const description = formatted
+        ? `Outcome for appointment on ${formatted}`
+        : "Appointment outcome updated"
 
-  const grouped = useMemo(() => {
-    const groups = new Map<
-      string,
-      { date: string; label: string; items: NormalizedStep[] }
-    >()
-
-    steps.forEach((step) => {
-      const group =
-        groups.get(step.dateKey) ?? {
-          date: step.dateKey,
-          label: step.dateLabel,
-          items: [] as NormalizedStep[],
-        }
-      group.items.push(step)
-      groups.set(step.dateKey, group)
+      return {
+        id: `appointment-outcome-${appointment.id}`,
+        occurredAt: when,
+        type: "appointment_outcome",
+        channel: appointment.channel,
+        step: null,
+        label,
+        description,
+        status: appointment.outcome,
+        meta: { appointmentId: appointment.id },
+      }
     })
+}
 
-    return Array.from(groups.values()).sort((a, b) =>
-      a.date > b.date ? -1 : 1,
-    )
-  }, [steps])
+function mapAppointmentReminders(
+  reminders: AppointmentNotificationRow[],
+  appointmentById: Map<string, AppointmentRow>,
+  leadId: string,
+): LeadTimelineEvent[] {
+  return reminders
+    .filter((reminder) => {
+      const payloadLeadId = (reminder.payload?.lead_id as string | undefined) ?? null
+      const appointmentLeadId = reminder.appointment_id
+        ? appointmentById.get(reminder.appointment_id)?.lead_id ?? null
+        : null
+      return payloadLeadId === leadId || appointmentLeadId === leadId
+    })
+    .map((reminder) => {
+      const appointment = reminder.appointment_id
+        ? appointmentById.get(reminder.appointment_id)
+        : undefined
+      const when = reminder.notify_at ?? appointmentTime(appointment ?? ({} as AppointmentRow)) ?? new Date().toISOString()
+      const kind = (reminder.payload?.kind as string | undefined) ?? null
+      const reminderLabel = describeReminder(kind) ?? "Appointment reminder"
+      const appointmentDate = appointmentTime(appointment ?? ({} as AppointmentRow))
+      const formatted = formatDateTime(appointmentDate)
+
+      return {
+        id: `appointment-reminder-${reminder.id}`,
+        occurredAt: when,
+        type: "appointment_reminder",
+        channel: appointment?.channel ?? null,
+        step: null,
+        label: reminderLabel,
+        description: formatted ? `Reminder for appointment on ${formatted}` : null,
+        status: reminder.status,
+        meta: { appointmentId: reminder.appointment_id, kind },
+      }
+    })
+}
+
+async function loadLeadData(leadId: string): Promise<LeadDataResult> {
+  const supabase = supabaseServer()
+
+  if (!supabase) {
+    return {
+      lead: {
+        id: leadId,
+        full_name: "Sin nombre",
+        email: null,
+        phone: null,
+        state: "unknown",
+        last_touch_at: null,
+        campaign_id: null,
+        campaign_name: null,
+        channel_last: null,
+        company: null,
+        notes: null,
+      },
+      events: [],
+      stats: { touches: 0, appointments: 0, reminders: 0 },
+    }
+  }
+
+  const [leadResult, touchRunsResult, appointmentsResult, remindersResult] = await Promise.all([
+    supabase
+      .from("lead_enriched")
+      .select(
+        "id, full_name, email, phone, state, last_touch_at, campaign_id, campaign_name, channel_last, company",
+      )
+      .eq("id", leadId)
+      .maybeSingle(),
+    supabase
+      .from("touch_runs")
+      .select(touchRunSelect)
+      .eq("lead_id", leadId)
+      .order("scheduled_at", { ascending: false, nullsLast: true } as any)
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("appointments")
+      .select(
+        "id, lead_id, channel, status, outcome, notes, starts_at, scheduled_for, created_at, updated_at",
+      )
+      .eq("lead_id", leadId),
+    supabase.from("appointments_notifications").select("id, appointment_id, notify_at, status, payload, created_at"),
+  ])
+
+  const touchRuns = (touchRunsResult.data ?? []) as TouchRunRow[]
+  const appointments = (appointmentsResult.data ?? []) as AppointmentRow[]
+  const appointmentById = new Map<string, AppointmentRow>()
+  appointments.forEach((row) => appointmentById.set(row.id, row))
+  const reminders = (remindersResult.data ?? []) as AppointmentNotificationRow[]
+
+  const events: LeadTimelineEvent[] = [
+    ...mapTouchRuns(touchRuns),
+    ...mapAppointments(appointments),
+    ...mapAppointmentOutcomes(appointments),
+    ...mapAppointmentReminders(reminders, appointmentById, leadId),
+  ].sort((a, b) => {
+    const aTime = new Date(a.occurredAt).getTime()
+    const bTime = new Date(b.occurredAt).getTime()
+    const safeA = Number.isNaN(aTime) ? 0 : aTime
+    const safeB = Number.isNaN(bTime) ? 0 : bTime
+    return safeB - safeA
+  })
+
+  return {
+    lead: (leadResult.data as LeadDetail | null) ?? null,
+    events,
+    stats: {
+      touches: touchRuns.length,
+      appointments: appointments.length,
+      reminders: reminders.length,
+    },
+  }
+}
+
+export default async function LeadDetailPage({ params }: { params: { id: string } }) {
+  const leadId = params.id
+  const { lead, events, stats } = await loadLeadData(leadId)
 
   const title = deriveLeadTitle(lead)
   const subtitle = deriveLeadSubtitle(lead)
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => router.push("/leads-inbox")}
-          >
-            <ArrowLeft size={16} />
-            Back
-          </Button>
+          <Link href="/leads-inbox">
+            <Button variant="outline" size="sm">
+              <span className="sr-only">Back to leads</span>
+              Back
+            </Button>
+          </Link>
           <div>
-            <div className="flex items-center gap-3">
-              <h1 className="text-3xl font-semibold text-white">
-                Lead timeline
-              </h1>
-              <Badge variant="neutral">Detalle</Badge>
-              {usingMock ? <Badge variant="warning">Mock</Badge> : null}
-            </div>
+            <p className="text-sm uppercase tracking-[0.16em] text-white/50">Lead</p>
+            <h1 className="text-3xl font-semibold text-white">Lead timeline</h1>
             <p className="text-sm text-white/80">{title}</p>
-            <p className="text-xs text-white/60">
-              {subtitle} · ID: {leadId}
-            </p>
+            <p className="text-xs text-white/60">{subtitle} · ID: {leadId}</p>
           </div>
         </div>
         {lead?.state ? (
-          <Badge variant={statusVariant(lead.state)} className="capitalize">
+          <Badge variant="outline" className="capitalize">
             {lead.state}
           </Badge>
         ) : null}
       </div>
 
-      {/* Error banner solo en error real */}
-      {error ? (
-        <div className="flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-100">
-          <AlertTriangle size={18} className="mt-0.5" />
-          <div>
-            <p className="font-semibold">{error}</p>
-            <p className="text-sm text-red-200/90">
-              Revisa la configuración de touch_runs o vuelve a intentar más
-              tarde.
-            </p>
-          </div>
-        </div>
-      ) : null}
-
-      {/* Stats */}
-      <div className="grid gap-4 md:grid-cols-3">
-        <StatCard
-          label="Total steps"
-          value={totalSteps.toString()}
-          helper="Pasos registrados en touch_runs"
-        />
-        <StatCard
-          label="Sent"
-          value={sentSteps.toString()}
-          helper="Pasos marcados como sent"
-        />
-        <StatCard
-          label="Errores"
-          value={errorSteps.toString()}
-          helper="failed o error"
-        />
-      </div>
-
-      {/* Last touch card */}
       <Card>
-        <CardContent className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <p className="text-sm text-white/70">
-              Last touch:{" "}
-              {lead?.last_touch_at
-                ? new Date(lead.last_touch_at).toLocaleString()
-                : "No touches yet"}
-            </p>
-            <p className="text-xs text-white/50">
-              Último canal: {lead?.channel_last ?? "—"}
-            </p>
-            <p className="text-xs text-white/50">
-              Email: {lead?.email ?? "—"} · Phone: {lead?.phone ?? "—"}
-            </p>
+        <CardHeader
+          title="Lead overview"
+          description="Basic details and last touch information"
+        />
+        <CardContent className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="flex items-center gap-2 text-white">
+              <User size={16} className="text-white/60" />
+              <span className="font-semibold">{title}</span>
+            </div>
+            <div className="flex items-center gap-2 text-white/80">
+              <Mail size={14} className="text-white/50" />
+              <span>{lead?.email ?? "Sin email"}</span>
+            </div>
+            <div className="flex items-center gap-2 text-white/80">
+              <PhoneCall size={14} className="text-white/50" />
+              <span>{lead?.phone ?? "Sin teléfono"}</span>
+            </div>
+            <div className="flex items-center gap-2 text-white/80">
+              <Building2 size={14} className="text-white/50" />
+              <span>{lead?.company ?? "Sin compañía"}</span>
+            </div>
+            <div className="flex items-center gap-2 text-white/80">
+              <MapPin size={14} className="text-white/50" />
+              <span>{lead?.channel_last ?? "Sin canal"}</span>
+            </div>
           </div>
-          <Badge variant="outline" className="capitalize">
-            {lead?.state ?? "Sin estado"}
-          </Badge>
+          <div className="space-y-2 rounded-2xl border border-white/10 bg-white/5 p-4 text-white/80">
+            <p className="text-sm text-white/60">Last touch</p>
+            <p className="text-lg font-semibold text-white">
+              {formatDateTime(lead?.last_touch_at ?? null) ?? "No touches yet"}
+            </p>
+            <p className="text-sm text-white/60">Channel: {lead?.channel_last ?? "—"}</p>
+            <p className="text-sm text-white/60">Campaign: {lead?.campaign_name ?? lead?.campaign_id ?? "—"}</p>
+          </div>
         </CardContent>
       </Card>
 
-      {/* Loading skeleton */}
-      {loading && !usingMock ? (
-        <div className="space-y-3">
-          <div className="h-10 animate-pulse rounded-xl bg-white/5" />
-          <div className="h-52 animate-pulse rounded-2xl bg-white/5" />
-          <div className="h-32 animate-pulse rounded-2xl bg-white/5" />
-        </div>
-      ) : null}
-
-      {/* Empty state */}
-      {!loading && steps.length === 0 ? (
-        <Card>
-          <CardContent className="space-y-3">
-            <p className="text-lg font-semibold text-white">No steps yet</p>
-            <p className="text-sm text-white/70">
-              No steps yet. Lanza una campaña para que el motor genere toques
-              para este lead.
-            </p>
-          </CardContent>
-        </Card>
-      ) : null}
-
-           {/* Timeline unificado de actividad del lead */}
-           <div className="mt-6">
-        <LeadTimeline
-          leadId={leadId}
-          leadName={
-            lead?.contact_name ??
-            lead?.company_name ??
-            lead?.email ??
-            undefined
-          }
-        />
+      <div className="grid gap-4 md:grid-cols-3">
+        <StatCard label="Total activity" value={events.length.toString()} helper="Touches, appointments and reminders" />
+        <StatCard label="Touch runs" value={stats.touches.toString()} helper="touch_runs registrados" />
+        <StatCard label="Appointments" value={stats.appointments.toString()} helper="Incluye outcomes y reminders" />
       </div>
+
+      <LeadActivityTimeline events={events} />
     </div>
   )
 }

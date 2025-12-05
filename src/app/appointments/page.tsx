@@ -59,7 +59,7 @@ async function fetchAppointments() {
     return { appointments: [] as AppointmentWithLead[], error: "Unable to fetch appointments." }
   }
 
-  const rows = (data ?? []) as AppointmentRow[]
+  const rows = (data ?? []) as unknown as AppointmentRow[]
 
   const appointments: AppointmentWithLead[] = rows.map((row) => ({
     id: row.id,
@@ -149,7 +149,13 @@ export default async function AppointmentsPage() {
                         <TableCell>
                           <AppointmentOutcomeButtons
                             appointmentId={appointment.id}
-                            initialOutcome={appointment.outcome}
+                            currentOutcome={
+                              appointment.outcome === "attended"
+                                ? "show"
+                                : appointment.outcome === "no_show"
+                                  ? "no_show"
+                                  : null
+                            }
                           />
                         </TableCell>
                       </TableRow>

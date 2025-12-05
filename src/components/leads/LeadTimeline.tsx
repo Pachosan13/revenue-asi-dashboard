@@ -5,6 +5,7 @@ import { AlertTriangle, Clock4, Mail, PhoneCall, ServerCrash } from "lucide-reac
 
 import { supabaseBrowser } from "@/lib/supabase"
 import { Badge, Card, CardContent, CardHeader } from "@/components/ui-custom"
+<<<<<<< HEAD
 import {
   channelLabel,
   fetchLeadTouchRuns,
@@ -13,6 +14,10 @@ import {
   statusVariant,
   type TouchRunRow,
 } from "./timeline-utils"
+=======
+import { formatTouchPreview } from "./lead-activity-labels"
+import { channelLabel, fetchLeadTouchRuns, getWhen, statusVariant, type TouchRunRow } from "./timeline-utils"
+>>>>>>> origin/codex/implement-lead-detail-timeline-2.0
 
 type LeadTimelineProps = {
   leadId: string
@@ -178,15 +183,11 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
                   </div>
                 </div>
 
-                <div className="space-y-1 text-sm text-white/80">
-                  <div className="flex items-start gap-2">
-                    <span className="text-xs uppercase tracking-[0.14em] text-white/50">
-                      Payload
-                    </span>
-                    <span className="flex-1 break-words text-white/80">
-                      {formatPreview(touch.payload)}
-                    </span>
-                  </div>
+                  <div className="space-y-1 text-sm text-white/80">
+                    <div className="flex items-start gap-2">
+                      <span className="text-xs uppercase tracking-[0.14em] text-white/50">Payload</span>
+                      <span className="flex-1 break-words text-white/80">{formatTouchPreview(touch.payload) || "—"}</span>
+                    </div>
                   {touch.error ? (
                     <div className="flex items-start gap-2 text-amber-200">
                       <ServerCrash size={16} />
