@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { setLeadState } from "../_shared/state.ts";
-=======
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts"
@@ -15,7 +10,6 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
 }
->>>>>>> origin/plan-joe-dashboard-v1
 
 serve(async (req) => {
   // Preflight
@@ -40,25 +34,6 @@ serve(async (req) => {
     )
   }
 
-<<<<<<< HEAD
-    if (inserts.length) {
-      await supabase.from("touch_runs").insert(inserts);
-
-      for (const lead of leads ?? []) {
-        await setLeadState({
-          supabase,
-          leadId: lead.id,
-          newState: "attempting",
-          reason: "added_to_cadence",
-          actor: "system",
-          source: "run-cadence",
-          meta: { campaign_id: c.id, campaign_run_id: run?.id },
-        });
-      }
-
-      // TODO: Mark leads as "qualified", "booked", or "dead" once outcomes are known
-      // (e.g., after responses or appointment scheduling flows are implemented).
-=======
   const supabase = createClient(SB_URL, SB_KEY)
 
   // Body
@@ -191,10 +166,9 @@ serve(async (req) => {
   if (!leads_seen) {
     // No leads → igual podemos loggear
     try {
-      await logEvaluation({
-        supabase,
+      await logEvaluation(supabase, {
         event_type: "evaluation",
-        actor: "cadence",
+        event_source: "cadence",
         label: "run_cadence_v4",
         kpis: {
           campaign_id,
@@ -264,7 +238,6 @@ serve(async (req) => {
         scheduled_at: nowIso,
         status: "queued",
       })
->>>>>>> origin/plan-joe-dashboard-v1
     }
   }
 
@@ -286,10 +259,9 @@ serve(async (req) => {
 
   // 6) Log en core_memory_events (best-effort)
   try {
-    await logEvaluation({
-      supabase,
+    await logEvaluation(supabase, {
       event_type: "evaluation",
-      actor: "cadence",
+      event_source: "cadence",
       label: "run_cadence_v4",
       kpis: {
         campaign_id,

@@ -38,10 +38,7 @@ serve(async (req) => {
 
   try {
     await logEvaluation(supabase, {
-      scope: "system",
-      account_id: null,
-      entity_id: null,
-      actor: "director",
+      event_source: "director",
       label: "eval_test_manual",
       kpis: {
         test_metric: 1,

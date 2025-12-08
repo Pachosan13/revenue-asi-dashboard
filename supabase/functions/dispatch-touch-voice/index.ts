@@ -129,10 +129,9 @@ serve(async (req) => {
   if (ids.length === 0) {
     // log best-effort cuando no hay nada que procesar
     try {
-      await logEvaluation({
-        supabase,
+      await logEvaluation(supabase, {
         event_type: "evaluation",
-        actor: "dispatcher",
+        event_source: "dispatcher",
         label: "dispatch_touch_voice_v4",
         kpis: {
           channel: "voice",
@@ -291,10 +290,9 @@ serve(async (req) => {
 
   // 3) Log en core_memory_events (best-effort, resumen del run)
   try {
-    await logEvaluation({
-      supabase,
+    await logEvaluation(supabase, {
       event_type: "evaluation",
-      actor: "dispatcher",
+      event_source: "dispatcher",
       label: "dispatch_touch_voice_v4",
       kpis: {
         channel: "voice",

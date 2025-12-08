@@ -9,6 +9,7 @@ begin;
 
 create table if not exists public.lead_enrichments_v2 (
   id uuid primary key default gen_random_uuid(),
+  account_id uuid not null default 'a0e3fc34-0bc4-410f-b363-a25b00fa16b8' references public.accounts(id),
   lead_id uuid not null references public.leads(id) on delete cascade,
 
   -- Campos estructurados del Lead Genome
@@ -72,8 +73,8 @@ execute procedure public.set_timestamp_lead_enrichments_v2();
 ------------------------------------------------------------
 -- 3) Trigger → core_memory_events al completar enrichment
 ------------------------------------------------------------
--- Asume tabla: public.core_memory_events
--- columnas relevantes: scope, account_id, entity_id, actor, event_type, payload, created_at, importance (con default)
+-- Asume tabla: public.core_memory_events con schema real
+-- id, lead_id, event_type, event_source, channel, direction, payload, score_delta, created_at
 
 create or replace function public.log_lead_enrichments_v2_to_memory()
 returns trigger
@@ -88,19 +89,22 @@ begin
      and new.core_memory_event_id is null
   then
     insert into public.core_memory_events (
-      scope,
-      account_id,
-      entity_id,
-      actor,
+      id,
+      lead_id,
       event_type,
-      payload
+      event_source,
+      channel,
+      direction,
+      payload,
+      score_delta
     )
     values (
-      'lead',              -- scope
-      null,                -- account_id (ajusta si luego lo tienes a mano)
-      new.lead_id,         -- entity_id = lead
-      'enrichment_v2',     -- actor
-      'lead_enriched_v2',  -- event_type
+      gen_random_uuid(),
+      new.lead_id,
+      'lead_enriched_v2',
+      'enrichment_v2',
+      null,
+      'system',
       jsonb_build_object(
         'enrichment_run_id',      new.id,
         'ai_lead_score',          new.ai_lead_score,
@@ -111,7 +115,8 @@ begin
         'recommended_channel',    new.recommended_channel,
         'recommended_persona',    new.recommended_persona,
         'raw',                    new.raw_result
-      )
+      ),
+      null
     )
     returning id into v_event_id;
 

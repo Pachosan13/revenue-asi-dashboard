@@ -152,10 +152,9 @@ serve(async (req) => {
 
   // 4) Log en core_memory_events (best-effort)
   try {
-    await logEvaluation({
-      supabase,
+    await logEvaluation(supabase, {
       event_type: "evaluation",
-      actor: "dispatcher",
+      event_source: "dispatcher",
       label: "dispatch_touch_sms_v1",
       kpis: {
         channel: "sms",

@@ -1,56 +1,3 @@
-<<<<<<< HEAD
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { setLeadState } from "../_shared/state.ts";
-
-serve(async (req) => {
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-  );
-
-  const formData = await req.formData().catch(() => null);
-  const callStatus = (formData?.get("CallStatus") as string | null) ?? undefined;
-  const fromNumber = (formData?.get("From") as string | null) ?? undefined;
-  const callSid = (formData?.get("CallSid") as string | null) ?? undefined;
-
-  // Normalize caller number (strip whatsapp: prefix if present)
-  const normalizedNumber = fromNumber?.replace(/^whatsapp:/, "");
-
-  if (!normalizedNumber) {
-    console.error("voice-webhook: missing caller number");
-    return new Response("<Response></Response>", {
-      status: 200,
-      headers: { "Content-Type": "application/xml" },
-    });
-  }
-
-  const { data: lead } = await supabase
-    .from("leads")
-    .select("id")
-    .eq("phone", normalizedNumber)
-    .maybeSingle();
-
-  // TODO: Extend lookup to other lead identity sources (e.g., lead_enriched) if needed.
-
-  if (lead && callStatus && ["completed", "in-progress", "answered"].includes(callStatus)) {
-    await setLeadState({
-      supabase,
-      leadId: lead.id,
-      newState: "engaged",
-      reason: "inbound_response",
-      actor: "dispatcher",
-      source: "voice-webhook",
-      meta: { channel: "voice", twilio_call_sid: callSid, call_status: callStatus },
-    });
-  }
-
-  return new Response("<Response></Response>", {
-    status: 200,
-    headers: { "Content-Type": "application/xml" },
-  });
-});
-=======
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts"
@@ -61,10 +8,9 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
 }
 
-// Cliente supabase best-effort (si falta env, no rompe Twilio)
 const SB_URL = Deno.env.get("SUPABASE_URL")
 const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
 const supabase =
@@ -82,10 +28,9 @@ serve(async (req) => {
     // Log: webhook sin audio
     if (supabase) {
       try {
-        await logEvaluation({
-          supabase,
+        await logEvaluation(supabase, {
           event_type: "evaluation",
-          actor: "webhook",
+          event_source: "webhook",
           label: "voice_webhook_v1",
           kpis: {
             channel: "voice",
@@ -112,10 +57,9 @@ serve(async (req) => {
   // Log: webhook con audio
   if (supabase) {
     try {
-      await logEvaluation({
-        supabase,
+      await logEvaluation(supabase, {
         event_type: "evaluation",
-        actor: "webhook",
+        event_source: "webhook",
         label: "voice_webhook_v1",
         kpis: {
           channel: "voice",
@@ -138,4 +82,3 @@ serve(async (req) => {
     headers: { ...corsHeaders, "Content-Type": "text/xml" },
   })
 })
->>>>>>> origin/plan-joe-dashboard-v1
