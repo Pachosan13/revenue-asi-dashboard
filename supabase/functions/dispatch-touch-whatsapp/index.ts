@@ -65,10 +65,9 @@ serve(async (req) => {
   // si no hay nada que procesar, igual logeamos
   if (!runs || runs.length === 0) {
     try {
-      await logEvaluation({
-        supabase,
+      await logEvaluation(supabase, {
         event_type: "evaluation",
-        actor: "dispatcher",
+        event_source: "dispatcher",
         label: "dispatch_touch_whatsapp_v1",
         kpis: {
           channel: "whatsapp",
@@ -147,10 +146,9 @@ serve(async (req) => {
 
   // 2) Log en core_memory_events (best-effort)
   try {
-    await logEvaluation({
-      supabase,
+    await logEvaluation(supabase, {
       event_type: "evaluation",
-      actor: "dispatcher",
+      event_source: "dispatcher",
       label: "dispatch_touch_whatsapp_v1",
       kpis: {
         channel: "whatsapp",

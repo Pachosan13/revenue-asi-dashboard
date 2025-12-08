@@ -44,6 +44,7 @@ export interface EvaluationInput {
   scope?: string | null
   actor?: string | null
   version?: string | null
+  raw?: any
 }
 
 // Soporta dos firmas:
@@ -111,9 +112,8 @@ export async function logEvaluation(
     label: opts.label ?? null,
     kpis: opts.kpis ?? null,
     notes: opts.notes ?? null,
-    // info extra por si quieres leerlo luego desde payload
-    event_type: eventType,
-    event_source: eventSource,
+    version: opts.version ?? null,
+    raw: opts.raw ?? null,
   }
 
   await logMemoryEvent(supabase, {
