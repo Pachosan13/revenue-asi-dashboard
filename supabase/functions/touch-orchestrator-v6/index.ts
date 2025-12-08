@@ -2,7 +2,7 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts";
 
-const VERSION = "touch-orchestrator-v6_2025-11-24"
+const VERSION = "touch-orchestrator-v7_2025-12-07"
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -21,7 +21,7 @@ serve(async (req) => {
   const limit = Number(body.limit ?? 20)
   const dryRun = Boolean(body.dry_run ?? false)
 
-  // 1) traer campaign_leads activos
+  // 1) traer campaign_leads activos (fuente de verdad de qué leads pertenecen a qué campañas)
   const { data: enrolled, error: eErr } = await supabase
     .from("campaign_leads")
     .select("campaign_id, lead_id, enrolled_at, status")
@@ -53,11 +53,10 @@ serve(async (req) => {
       errors: [],
     }
 
-    // 🔴 registrar evaluación aunque no haya leads
     try {
       await logEvaluation(supabase, {
         scope: "system",
-        label: "touch_orchestrator_v6_run",
+        label: "touch_orchestrator_v7_run",
         kpis: {
           processed_leads: 0,
           inserted: 0,
@@ -78,7 +77,35 @@ serve(async (req) => {
   // 2) campaigns únicas
   const campaignIds = [...new Set(enrolled.map((r) => r.campaign_id))]
 
-  // 3) steps por campaign
+  // 3) lead_ids únicos para consultar el Brain
+  const leadIds = [...new Set(enrolled.map((r) => r.lead_id))]
+
+  // 3b) leer decisiones del Brain: lead_next_action_view_v4
+  const { data: brainRows, error: bErr } = await supabase
+    .from("lead_next_action_view_v4")
+    .select("lead_id, recommended_action, recommended_delay_minutes, recommended_channel, priority_score, reason")
+    .in("lead_id", leadIds)
+
+  if (bErr) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        stage: "select_lead_next_action_view_v4",
+        error: bErr.message,
+      }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    )
+  }
+
+  const brainByLead = new Map<string, any>()
+  for (const br of brainRows ?? []) {
+    brainByLead.set(br.lead_id, br)
+  }
+
+  // 4) steps por campaign (como antes)
   const { data: steps, error: sErr } = await supabase
     .from("campaign_steps")
     .select("id, campaign_id, step, channel, delay_minutes, payload, is_active")
@@ -114,9 +141,30 @@ serve(async (req) => {
     const campaignSteps = stepsByCampaign.get(row.campaign_id) || []
     if (!campaignSteps.length) continue
 
+    const brain = brainByLead.get(row.lead_id)
+
+    // 🔥 Integración con el Brain:
+    // - stop_all / archive / cooldown -> NO programar nada
+    // - reactivate -> se maneja por otro flujo (Message Engine), aquí no programamos campaña normal
+    // - send / nurture / null -> seguimos como siempre
+    if (brain) {
+      const action = String(brain.recommended_action ?? "").toLowerCase()
+
+      if (["stop_all", "archive", "cooldown"].includes(action)) {
+        // El cerebro dice que NO toquemos este lead ahora
+        continue
+      }
+
+      if (action === "reactivate") {
+        // La reactivación full-auto se maneja con otro worker que genera mensaje calibrado.
+        // Aquí no insertamos pasos de campaña estándar.
+        continue
+      }
+    }
+
     const enrolledAt = row.enrolled_at ? new Date(row.enrolled_at).getTime() : now
 
-    // 4) dedupe: tocar touch_runs (cola real)
+    // 5) dedupe: tocar touch_runs (cola real)
     const { data: existing, error: xErr } = await supabase
       .from("touch_runs")
       .select("step, channel")
@@ -141,6 +189,8 @@ serve(async (req) => {
 
       const status = scheduledAtMs <= now ? "queued" : "scheduled"
 
+      const brain = brainByLead.get(row.lead_id)
+
       toInsert.push({
         campaign_id: row.campaign_id,
         lead_id: row.lead_id,
@@ -150,7 +200,11 @@ serve(async (req) => {
         scheduled_at: scheduledAtIso,
         payload: st.payload ?? {},
         error: null,
-        meta: { orchestrator: VERSION },
+        meta: {
+          orchestrator: VERSION,
+          brain_action: brain?.recommended_action ?? null,
+          brain_reason: brain?.reason ?? null,
+        },
       })
     }
 
@@ -167,7 +221,6 @@ serve(async (req) => {
     inserted += toInsert.length
   }
 
-  // 🔴 resultado final
   const result = {
     ok: true,
     version: VERSION,
@@ -177,11 +230,10 @@ serve(async (req) => {
     errors,
   }
 
-  // 🔴 evaluación: siempre después de toda la lógica, antes del return
   try {
     await logEvaluation(supabase, {
       scope: "system",
-      label: "touch_orchestrator_v6_run",
+      label: "touch_orchestrator_v7_run",
       kpis: {
         processed_leads: enrolled.length,
         inserted,
@@ -194,7 +246,6 @@ serve(async (req) => {
     })
   } catch (err) {
     console.error("logEvaluation error:", err)
-    // No rompemos la función por culpa del logging
   }
 
   return new Response(JSON.stringify(result), {
