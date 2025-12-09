@@ -3,8 +3,11 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { corsHeaders } from "../_shared/cors.ts"
 import { logEvaluation } from "../_shared/eval.ts"
+import { getChannelProvider } from "../_shared/providers.ts"
 
-const VERSION = "dispatch-touch-email-v3_2025-11-24_fix_errors_qa"
+const VERSION = "dispatch-touch-email-v4_2025-12-09_multitenant"
+
+// --- Elastic Email helper ----------------------------------------------------
 
 async function sendElasticEmail({
   apiKey,
@@ -40,12 +43,15 @@ async function sendElasticEmail({
       isTransactional: "false",
     }),
   })
+
   const json = await res.json()
   if (!res.ok || json?.success === false) {
     throw new Error(JSON.stringify(json))
   }
   return json
 }
+
+// --- Handler -----------------------------------------------------------------
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -56,7 +62,7 @@ serve(async (req) => {
   const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
   const ELASTIC_KEY = Deno.env.get("ELASTICEMAIL_API_KEY") || ""
 
-  // QA overrides (para free tier)
+  // QA overrides (para free tier / sandbox)
   const QA_TO = Deno.env.get("QA_EMAIL_SINK") || ""
   const QA_FROM = Deno.env.get("QA_EMAIL_FROM") || ""
 
@@ -78,10 +84,10 @@ serve(async (req) => {
   const supabase = createClient(SB_URL, SB_KEY)
 
   try {
-    // 1) trae touch_runs email scheduled
+    // 1) Trae touch_runs de canal email pendientes
     const { data: runs, error: rErr } = await supabase
       .from("touch_runs")
-      .select("id, lead_id, payload")
+      .select("id, lead_id, account_id, payload")
       .eq("channel", "email")
       .eq("status", "scheduled")
       .limit(50)
@@ -93,7 +99,35 @@ serve(async (req) => {
 
     for (const run of runs ?? []) {
       try {
-        // 2) trae lead email (prioriza lead_enriched)
+        const accountId: string =
+          (run as any).account_id ||
+          Deno.env.get("DEFAULT_ACCOUNT_ID") ||
+          "a0e3fc34-0bc4-410f-b363-a25b00fa16b8"
+
+        // 2) Resolver provider multitenant para email
+        const providerCfg = await getChannelProvider(supabase, accountId, "email")
+
+        if (!providerCfg) {
+          throw new Error(
+            `No provider configured for account_id=${accountId} channel=email`,
+          )
+        }
+
+        if (providerCfg.provider !== "elastic_email") {
+          throw new Error(
+            `Unsupported email provider: ${providerCfg.provider}. Only elastic_email is implemented.`,
+          )
+        }
+
+        if (!ELASTIC_KEY) {
+          throw new Error("Missing ELASTICEMAIL_API_KEY env var")
+        }
+
+        const cfg = (providerCfg.config || {}) as Record<string, unknown>
+        const cfgFrom = (cfg.from as string) || ""
+        const cfgFromName = (cfg.from_name as string) || ""
+
+        // 3) Trae lead email (prioriza lead_enriched si existe)
         const { data: leadE } = await supabase
           .from("lead_enriched")
           .select("email, name")
@@ -109,37 +143,43 @@ serve(async (req) => {
         const toEmail = (leadE?.email || lead?.email || "").trim()
         if (!toEmail) throw new Error("Lead has no email")
 
-        // 3) elige sender activo (primero gmail QA si existe)
+        // 4) Elige sender activo por cuenta (domain_accounts)
         const { data: senderAcc, error: sErr } = await supabase
           .from("domain_accounts")
           .select("email, status")
           .eq("status", "active")
+          .eq("account_id", accountId)
           .order("created_at", { ascending: true })
           .limit(1)
           .maybeSingle()
+
         if (sErr || !senderAcc?.email) {
-          throw new Error("No active sender account")
+          throw new Error("No active sender account for this account_id")
         }
 
-        const subject = run.payload?.subject || "Hello"
-        const body = run.payload?.body || "Hi there"
+        const subject = (run as any).payload?.subject || "Hello"
+        const body = (run as any).payload?.body || "Hi there"
         const bodyHtml = `<p>${body}</p>`
 
-        // 4) QA overrides para elastic free tier
-        const finalFrom = QA_FROM || senderAcc.email
+        // 5) QA overrides para elastic free tier
+        const providerFrom = cfgFrom || senderAcc.email
+        const providerFromName = cfgFromName || senderAcc.email
+
+        const finalFrom = QA_FROM || providerFrom
         const finalTo = QA_TO || toEmail
 
-        // 5) send
+        // 6) Enviar usando Elastic Email
         await sendElasticEmail({
           apiKey: ELASTIC_KEY,
           from: finalFrom,
+          fromName: providerFromName,
           to: finalTo,
           subject,
           bodyHtml,
           bodyText: body,
         })
 
-        // 6) mark sent
+        // 7) Marcar como enviado
         await supabase
           .from("touch_runs")
           .update({
@@ -161,13 +201,13 @@ serve(async (req) => {
       }
     }
 
-    // 7) Log en core_memory_events (best-effort)
+    // 8) Log en core_memory_events (best-effort)
     try {
       await logEvaluation({
         supabase,
         event_type: "evaluation",
         actor: "dispatcher",
-        label: "dispatch_touch_email_v3",
+        label: "dispatch_touch_email_v4",
         kpis: {
           channel: "email",
           processed,

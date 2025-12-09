@@ -3,7 +3,7 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts"
 
-const VERSION = "dispatch-touch-whatsapp-v2_2025-12-08"
+const VERSION = "dispatch-touch-whatsapp-v2_2025-12-09_multitenant"
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -23,24 +23,31 @@ function isValidE164(p: string | null) {
 }
 
 serve(async (req) => {
-  if (req.method === "OPTIONS")
+  if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders })
+  }
 
   const SB_URL = Deno.env.get("SUPABASE_URL")
   const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
 
   if (!SB_URL || !SB_KEY) {
     return new Response(
-      JSON.stringify({ ok: false, stage: "env", error: "Missing Supabase env vars" }),
-      { status: 500, headers: corsHeaders }
+      JSON.stringify({
+        ok: false,
+        stage: "env",
+        error: "Missing Supabase env vars",
+        version: VERSION,
+      }),
+      { status: 500, headers: corsHeaders },
     )
   }
 
   const supabase = createClient(SB_URL, SB_KEY)
 
+  // ENV globales (por ahora solo Twilio, pero el switch de proveedor es por tabla)
   const TWILIO_SID = Deno.env.get("TWILIO_ACCOUNT_SID")
   const TWILIO_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN")
-  const WA_FROM = Deno.env.get("TWILIO_WHATSAPP_FROM")
+  const WA_FROM = Deno.env.get("TWILIO_WHATSAPP_FROM") // ej: "whatsapp:+14155238886"
 
   const QA_SINK = Deno.env.get("QA_WHATSAPP_SINK") ?? null
   const DRY_DEFAULT = Deno.env.get("DRY_RUN_WHATSAPP") === "true"
@@ -48,28 +55,19 @@ serve(async (req) => {
   let body: any = {}
   try {
     body = await req.json()
-  } catch {}
+  } catch {
+    // si no hay body, usamos defaults
+  }
 
   const limit = Number(body.limit ?? 50)
   const dryRun = Boolean(body.dry_run ?? DRY_DEFAULT)
 
-  if (!TWILIO_SID || !TWILIO_TOKEN || !WA_FROM) {
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        stage: "env",
-        error: "Missing Twilio credentials",
-      }),
-      { status: 500, headers: corsHeaders }
-    )
-  }
-
-  //────────────────────────────────────────────
-  // 1) FETCH SCHEDULED WHATSAPP TOUCH RUNS
-  //────────────────────────────────────────────
+  //────────────────────────────────────────
+  // 1) TRAER TOUCH RUNS WHATSAPP
+  //────────────────────────────────────────
   const { data: runs, error: rErr } = await supabase
     .from("touch_runs")
-    .select("id, lead_id, payload, scheduled_at")
+    .select("id, lead_id, account_id, payload, scheduled_at")
     .eq("channel", "whatsapp")
     .eq("status", "scheduled")
     .order("scheduled_at", { ascending: true })
@@ -77,8 +75,13 @@ serve(async (req) => {
 
   if (rErr) {
     return new Response(
-      JSON.stringify({ ok: false, stage: "select_runs", error: rErr.message }),
-      { status: 500, headers: corsHeaders }
+      JSON.stringify({
+        ok: false,
+        stage: "select_runs",
+        error: rErr.message,
+        version: VERSION,
+      }),
+      { status: 500, headers: corsHeaders },
     )
   }
 
@@ -91,27 +94,66 @@ serve(async (req) => {
     })
 
     return new Response(
-      JSON.stringify({ ok: true, version: VERSION, processed: 0, dryRun }),
-      { headers: corsHeaders }
+      JSON.stringify({
+        ok: true,
+        version: VERSION,
+        processed: 0,
+        failed: 0,
+        dryRun,
+      }),
+      { headers: corsHeaders },
     )
   }
 
-  //────────────────────────────────────────────
-  // 2) PROCESS EACH RUN
-  //────────────────────────────────────────────
+  //────────────────────────────────────────
+  // 2) LOOP PRINCIPAL
+  //────────────────────────────────────────
   let processed = 0
   const errors: any[] = []
 
   for (const run of runs) {
     try {
-      // Pull enriched phone first
+      // 2.1 Resolver proveedor para esta cuenta/canal
+      if (!run.account_id) {
+        throw new Error("missing_account_id_on_run")
+      }
+
+      const { data: providerRow, error: provErr } = await supabase
+        .from("account_provider_settings")
+        .select("provider, config")
+        .eq("account_id", run.account_id)
+        .eq("channel", "whatsapp")
+        .eq("is_default", true)
+        .maybeSingle()
+
+      if (provErr) {
+        throw new Error(`provider_lookup_failed:${provErr.message}`)
+      }
+      if (!providerRow?.provider) {
+        throw new Error("no_default_provider_for_account_whatsapp")
+      }
+
+      const provider = providerRow.provider
+      const config = (providerRow.config ?? {}) as Record<string, unknown>
+
+      if (provider !== "twilio") {
+        throw new Error(`unsupported_provider:${provider}`)
+      }
+
+      if (!TWILIO_SID || !TWILIO_TOKEN || !WA_FROM) {
+        throw new Error("missing_twilio_env")
+      }
+
+      // 2.2 Resolver teléfono del lead (lead_enriched primero)
       const { data: leadE, error: leErr } = await supabase
         .from("lead_enriched")
         .select("phone")
         .eq("id", run.lead_id)
         .maybeSingle()
 
-      if (leErr) throw new Error("lead_enriched lookup failed")
+      if (leErr) {
+        throw new Error("lead_enriched_lookup_failed")
+      }
 
       const phoneRaw = cleanPhone(leadE?.phone ?? null)
 
@@ -127,6 +169,7 @@ serve(async (req) => {
         run.payload?.body ||
         "Hola!"
 
+      // 2.3 Enviar por Twilio (a menos que dryRun)
       if (!dryRun) {
         const twilioResp = await fetch(
           `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`,
@@ -141,7 +184,7 @@ serve(async (req) => {
               From: WA_FROM!,
               Body: message,
             }),
-          }
+          },
         )
 
         if (!twilioResp.ok) {
@@ -150,12 +193,19 @@ serve(async (req) => {
         }
       }
 
+      // 2.4 Marcar como enviado
       await supabase
         .from("touch_runs")
         .update({
           status: "sent",
           sent_at: new Date().toISOString(),
-          payload: { ...(run.payload ?? {}), to, dryRun },
+          payload: {
+            ...(run.payload ?? {}),
+            to,
+            dryRun,
+            provider,
+            provider_config: config,
+          },
           error: null,
         })
         .eq("id", run.id)
@@ -167,14 +217,18 @@ serve(async (req) => {
         event_source: "dispatcher",
         label: "whatsapp_sent",
         kpis: { processed, failed: errors.length },
+        notes: `provider=${provider}`,
       })
     } catch (e: any) {
-      const msg = e.message ?? String(e)
-      errors.push({ id: run.id, error: msg })
+      const msg = e?.message ?? String(e)
+      errors.push({ id: run.id, lead_id: run.lead_id, error: msg })
 
       await supabase
         .from("touch_runs")
-        .update({ status: "failed", error: msg })
+        .update({
+          status: "failed",
+          error: msg,
+        })
         .eq("id", run.id)
 
       await logEvaluation(supabase, {
@@ -187,9 +241,9 @@ serve(async (req) => {
     }
   }
 
-  //────────────────────────────────────────────
-  // 3) SUMMARY LOG
-  //────────────────────────────────────────────
+  //────────────────────────────────────────
+  // 3) LOG RESUMEN
+  //────────────────────────────────────────
   await logEvaluation(supabase, {
     event_source: "dispatcher",
     label: "whatsapp_summary",
@@ -208,6 +262,6 @@ serve(async (req) => {
       errors,
       dryRun,
     }),
-    { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
   )
 })

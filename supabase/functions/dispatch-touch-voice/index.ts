@@ -1,8 +1,9 @@
+// supabase/functions/dispatch-touch-voice/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts"
 
-const VERSION = "dispatch-touch-voice-v4_2025-11-24"
+const VERSION = "dispatch-touch-voice-v5_2025-12-09_multitenant"
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -70,10 +71,27 @@ serve(async (req) => {
     return new Response("ok", { headers: corsHeaders })
   }
 
-  const SB_URL = Deno.env.get("SUPABASE_URL")!
-  const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+  const SB_URL = Deno.env.get("SUPABASE_URL")
+  const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
+
+  if (!SB_URL || !SB_KEY) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        version: VERSION,
+        stage: "env",
+        error: "Missing Supabase env vars",
+      }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    )
+  }
+
   const supabase = createClient(SB_URL, SB_KEY)
 
+  // Twilio global env (por ahora usamos uno global aunque el switch es por cuenta)
   const TWILIO_SID = Deno.env.get("TWILIO_ACCOUNT_SID") || ""
   const TWILIO_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN") || ""
   const TWILIO_FROM = Deno.env.get("TWILIO_FROM_NUMBER") || ""
@@ -81,6 +99,7 @@ serve(async (req) => {
   const PUBLIC_BASE_URL = Deno.env.get("PUBLIC_BASE_URL") || SB_URL
   const VOICE_WEBHOOK_PATH =
     Deno.env.get("VOICE_WEBHOOK_PATH") || "voice-webhook"
+
   const DRY_RUN = (Deno.env.get("DRY_RUN") || "false") === "true"
 
   const DEFAULT_VOICE_ID =
@@ -97,12 +116,14 @@ serve(async (req) => {
         limit = Math.min(100, b.limit)
       }
     }
-  } catch (_) {}
+  } catch (_) {
+    // ignore
+  }
 
-  // 1) traer candidatos queued
+  // 1) traer candidatos queued/scheduled (ahora con account_id)
   const { data: candidates, error: cErr } = await supabase
     .from("touch_runs")
-    .select("id, lead_id, payload, step, created_at")
+    .select("id, lead_id, account_id, payload, step, created_at, scheduled_at")
     .eq("channel", "voice")
     .in("status", ["queued", "scheduled"])
     .lte("scheduled_at", new Date().toISOString())
@@ -133,7 +154,7 @@ serve(async (req) => {
         supabase,
         event_type: "evaluation",
         actor: "dispatcher",
-        label: "dispatch_touch_voice_v4",
+        label: "dispatch_touch_voice_v5",
         kpis: {
           channel: "voice",
           processed: 0,
@@ -161,13 +182,13 @@ serve(async (req) => {
     )
   }
 
-  // 2) claim atómico -> processing
+  // 2) claim atómico -> processing (incluyendo account_id)
   const { data: runs, error: claimErr } = await supabase
     .from("touch_runs")
     .update({ status: "processing" })
     .in("id", ids)
     .eq("status", "queued")
-    .select("id, lead_id, payload, step, created_at")
+    .select("id, lead_id, account_id, payload, step, created_at")
 
   if (claimErr) {
     return new Response(
@@ -190,8 +211,37 @@ serve(async (req) => {
   for (const tr of runs ?? []) {
     try {
       if (!tr.lead_id) throw new Error("missing_lead_id")
+      if (!tr.account_id) throw new Error("missing_account_id_on_run")
 
-      // 3) fetch lead
+      // 2.1 resolver proveedor por cuenta/canal
+      const { data: providerRow, error: provErr } = await supabase
+        .from("account_provider_settings")
+        .select("provider, config")
+        .eq("account_id", tr.account_id)
+        .eq("channel", "voice")
+        .eq("is_default", true)
+        .maybeSingle()
+
+      if (provErr) {
+        throw new Error(`provider_lookup_failed:${provErr.message}`)
+      }
+      if (!providerRow?.provider) {
+        throw new Error("no_default_provider_for_account_voice")
+      }
+
+      const provider = providerRow.provider
+      const providerConfig =
+        (providerRow.config ?? {}) as Record<string, unknown>
+
+      if (provider !== "twilio") {
+        throw new Error(`unsupported_provider:${provider}`)
+      }
+
+      if (!TWILIO_SID || !TWILIO_TOKEN || !TWILIO_FROM) {
+        throw new Error("missing_twilio_env")
+      }
+
+      // 2.2 fetch lead
       const { data: lead, error: lErr } = await supabase
         .from("leads")
         .select("id, phone, contact_name, company_name, country")
@@ -222,7 +272,7 @@ serve(async (req) => {
       const renderWebhook = payload.render_webhook || DEFAULT_RENDER_WEBHOOK
       if (!renderWebhook) throw new Error("missing_render_webhook")
 
-      // 4) render audio
+      // 2.3 render audio (función render-voice)
       const { data: audioData, error: aErr } = await supabase.functions.invoke(
         "render-voice",
         {
@@ -239,12 +289,9 @@ serve(async (req) => {
         `${PUBLIC_BASE_URL}/functions/v1/${VOICE_WEBHOOK_PATH}` +
         `?audio_url=${encodeURIComponent(audioUrl)}`
 
-      // 5) call twilio (si no dry)
+      // 2.4 call Twilio (a menos que DRY_RUN)
       let twilio_call_sid: string | null = null
       if (!DRY_RUN) {
-        if (!TWILIO_SID || !TWILIO_TOKEN || !TWILIO_FROM) {
-          throw new Error("Missing Twilio secrets")
-        }
         const call = await twilioCall({
           to,
           sid: TWILIO_SID,
@@ -255,7 +302,7 @@ serve(async (req) => {
         twilio_call_sid = call.sid
       }
 
-      // 6) mark sent
+      // 2.5 marcar como sent
       await supabase
         .from("touch_runs")
         .update({
@@ -269,6 +316,8 @@ serve(async (req) => {
             to_normalized: to,
             voice_id: voiceId,
             twilio_call_sid,
+            provider,
+            provider_config: providerConfig,
           },
         })
         .eq("id", tr.id)
@@ -285,17 +334,21 @@ serve(async (req) => {
         })
         .eq("id", tr.id)
 
-      errors.push({ touch_run_id: tr.id, lead_id: tr.lead_id, error: msg })
+      errors.push({
+        touch_run_id: tr.id,
+        lead_id: tr.lead_id,
+        error: msg,
+      })
     }
   }
 
-  // 3) Log en core_memory_events (best-effort, resumen del run)
+  // 3) Log resumen en core_memory_events (best-effort)
   try {
     await logEvaluation({
       supabase,
       event_type: "evaluation",
       actor: "dispatcher",
-      label: "dispatch_touch_voice_v4",
+      label: "dispatch_touch_voice_v5",
       kpis: {
         channel: "voice",
         processed,
