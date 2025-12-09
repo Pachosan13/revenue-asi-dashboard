@@ -1,16 +1,18 @@
 "use client"
 
-import React, { useMemo, useState } from "react"
+import React, { useMemo, useState, useEffect } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { AlertTriangle, Pause, Play, Plus, RefreshCcw, Sparkles } from "lucide-react"
 import Link from "next/link"
+
 import { Card, CardContent, CardHeader, Button } from "@/components/ui-custom"
-import { Campaign, CampaignStatus } from "@/types/campaign"
-import { getCampaignById, messageVariants, campaignTouches } from "../mock-data"
+import { Campaign, CampaignStatus, CampaignType } from "@/types/campaign"
+import { messageVariants, campaignTouches } from "../mock-data"
 import { CampaignKpis } from "@/components/campaigns/CampaignKpis"
 import { CadenceBuilder } from "@/components/campaigns/CadenceBuilder"
 import { MessageEditor } from "@/components/campaigns/MessageEditor"
 import { SystemEventsPanel } from "@/components/campaigns/SystemEventsPanel"
+import { supabaseBrowser } from "@/lib/supabase"
 
 type StartCampaignResponse =
   | {
@@ -26,16 +28,25 @@ type StartCampaignResponse =
       error: string
     }
 
+const statusPill: Record<CampaignStatus, string> = {
+  live: "bg-emerald-500/20 text-emerald-200 border border-emerald-400/40",
+  paused: "bg-amber-500/20 text-amber-100 border border-amber-400/30",
+  draft: "bg-white/5 text-white/70 border border-white/15",
+}
+
+const statusMap: Record<string, CampaignStatus> = {
+  active: "live",
+  paused: "paused",
+  draft: "draft",
+}
+
 export default function CampaignDetailPage() {
   const params = useParams<{ id: string }>()
   const router = useRouter()
+  const supabase = supabaseBrowser()
 
-  const campaign: Campaign | undefined = useMemo(() => {
-    if (params?.id === "new") return undefined
-    return getCampaignById(params.id)
-  }, [params])
-
-  const [status, setStatus] = useState<CampaignStatus>(campaign?.status ?? "draft")
+  const [campaign, setCampaign] = useState<Campaign | null>(null)
+  const [status, setStatus] = useState<CampaignStatus>("draft")
   const [isStarting, setIsStarting] = useState(false)
   const [startFeedback, setStartFeedback] = useState<
     | {
@@ -44,9 +55,67 @@ export default function CampaignDetailPage() {
       }
     | null
   >(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  // --------------------------------
+  // Load campaign from Supabase
+  // --------------------------------
+  useEffect(() => {
+    async function loadCampaign() {
+      if (!params?.id || params.id === "new") {
+        setCampaign(null)
+        setStatus("draft")
+        setLoading(false)
+        return
+      }
+
+      setLoading(true)
+      setError(null)
+
+      const { data, error } = await supabase
+        .from("campaigns")
+        .select("*")
+        .eq("id", params.id)
+        .single()
+
+      if (error) {
+        console.error("Error loading campaign", error)
+        setError(error.message)
+        setLoading(false)
+        return
+      }
+
+      const mappedStatus: CampaignStatus =
+        statusMap[data.status] ?? "draft"
+
+      const campaignFromDb: Campaign = {
+        id: data.id,
+        name: data.name ?? "Untitled",
+        type: (data.type ?? "outbound") as CampaignType,
+        status: mappedStatus,
+        leads_count: data.leads_count ?? 0,
+        reply_rate: data.reply_rate ?? 0,
+        meetings_booked: data.meetings_booked ?? 0,
+        conversion: data.conversion ?? 0,
+        created_at: data.created_at ?? new Date().toISOString().slice(0, 10),
+        error_rate: data.error_rate ?? 0,
+        daily_throughput: data.daily_throughput ?? 0,
+        leads_contacted: data.leads_contacted ?? 0,
+        touches: data.touches ?? campaignTouches,
+        message_variants: data.message_variants ?? messageVariants,
+      }
+
+      setCampaign(campaignFromDb)
+      setStatus(campaignFromDb.status)
+      setLoading(false)
+    }
+
+    loadCampaign()
+  }, [params?.id, supabase])
 
   const effectiveCampaign: Campaign = useMemo(() => {
-    if (!campaign) {
+    if (!campaign || params?.id === "new") {
       return {
         id: "new",
         name: "New outbound program",
@@ -64,23 +133,32 @@ export default function CampaignDetailPage() {
         message_variants: messageVariants,
       }
     }
-    return campaign
-  }, [campaign])
-
-  const statusPill: Record<CampaignStatus, string> = {
-    live: "bg-emerald-500/20 text-emerald-200 border border-emerald-400/40",
-    paused: "bg-amber-500/20 text-amber-100 border border-amber-400/30",
-    draft: "bg-white/5 text-white/70 border border-white/15",
-  }
+    return { ...campaign, status }
+  }, [campaign, status, params])
 
   const eventsData = {
-    deliveries: { label: "Deliveries", color: "#34d399", data: [40, 52, 64, 62, 71, 78, 85] },
-    failures: { label: "Failures", color: "#fbbf24", data: [2, 3, 4, 3, 5, 4, 3] },
-    retries: { label: "Retries", color: "#a78bfa", data: [5, 7, 6, 6, 8, 7, 6] },
+    deliveries: {
+      label: "Deliveries",
+      color: "#34d399",
+      data: [40, 52, 64, 62, 71, 78, 85],
+    },
+    failures: {
+      label: "Failures",
+      color: "#fbbf24",
+      data: [2, 3, 4, 3, 5, 4, 3],
+    },
+    retries: {
+      label: "Retries",
+      color: "#a78bfa",
+      data: [5, 7, 6, 6, 8, 7, 6],
+    },
   }
 
   const emptyState = !campaign || params?.id === "new"
 
+  // --------------------------------
+  // Start campaign
+  // --------------------------------
   const handleStartCampaign = async () => {
     if (!campaign || !campaign.id || campaign.id === "new") {
       setStartFeedback({ type: "error", message: "No campaign to start." })
@@ -109,44 +187,92 @@ export default function CampaignDetailPage() {
 
       if (!response.ok || !payload || payload.ok !== true) {
         const errorMessage =
-          (payload && "error" in payload ? payload.error : null) || response.statusText || "Failed to start campaign"
+          (payload && "error" in payload ? payload.error : null) ||
+          response.statusText ||
+          "Failed to start campaign"
         throw new Error(errorMessage)
       }
 
       setStatus("live")
       setStartFeedback({
         type: "success",
-        message: `Campaign started. Selected ${payload.selected ?? 0} leads, inserted ${payload.inserted ?? 0}.`,
+        message: `Campaign started. Selected ${
+          (payload as any).selected ?? 0
+        } leads, inserted ${(payload as any).inserted ?? 0}.`,
       })
       router.refresh()
     } catch (error) {
       setStartFeedback({
         type: "error",
-        message: error instanceof Error ? error.message : "Unable to start campaign",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unable to start campaign",
       })
     } finally {
       setIsStarting(false)
     }
   }
 
+  // --------------------------------
+  // Render
+  // --------------------------------
+
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center text-white/60">
+        Loading campaign...
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-4 text-sm text-red-300">
+        <p>Failed to load campaign.</p>
+        <p className="text-red-400/80">{error}</p>
+        <Button
+          variant="subtle"
+          onClick={() => router.push("/campaigns")}
+        >
+          Back to campaigns
+        </Button>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.16em] text-white/50">Outbound campaign</p>
-          <h1 className="text-3xl font-semibold text-white">{effectiveCampaign.name}</h1>
-          <p className="text-sm text-white/60">Control cadence, copy, and system health from this console.</p>
+          <p className="text-xs uppercase tracking-[0.16em] text-white/50">
+            Outbound campaign
+          </p>
+          <h1 className="text-3xl font-semibold text-white">
+            {effectiveCampaign.name}
+          </h1>
+          <p className="text-sm text-white/60">
+            Control cadence, copy, and system health from this console.
+          </p>
           <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60">
             <span
               className={`h-2 w-2 rounded-full ${
-                status === "live" ? "bg-emerald-400" : status === "paused" ? "bg-amber-300" : "bg-white/40"
+                status === "live"
+                  ? "bg-emerald-400"
+                  : status === "paused"
+                  ? "bg-amber-300"
+                  : "bg-white/40"
               }`}
             />
-            <span className={`rounded-full px-3 py-1 text-xs capitalize ${statusPill[status]}`}>
+            <span
+              className={`rounded-full px-3 py-1 text-xs capitalize ${statusPill[status]}`}
+            >
               {status}
             </span>
             <button
-              onClick={() => setStatus((s) => (s === "live" ? "paused" : "live"))}
+              onClick={() =>
+                setStatus((s) => (s === "live" ? "paused" : "live"))
+              }
               className="text-emerald-300 underline decoration-emerald-400/60 decoration-dashed"
             >
               Toggle
@@ -154,7 +280,12 @@ export default function CampaignDetailPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="subtle" size="sm" className="gap-2" onClick={() => router.push("/campaigns")}>
+          <Button
+            variant="subtle"
+            size="sm"
+            className="gap-2"
+            onClick={() => router.push("/campaigns")}
+          >
             <RefreshCcw size={16} /> Back to list
           </Button>
           <Button variant="primary" size="md" className="gap-2">
@@ -171,14 +302,22 @@ export default function CampaignDetailPage() {
             <div className="rounded-full bg-emerald-500/20 p-3 text-emerald-300 shadow-[0_0_40px_rgba(16,185,129,0.4)]">
               <Plus />
             </div>
-            <p className="text-lg font-semibold text-white">Start a new outbound program</p>
+            <p className="text-lg font-semibold text-white">
+              Start a new outbound program
+            </p>
             <p className="max-w-2xl text-sm text-white/60">
-              Draft cadence, copy, and system limits here. When you’re ready, switch status to live and the OS will begin orchestrating sends.
+              Draft cadence, copy, and system limits here. When you’re ready,
+              switch status to live and the OS will begin orchestrating sends.
             </p>
             <div className="flex gap-2">
-              <Button variant="primary">Generate from template</Button>
+              <Link href="/campaigns/new">
+                <Button variant="primary">Generate from template</Button>
+              </Link>
               <Link href="/campaigns">
-                <Button variant="ghost" className="border border-white/10">
+                <Button
+                  variant="ghost"
+                  className="border border-white/10"
+                >
                   Cancel
                 </Button>
               </Link>
@@ -189,8 +328,16 @@ export default function CampaignDetailPage() {
 
       <div className="grid gap-4 xl:grid-cols-[2fr,1.2fr]">
         <div className="space-y-4">
-          <CadenceBuilder initialTouches={effectiveCampaign.touches ?? campaignTouches} />
-          <MessageEditor initialVariants={effectiveCampaign.message_variants ?? messageVariants} />
+          <CadenceBuilder
+            initialTouches={
+              effectiveCampaign.touches ?? campaignTouches
+            }
+          />
+          <MessageEditor
+            initialVariants={
+              effectiveCampaign.message_variants ?? messageVariants
+            }
+          />
         </div>
 
         <div className="space-y-4">
@@ -201,9 +348,17 @@ export default function CampaignDetailPage() {
           />
 
           <Card className="border-white/10 bg-white/5">
-            <CardHeader title="Quality gates" description="Blocks, throttles, and alerts" />
+            <CardHeader
+              title="Quality gates"
+              description="Blocks, throttles, and alerts"
+            />
             <CardContent className="space-y-3">
-              {["SPF/DMARC monitor", "Opt-out guardrails", "DNC sync", "Rate-limit override"].map((item) => (
+              {[
+                "SPF/DMARC monitor",
+                "Opt-out guardrails",
+                "DNC sync",
+                "Rate-limit override",
+              ].map((item) => (
                 <div
                   key={item}
                   className="flex items-center justify-between rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-white/70"
@@ -212,7 +367,9 @@ export default function CampaignDetailPage() {
                     <span className="h-2 w-2 rounded-full bg-emerald-400" />
                     {item}
                   </div>
-                  <span className="rounded-full bg-emerald-500/15 px-2 py-1 text-xs text-emerald-200">Healthy</span>
+                  <span className="rounded-full bg-emerald-500/15 px-2 py-1 text-xs text-emerald-200">
+                    Healthy
+                  </span>
                 </div>
               ))}
             </CardContent>
@@ -240,7 +397,8 @@ export default function CampaignDetailPage() {
           disabled={isStarting || !campaign || campaign.id === "new"}
           onClick={handleStartCampaign}
         >
-          <Play size={16} /> {isStarting ? "Starting..." : "Start campaign"}
+          <Play size={16} />{" "}
+          {isStarting ? "Starting..." : "Start campaign"}
         </Button>
         <Button variant="subtle" className="gap-2 text-amber-200">
           <Pause size={16} /> Pause
