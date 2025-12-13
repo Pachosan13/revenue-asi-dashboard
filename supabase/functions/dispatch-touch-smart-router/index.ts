@@ -1,9 +1,10 @@
 // supabase/functions/dispatch-touch-smart-router/index.ts
+
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts"
 
-const VERSION = "dispatch-touch-smart-router-v1_2025-12-09"
+const VERSION = "dispatch-touch-smart-router-v3_2025-12-09"
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -12,26 +13,13 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 }
 
-type TouchRun = {
-  id: string
-  account_id: string | null
-  lead_id: string | null
-  channel: string | null
-  status: string
-  scheduled_at: string | null
-  payload: Record<string, unknown> | null
-}
-
-type ChannelCaps = {
-  enabled: Set<string>
-  withProvider: Set<string>
-}
-
 serve(async (req) => {
+  // Preflight
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders })
   }
 
+  // Env
   const SB_URL = Deno.env.get("SUPABASE_URL")
   const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
 
@@ -39,8 +27,9 @@ serve(async (req) => {
     return new Response(
       JSON.stringify({
         ok: false,
+        version: VERSION,
         stage: "env",
-        error: "Missing Supabase env",
+        error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY",
       }),
       {
         status: 500,
@@ -51,7 +40,7 @@ serve(async (req) => {
 
   const supabase = createClient(SB_URL, SB_KEY)
 
-  // -------- body: limit, fallback, account filter opcional --------
+  // Body
   let body: any = {}
   try {
     body = await req.json()
@@ -59,39 +48,44 @@ serve(async (req) => {
     body = {}
   }
 
-  const limit = Math.min(100, Number(body.limit ?? 50))
+  const lead_id = body?.lead_id as string | undefined
+  const step = Number(body?.step ?? 1)
+  const dryRun = Boolean(body?.dry_run ?? true)
 
-  const fallbackOrder: string[] =
-    Array.isArray(body.fallback_order) && body.fallback_order.length > 0
-      ? body.fallback_order
-      : ["sms", "whatsapp", "email"]
-
-  const filterAccount: string | null =
-    typeof body.account_id === "string" ? body.account_id : null
-
-  // -------- 1) Traer touch_runs "auto" / sin canal, en queued --------
-  let query = supabase
-    .from("touch_runs")
-    .select(
-      "id, account_id, lead_id, channel, status, scheduled_at, payload",
-    )
-    .eq("status", "queued")
-    .or("channel.eq.auto,channel.is.null")
-
-  if (filterAccount) {
-    query = query.eq("account_id", filterAccount)
-  }
-
-  const { data: runs, error: rErr } = await query
-    .order("scheduled_at", { ascending: true, nullsFirst: true })
-    .limit(limit)
-
-  if (rErr) {
+  if (!lead_id) {
     return new Response(
       JSON.stringify({
         ok: false,
-        stage: "select_runs",
-        error: rErr.message,
+        version: VERSION,
+        stage: "input",
+        error: "lead_id is required",
+      }),
+      {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    )
+  }
+
+  // 1) Recuperar el último touch_runs de ese lead + step
+  const { data: lastTouch, error: ltErr } = await supabase
+    .from("touch_runs")
+    .select(
+      "id, campaign_id, campaign_run_id, lead_id, step, channel, payload, account_id, message_class, created_at",
+    )
+    .eq("lead_id", lead_id)
+    .eq("step", step)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (ltErr) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        version: VERSION,
+        stage: "load_last_touch",
+        error: ltErr.message,
       }),
       {
         status: 500,
@@ -100,198 +94,216 @@ serve(async (req) => {
     )
   }
 
-  const typedRuns = (runs ?? []) as TouchRun[]
+  if (!lastTouch) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        version: VERSION,
+        stage: "load_last_touch",
+        error: "No touch_runs found for this lead_id + step",
+      }),
+      {
+        status: 404,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    )
+  }
 
-  if (!typedRuns.length) {
-    // log best-effort
+  // 2) Llamar a la función SQL decide_next_channel_for_lead
+  const { data: decisions, error: dErr } = await supabase.rpc(
+    "decide_next_channel_for_lead",
+    {
+      p_lead_id: lead_id,
+      p_step: step,
+    },
+  )
+
+  if (dErr) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        version: VERSION,
+        stage: "decide_next_channel",
+        error: dErr.message,
+      }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    )
+  }
+
+  if (!decisions || decisions.length === 0) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        version: VERSION,
+        stage: "decide_next_channel",
+        error: "No decision returned from decide_next_channel_for_lead",
+      }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    )
+  }
+
+  const decisionRow = decisions[0] as {
+    lead_id: string
+    step: number
+    current_channel: string
+    decision: string
+    next_channel: string | null
+    attempts_done: number
+    attempts_allowed: number
+    cooldown_minutes: number | null
+    last_attempt_at: string | null
+    cooldown_until: string | null
+  }
+
+  const decision = decisionRow.decision
+  const nextChannel = decisionRow.next_channel || decisionRow.current_channel
+
+  // 3) Si la decisión es STOP o WAIT_COOLDOWN → no creamos nada
+  if (decision === "stop" || decision === "wait_cooldown") {
     try {
-      await logEvaluation({
-        supabase,
-        event_type: "evaluation",
-        actor: "router",
-        label: "smart_router_empty",
-        kpis: { processed: 0, failed: 0 },
-        notes: "No auto/queued touch_runs to route",
+      await logEvaluation(supabase, {
+        lead_id,
+        event_source: "router",
+        label: "router_decision_no_touch",
+        kpis: {
+          step,
+          attempts_done: decisionRow.attempts_done,
+          attempts_allowed: decisionRow.attempts_allowed,
+        },
+        notes: `decision=${decision} next_channel=${nextChannel}`,
       })
     } catch (e) {
-      console.error("logEvaluation failed in smart router (empty)", e)
+      console.error("logEvaluation router (no_touch) error:", e)
     }
 
     return new Response(
       JSON.stringify({
         ok: true,
         version: VERSION,
-        processed: 0,
-        failed: 0,
-        fallbackOrder,
+        lead_id,
+        step,
+        decision,
+        next_channel: nextChannel,
+        created_touch: false,
+        dry_run: dryRun,
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   }
 
-  // -------- 2) Cache por account_id: capacidades + providers --------
-  const accountCache = new Map<string, ChannelCaps>()
-  const errors: any[] = []
-  let processed = 0
-
-  async function getAccountCaps(accountId: string): Promise<ChannelCaps> {
-    const cached = accountCache.get(accountId)
-    if (cached) return cached
-
-    // canales habilitados
-    const { data: capsRows, error: capsErr } = await supabase
-      .from("account_channel_capabilities")
-      .select("channel, is_enabled")
-      .eq("account_id", accountId)
-
-    if (capsErr) {
-      throw new Error(`capabilities_lookup_failed:${capsErr.message}`)
-    }
-
-    const enabled = new Set<string>(
-      (capsRows ?? [])
-        .filter((r: any) => r.is_enabled)
-        .map((r: any) => String(r.channel).toLowerCase()),
-    )
-
-    // canales con provider default
-    const { data: provRows, error: provErr } = await supabase
-      .from("account_provider_settings")
-      .select("channel, provider, is_default")
-      .eq("account_id", accountId)
-      .eq("is_default", true)
-
-    if (provErr) {
-      throw new Error(`provider_settings_lookup_failed:${provErr.message}`)
-    }
-
-    const withProvider = new Set<string>(
-      (provRows ?? []).map((r: any) =>
-        String(r.channel).toLowerCase(),
-      ),
-    )
-
-    const caps: ChannelCaps = { enabled, withProvider }
-    accountCache.set(accountId, caps)
-    return caps
-  }
-
-  // -------- 3) LOOP: decidir canal y actualizar touch_runs --------
-  for (const tr of typedRuns) {
-    try {
-      if (!tr.account_id) {
-        throw new Error("missing_account_id_on_touch_run")
-      }
-
-      const caps = await getAccountCaps(tr.account_id)
-
-      const available = new Set(
-        [...caps.enabled].filter((c) => caps.withProvider.has(c)),
-      )
-
-      if (!available.size) {
-        throw new Error("no_available_channels_for_account")
-      }
-
-      // order from payload override, si existe
-      const payload = (tr.payload ?? {}) as Record<string, unknown>
-      const localFallback =
-        Array.isArray(payload.fallback_order) &&
-        (payload.fallback_order as string[]).length > 0
-          ? (payload.fallback_order as string[])
-          : fallbackOrder
-
-      const chosen = localFallback.find((ch) =>
-        available.has(String(ch).toLowerCase()),
-      )
-
-      if (!chosen) {
-        throw new Error(
-          `no_channel_match_fallback:${localFallback.join(",")}`,
-        )
-      }
-
-      const chosenChannel = String(chosen).toLowerCase()
-
-      const updatedPayload = {
-        ...payload,
-        routed_by: "smart-router-v1",
-        routed_at: new Date().toISOString(),
-        routed_channel: chosenChannel,
-        fallback_order: localFallback,
-      }
-
-      const newScheduledAt =
-        tr.scheduled_at ?? new Date().toISOString()
-
-      const { error: uErr } = await supabase
-        .from("touch_runs")
-        .update({
-          channel: chosenChannel,
-          status: "scheduled",
-          scheduled_at: newScheduledAt,
-          error: null,
-          payload: updatedPayload,
-        })
-        .eq("id", tr.id)
-
-      if (uErr) {
-        throw new Error(`update_touch_run_failed:${uErr.message}`)
-      }
-
-      processed++
-    } catch (e: any) {
-      const msg = e?.message ?? String(e)
-      errors.push({
-        touch_run_id: tr.id,
-        account_id: tr.account_id,
-        lead_id: tr.lead_id,
-        error: msg,
-      })
-
-      await supabase
-        .from("touch_runs")
-        .update({
-          status: "failed",
-          error: msg,
-        })
-        .eq("id", tr.id)
-    }
-  }
-
-  // -------- 4) Log resumen en core_memory_events --------
-  try {
-    await logEvaluation({
-      supabase,
-      event_type: "evaluation",
-      actor: "router",
-      label: "smart_router_dispatch_v1",
-      kpis: {
-        processed,
-        failed: errors.length,
-        total_candidates: typedRuns.length,
+  // 4) Para retry_same_channel o switch_channel → creamos un nuevo touch_runs
+  if (!nextChannel) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        version: VERSION,
+        stage: "build_next_touch",
+        error: "next_channel is null for decision that requires touch",
+      }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
       },
-      notes:
-        errors.length === 0
-          ? "Smart router dispatched all auto touch_runs successfully"
-          : `Smart router completed with ${errors.length} errors`,
+    )
+  }
+
+  const now = new Date()
+  const scheduledAt = new Date(now.getTime() - 60_000).toISOString()
+
+  const lastPayload = (lastTouch.payload ?? {}) as any
+  const routing = {
+    ...(lastPayload.routing ?? {}),
+    current_channel: nextChannel,
+  }
+
+  const newPayload = {
+    ...lastPayload,
+    routing,
+  }
+
+  const insertBody: any = {
+    campaign_id: lastTouch.campaign_id,
+    campaign_run_id: lastTouch.campaign_run_id,
+    lead_id: lastTouch.lead_id,
+    step: lastTouch.step,
+    channel: nextChannel,
+    payload: newPayload,
+    scheduled_at: scheduledAt,
+    status: "queued",
+    account_id: lastTouch.account_id,
+    message_class: lastTouch.message_class,
+    meta: {
+      ...(lastPayload.meta ?? {}),
+      router_version: VERSION,
+      previous_touch_id: lastTouch.id,
+      router_decision: decision,
+    },
+  }
+
+  let newTouchId: string | null = null
+
+  if (!dryRun) {
+    const { data: inserted, error: iErr } = await supabase
+      .from("touch_runs")
+      .insert(insertBody)
+      .select("id")
+      .single()
+
+    if (iErr) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          version: VERSION,
+          stage: "insert_touch_run",
+          error: iErr.message,
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      )
+    }
+
+    newTouchId = inserted?.id ?? null
+  }
+
+  // 5) Log de evaluación
+  try {
+    await logEvaluation(supabase, {
+      lead_id,
+      event_source: "router",
+      label: "router_decision_touch_created",
+      kpis: {
+        step,
+        attempts_done: decisionRow.attempts_done,
+        attempts_allowed: decisionRow.attempts_allowed,
+      },
+      notes: `decision=${decision} next_channel=${nextChannel} dry_run=${dryRun}`,
     })
   } catch (e) {
-    console.error("logEvaluation failed in smart router", e)
+    console.error("logEvaluation router (touch_created) error:", e)
   }
 
+  // 6) Respuesta final
   return new Response(
     JSON.stringify({
       ok: true,
       version: VERSION,
-      processed,
-      failed: errors.length,
-      total_candidates: typedRuns.length,
-      fallbackOrder,
-      errors,
+      lead_id,
+      step,
+      decision,
+      next_channel: nextChannel,
+      created_touch: !dryRun,
+      dry_run: dryRun,
+      new_touch_id: newTouchId,
+      insert_body: dryRun ? insertBody : undefined,
     }),
-    {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    },
+    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
   )
 })

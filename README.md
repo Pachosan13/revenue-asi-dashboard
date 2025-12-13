@@ -804,3 +804,447 @@ tu sistema es **imparable**.
 ---
 
 
+## Touch payload v2 — Routing + Fallback Matrix (ESTÁNDAR)
+
+Cada fila en `touch_runs` representa **un intento específico en un canal**  
+(ej: voice intento #1 de una cadencia).
+
+El `payload` define:
+- El **plan de contacto** (orden de canales, límites, stop conditions).
+- El **contenido y metadatos** para el dispatcher (body, templates, provider).
+
+Formato estándar:
+
+```json
+{
+  "message_class": "cold_outreach",
+  "campaign_id": "2c6a8a2c-1234-4bcd-9876-abcdef012345",
+  "step": 1,
+
+  "routing": {
+    "primary_channel": "voice",
+    "current_channel": "voice",
+    "fallback": {
+      "order": ["voice", "whatsapp", "sms", "email"],
+      "max_attempts": {
+        "voice": 2,
+        "whatsapp": 3,
+        "sms": 2,
+        "email": 3
+      },
+      "cooldown_minutes": {
+        "voice": 1440,
+        "whatsapp": 720,
+        "sms": 720,
+        "email": 1440
+      }
+    },
+    "stop_on_events": [
+      "reply_positive",
+      "appointment_booked",
+      "do_not_contact"
+    ],
+    "expires_at": "2025-12-31T23:59:59Z"
+  },
+
+  "delivery": {
+    "template_key": "cold_dentist_v1_step1",
+    "language": "es",
+    "channel_overrides": {
+      "voice": {
+        "script_key": "dentist_cold_call_v1"
+      },
+      "whatsapp": {
+        "template_name": "dentist_cold_whatsapp_v1"
+      },
+      "sms": {
+        "template_name": "dentist_cold_sms_v1"
+      },
+      "email": {
+        "subject": "Pacientes nuevos sin subir tu ads spend",
+        "template_name": "dentist_cold_email_v1"
+      }
+    },
+    "body": "Test de llamada desde dispatcher v5",
+    "variables": {
+      "first_name": "John",
+      "clinic_name": "Dr. Smith Dental"
+    }
+  },
+
+  "provider": {
+    "forced_provider": null,
+    "forced_sender_id": null
+  },
+
+  "meta": {
+    "dry_run": true,
+    "debug_tag": "payload-v2-test",
+    "created_by": "director_engine_v2"
+  }
+}
+
+
+1️⃣ Qué agregar al README (copia/pega)
+
+Pon esto como una sección nueva, por ejemplo después del payload v2.
+
+## Fallback Matrix & Next-Channel Decision (SQL-first)
+
+Cada `touch_runs` define su plan de cadencia en `payload.routing.fallback`:
+
+- `payload.routing.fallback.order` → orden de canales, ej: `["voice","whatsapp","sms","email"]`
+- `payload.routing.fallback.max_attempts.<channel>` → intentos máximos por canal
+- `payload.routing.fallback.cooldown_minutes.<channel>` → cooldown por canal en minutos
+- `payload.routing.current_channel` → canal actual de este intento (debe coincidir con `touch_runs.channel`)
+
+El histórico de intentos NO está en el payload; se calcula con:
+
+- `touch_runs` (por `lead_id + step + channel`)
+- `core_memory_events` (`touch_sent` / `touch_failed`)
+- Vista `v_lead_channel_attempts`:
+
+```sql
+create or replace view public.v_lead_channel_attempts as
+select
+  tr.lead_id,
+  tr.step,
+  tr.channel,
+  count(*) filter (
+    where cme.event_type in ('touch_sent', 'touch_failed')
+  ) as attempts_done,
+  max(cme.created_at) filter (
+    where cme.event_type in ('touch_sent', 'touch_failed')
+  ) as last_attempt_at
+from public.touch_runs tr
+left join public.core_memory_events cme
+  on cme.payload->>'touch_run_id' = tr.id::text
+group by
+  tr.lead_id,
+  tr.step,
+  tr.channel;
+
+Decision engine (por lead + step)
+
+Antes de crear el siguiente touch_runs, el orquestador resuelve una sola decisión a partir de:
+
+fallback.order
+
+max_attempts
+
+cooldown_minutes
+
+v_lead_channel_attempts
+
+Las decisiones posibles son:
+
+retry_same_channel
+
+Aún hay intentos disponibles en el canal actual
+
+El cooldown ya pasó (o es 0)
+
+wait_cooldown
+
+Aún hay intentos disponibles en el canal actual
+
+El cooldown NO ha pasado → no se crea nuevo touch_runs
+
+switch_channel
+
+El canal actual agotó sus intentos (attempts_done >= attempts_allowed)
+
+Hay un canal siguiente en fallback.order con intentos disponibles
+
+El siguiente canal se convierte en next_channel
+
+stop
+
+Todos los canales de fallback.order agotaron sus intentos
+
+No se crean más touch_runs para ese lead + step → cadencia muerta
+
+La lógica SQL del “Decision Engine” se implementa como un CTE que:
+
+Toma el último touch_runs para lead_id + step.
+
+Expande fallback.order a filas (voice, whatsapp, sms, email).
+
+Combina eso con v_lead_channel_attempts para obtener, por canal:
+
+attempts_done
+
+attempts_allowed
+
+cooldown_minutes
+
+last_attempt_at
+
+cooldown_until = last_attempt_at + cooldown_minutes
+
+Calcula para el canal actual:
+
+Si puede reintentar (retry_same_channel)
+
+Si debe esperar (wait_cooldown)
+
+Si debe saltar (switch_channel → siguiente canal con intentos libres)
+
+O si debe detener (stop)
+
+El orquestador usa esa decisión para saber si:
+
+No hace nada (wait_cooldown / stop)
+
+Crea un nuevo touch_runs en el mismo canal (retry_same_channel)
+
+Crea un nuevo touch_runs en otro canal (switch_channel, usando next_channel)
+
+Este diseño es 100% SQL-first: las decisiones son reproducibles, debugeables y visibles con queries directas sobre la base.
+
+Fallback Matrix & Next-Channel Decision (SQL-first)
+
+Cada `touch_runs` define su plan de cadencia en `payload.routing.fallback`:
+
+- `payload.routing.fallback.order` → orden de canales, ej: `["voice","whatsapp","sms","email"]`
+- `payload.routing.fallback.max_attempts.<channel>` → intentos máximos por canal
+- `payload.routing.fallback.cooldown_minutes.<channel>` → cooldown por canal en minutos
+- `payload.routing.current_channel` → canal actual (debe coincidir con `touch_runs.channel`)
+
+El histórico de intentos se calcula desde:
+
+- `touch_runs` (por `lead_id + step + channel`)
+- `core_memory_events` (`touch_sent` / `touch_failed`)
+- Vista `v_lead_channel_attempts`:
+
+```sql
+create or replace view public.v_lead_channel_attempts as
+select
+  tr.lead_id,
+  tr.step,
+  tr.channel,
+  count(*) filter (
+    where cme.event_type in ('touch_sent', 'touch_failed')
+  ) as attempts_done,
+  max(cme.created_at) filter (
+    where cme.event_type in ('touch_sent', 'touch_failed')
+  ) as last_attempt_at
+from public.touch_runs tr
+left join public.core_memory_events cme
+  on cme.payload->>'touch_run_id' = tr.id::text
+group by
+  tr.lead_id,
+  tr.step,
+  tr.channel;
+Decisión por lead + step
+La matriz decide una sola cosa por lead_id + step:
+
+retry_same_channel
+
+wait_cooldown
+
+switch_channel
+
+stop
+
+Reglas:
+
+retry_same_channel
+
+Intentos usados < intentos permitidos en el canal actual
+
+Cooldown pasado (o cooldown = 0)
+
+wait_cooldown
+
+Intentos usados < intentos permitidos
+
+Cooldown NO ha pasado
+
+switch_channel
+
+Canal actual ya agotó intentos
+
+Existe siguiente canal en fallback.order con intentos libres
+
+stop
+
+Todos los canales en fallback.order agotaron sus intentos
+
+El orquestador usa esta decisión así:
+
+wait_cooldown → no crea ningún touch_runs
+
+retry_same_channel → crea nuevo touch_runs con mismo canal
+
+switch_channel → crea nuevo touch_runs en next_channel
+
+stop → no crea más touch_runs para ese lead + step
+
+Toda la lógica se valida en SQL (CTEs + v_lead_channel_attempts) y luego se puede portar 1:1 a código.
+
+Contrato de WhatsApp Dispatcher v2
+La función dispatch-touch-whatsapp-v2 procesa sólo los touch runs que cumplan:
+
+channel = 'whatsapp'
+
+status IN ('queued','scheduled')
+
+scheduled_at <= now()
+
+account_id con proveedor por defecto configurado en account_provider_settings:
+
+channel = 'whatsapp'
+
+is_default = true
+
+Además:
+
+Resuelve phone desde lead_enriched.phone (formato E.164, ej: +50765699957)
+
+Construye:
+
+toReal = "whatsapp:"+phone
+
+to = QA_SINK ?? toReal
+
+Mensaje usado:
+
+payload.message o payload.body o "Hola!"
+
+Si dry_run = true (env DRY_RUN_WHATSAPP o body), no llama a Twilio, pero actualiza:
+
+status = 'sent'
+
+sent_at = now()
+
+payload.provider = 'twilio'
+
+payload.provider_config = account_provider_settings.config
+
+payload.to = to
+
+payload.dryRun = dryRun
+
+También escribe core_memory_events:
+
+touch_scheduled al crear el touch
+
+touch_sent o touch_failed al despachar
+
+Contrato para crear touch_runs de WhatsApp (lo que debe respetar Director/Orquestador)
+Para que un touch de WhatsApp sea elegible:
+
+Columnas:
+
+channel = 'whatsapp'
+
+status = 'queued' (o scheduled)
+
+scheduled_at <= now() si debe salir “ya”
+
+account_id no nulo
+
+Payload mínimo:
+
+json
+Copiar código
+{
+  "to": "whatsapp:+50765699957",
+  "to_normalized": "+50765699957",
+  "delivery": {
+    "body": "Mensaje de prueba"
+  },
+  "meta": {
+    "dry_run": true,
+    "debug_tag": "lo_que_quieras"
+  }
+}
+Para integrar con fallback v2:
+
+El payload completo del primer touch debería seguir este patrón:
+
+json
+Copiar código
+{
+  "meta": {
+    "dry_run": true,
+    "debug_tag": "cold-outbound-step1",
+    "created_by": "director_engine"
+  },
+  "step": 1,
+  "dry_run": true,
+  "routing": {
+    "fallback": {
+      "order": ["voice", "whatsapp", "sms", "email"],
+      "max_attempts": {
+        "voice": 1,
+        "whatsapp": 3,
+        "sms": 2,
+        "email": 3
+      },
+      "cooldown_minutes": {
+        "voice": 0,
+        "whatsapp": 720,
+        "sms": 720,
+        "email": 1440
+      }
+    },
+    "expires_at": "2025-12-31T23:59:59Z",
+    "stop_on_events": [
+      "reply_positive",
+      "appointment_booked",
+      "do_not_contact"
+    ],
+    "current_channel": "voice",
+    "primary_channel": "voice"
+  },
+  "delivery": {
+    "body": "Test de llamada desde dispatcher v5 (payload v2)",
+    "language": "es",
+    "variables": {
+      "first_name": "Francisco",
+      "clinic_name": "Level 5"
+    },
+    "template_key": "cold_dentist_v1_step1",
+    "channel_overrides": {
+      "sms": {
+        "template_name": "dentist_cold_sms_v1"
+      },
+      "email": {
+        "subject": "Pacientes nuevos sin subir tu ads spend",
+        "template_name": "dentist_cold_email_v1"
+      },
+      "voice": {
+        "script_key": "dentist_cold_call_v1"
+      },
+      "whatsapp": {
+        "template_name": "dentist_cold_whatsapp_v1"
+      }
+    }
+  },
+  "provider": "twilio",
+  "campaign_id": "UUID_DE_CAMPANA",
+  "message_class": "cold_outreach",
+  "to_normalized": "+50765699957",
+  "provider_config": {}
+}
+
+Paso A — Congelar esta v1 en la doc
+
+Añade esto al README (o a docs/director-engine/README.md):
+
+Diagrama corto del loop:
+
+touch_runs(queued) 
+  → dispatcher(channel)
+  → core_memory_events
+  → decide_next_channel_for_lead()
+  → dispatch-touch-smart-router
+  → nuevo touch_runs(next_channel)
+
+
+Nota clave:
+“Solo los touch_runs con payload.routing.fallback se consideran para la matriz; los demás caen en decision = stop.”
+
+Eso sirve para que en 1 mes no tengamos que reconstruir esto desde cero en la cabeza.

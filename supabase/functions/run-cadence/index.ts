@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { setLeadState } from "../_shared/state.ts";
-=======
+// supabase/functions/run-cadence/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts"
@@ -15,7 +11,6 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
 }
->>>>>>> origin/plan-joe-dashboard-v1
 
 serve(async (req) => {
   // Preflight
@@ -40,25 +35,6 @@ serve(async (req) => {
     )
   }
 
-<<<<<<< HEAD
-    if (inserts.length) {
-      await supabase.from("touch_runs").insert(inserts);
-
-      for (const lead of leads ?? []) {
-        await setLeadState({
-          supabase,
-          leadId: lead.id,
-          newState: "attempting",
-          reason: "added_to_cadence",
-          actor: "system",
-          source: "run-cadence",
-          meta: { campaign_id: c.id, campaign_run_id: run?.id },
-        });
-      }
-
-      // TODO: Mark leads as "qualified", "booked", or "dead" once outcomes are known
-      // (e.g., after responses or appointment scheduling flows are implemented).
-=======
   const supabase = createClient(SB_URL, SB_KEY)
 
   // Body
@@ -89,7 +65,7 @@ serve(async (req) => {
   // 1) Verifica campaña existe y está active
   const { data: campaign, error: cErr } = await supabase
     .from("campaigns")
-    .select("id,status")
+    .select("id,status,account_id")
     .eq("id", campaign_id)
     .maybeSingle()
 
@@ -156,7 +132,6 @@ serve(async (req) => {
             payload: {
               script:
                 "Hey {{first_name}}, voy rápido — te contacto porque vimos tu empresa y estamos ayudando negocios como el tuyo a generar 10–20 clientes nuevos al mes con automatización real.",
-              // OJO: esto usa process.env solo si ya lo tienes shimeado.
               voice_id: (process as any)?.env?.REVENUE_ASI_ELEVEN_VOICE_ID,
               render_webhook: (process as any)?.env?.REVENUE_ASI_VOICE_WEBHOOK,
             },
@@ -166,7 +141,7 @@ serve(async (req) => {
   // 3) Traer leads elegibles (versión simple por ahora)
   const { data: leads, error: lErr } = await supabase
     .from("leads")
-    .select("id, phone, status")
+    .select("id, phone, status, account_id")
     .eq("status", "new")
     .not("phone", "is", null)
     .limit(200)
@@ -189,12 +164,10 @@ serve(async (req) => {
   const leads_seen = leads?.length ?? 0
 
   if (!leads_seen) {
-    // No leads → igual podemos loggear
+    // No leads → igual loggeamos evaluación
     try {
-      await logEvaluation({
-        supabase,
-        event_type: "evaluation",
-        actor: "cadence",
+      await logEvaluation(supabase, {
+        event_source: "cadence",
         label: "run_cadence_v4",
         kpis: {
           campaign_id,
@@ -263,12 +236,15 @@ serve(async (req) => {
         payload: touch.payload ?? {},
         scheduled_at: nowIso,
         status: "queued",
+        account_id: (lead as any).account_id ?? campaign.account_id ?? null,
       })
->>>>>>> origin/plan-joe-dashboard-v1
     }
   }
 
-  const { error: insErr } = await supabase.from("touch_runs").insert(inserts)
+  const { error: insErr } = await supabase
+    .from("touch_runs")
+    .insert(inserts)
+
   if (insErr) {
     return new Response(
       JSON.stringify({
@@ -284,12 +260,10 @@ serve(async (req) => {
     )
   }
 
-  // 6) Log en core_memory_events (best-effort)
+  // 6) Log en core_memory_events / eval (best-effort)
   try {
-    await logEvaluation({
-      supabase,
-      event_type: "evaluation",
-      actor: "cadence",
+    await logEvaluation(supabase, {
+      event_source: "cadence",
       label: "run_cadence_v4",
       kpis: {
         campaign_id,

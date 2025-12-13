@@ -1,9 +1,9 @@
-// supabase/functions/dispatch-touch-sms/index.ts
+// supabase/functions/dispatch-touch-voice-v5/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts"
 
-const VERSION = "dispatch-touch-sms-v2_2025-12-10_multitenant"
+const VERSION = "dispatch-touch-voice-v5_2025-12-10_multitenant"
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -44,13 +44,13 @@ serve(async (req) => {
 
   const supabase = createClient(SB_URL, SB_KEY)
 
-  // ENV Twilio SMS
+  // ENV Twilio para VOICE
   const TWILIO_SID = Deno.env.get("TWILIO_ACCOUNT_SID")
   const TWILIO_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN")
-  const SMS_FROM = Deno.env.get("TWILIO_SMS_FROM") // ej: "+14155551234"
+  const VOICE_FROM = Deno.env.get("TWILIO_VOICE_FROM") // ej: "+14155551234"
 
-  const QA_SMS_SINK = Deno.env.get("QA_SMS_SINK") ?? null
-  const DRY_DEFAULT = Deno.env.get("DRY_RUN_SMS") === "true"
+  const QA_VOICE_SINK = Deno.env.get("QA_VOICE_SINK") ?? null
+  const DRY_DEFAULT = Deno.env.get("DRY_RUN_VOICE") === "true"
 
   let body: any = {}
   try {
@@ -62,28 +62,13 @@ serve(async (req) => {
   const limit = Number(body.limit ?? 50)
   const dryRun = Boolean(body.dry_run ?? DRY_DEFAULT)
 
-  // URL del smart-router
-  const projectRef = (() => {
-    try {
-      const url = new URL(SB_URL)
-      const host = url.hostname
-      return host.split(".")[0]
-    } catch {
-      return null
-    }
-  })()
-
-  const smartRouterUrl = projectRef
-    ? `https://${projectRef}.functions.supabase.co/dispatch-touch-smart-router`
-    : null
-
   //────────────────────────────────────────
-  // 1) TRAER TOUCH RUNS SMS
+  // 1) TRAER TOUCH RUNS VOICE
   //────────────────────────────────────────
   const { data: runs, error: rErr } = await supabase
     .from("touch_runs")
     .select("id, lead_id, account_id, payload, scheduled_at, step, status")
-    .eq("channel", "sms")
+    .eq("channel", "voice")
     .in("status", ["queued", "scheduled"])
     .order("scheduled_at", { ascending: true })
     .limit(limit)
@@ -103,9 +88,9 @@ serve(async (req) => {
   if (!runs?.length) {
     await logEvaluation(supabase, {
       event_source: "dispatcher",
-      label: "sms_empty",
+      label: "voice_empty",
       kpis: { processed: 0, failed: 0 },
-      notes: "No SMS runs to dispatch",
+      notes: "No voice runs to dispatch",
     })
 
     return new Response(
@@ -126,6 +111,21 @@ serve(async (req) => {
   let processed = 0
   const errors: any[] = []
 
+  // Para llamar al smart router después de enviar
+  const projectRef = (() => {
+    try {
+      const url = new URL(SB_URL)
+      const host = url.hostname // ej: cdrrlkxgurckuyceiguo.supabase.co
+      return host.split(".")[0]
+    } catch {
+      return null
+    }
+  })()
+
+  const smartRouterUrl = projectRef
+    ? `https://${projectRef}.functions.supabase.co/dispatch-touch-smart-router`
+    : null
+
   for (const run of runs) {
     try {
       if (!run.account_id) {
@@ -137,7 +137,7 @@ serve(async (req) => {
         .from("account_provider_settings")
         .select("provider, config")
         .eq("account_id", run.account_id)
-        .eq("channel", "sms")
+        .eq("channel", "voice")
         .eq("is_default", true)
         .maybeSingle()
 
@@ -145,7 +145,7 @@ serve(async (req) => {
         throw new Error(`provider_lookup_failed:${provErr.message}`)
       }
       if (!providerRow?.provider) {
-        throw new Error("no_default_provider_for_account_sms")
+        throw new Error("no_default_provider_for_account_voice")
       }
 
       const provider = providerRow.provider
@@ -155,8 +155,8 @@ serve(async (req) => {
         throw new Error(`unsupported_provider:${provider}`)
       }
 
-      if (!TWILIO_SID || !TWILIO_TOKEN || !SMS_FROM) {
-        throw new Error("missing_twilio_sms_env")
+      if (!TWILIO_SID || !TWILIO_TOKEN || !VOICE_FROM) {
+        throw new Error("missing_twilio_voice_env")
       }
 
       // 2.2 Resolver teléfono del lead (lead_enriched primero)
@@ -177,49 +177,72 @@ serve(async (req) => {
       }
 
       const toReal = phoneRaw!
-      const to = QA_SMS_SINK ?? toReal
+      const to = QA_VOICE_SINK ?? toReal
 
+      // 2.3 Determinar mensaje / audio
       const payload = (run.payload ?? {}) as any
-      const message: string =
-        payload.message ||
-        payload.body ||
-        "Hola, este es un SMS de prueba de Revenue ASI."
+      const audioUrl: string | undefined = payload.audio_url ?? undefined
+      const delivery = payload.delivery ?? {}
+      const textBody: string =
+        delivery.body ??
+        "Esta es una llamada de prueba automática de Revenue ASI."
 
-      // 2.3 marcar como processing
+      // 2.4 Marcar como processing (para telemetría)
       await supabase
         .from("touch_runs")
         .update({
           status: "processing",
           executed_at: new Date().toISOString(),
           error: null,
+          meta: {
+            ...(payload.meta ?? {}),
+            dispatcher_version: VERSION,
+          },
         })
         .eq("id", run.id)
 
-      // 2.4 Enviar por Twilio (si no dryRun)
+      let twilioCallSid: string | null = null
+
+      // 2.5 Enviar por Twilio Voice (si no es dryRun)
       if (!dryRun) {
-        const twilioResp = await fetch(
-          `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: "Basic " + btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`),
-              "Content-Type": "application/x-www-form-urlencoded",
-            },
-            body: new URLSearchParams({
-              To: to,
-              From: SMS_FROM!,
-              Body: message,
-            }),
+        const callUrl = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`
+
+        // Usamos TwiML inline: <Play>audio</Play> o <Say>texto</Say>
+        let twiml: string
+        if (audioUrl) {
+          twiml = `<Response><Play>${audioUrl}</Play></Response>`
+        } else {
+          twiml = `<Response><Say>${textBody}</Say></Response>`
+        }
+
+        const twilioResp = await fetch(callUrl, {
+          method: "POST",
+          headers: {
+            Authorization: "Basic " + btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`),
+            "Content-Type": "application/x-www-form-urlencoded",
           },
-        )
+          body: new URLSearchParams({
+            To: to,
+            From: VOICE_FROM,
+            Twiml: twiml,
+          }),
+        })
+
+        const txt = await twilioResp.text()
 
         if (!twilioResp.ok) {
-          const txt = await twilioResp.text()
           throw new Error(`Twilio error: ${txt}`)
+        }
+
+        try {
+          const parsed = JSON.parse(txt)
+          twilioCallSid = parsed.sid ?? null
+        } catch {
+          twilioCallSid = null
         }
       }
 
-      // 2.5 Marcar como enviado
+      // 2.6 Marcar como enviado
       const sentAtIso = new Date().toISOString()
 
       await supabase
@@ -227,6 +250,7 @@ serve(async (req) => {
         .update({
           status: "sent",
           sent_at: sentAtIso,
+          error: null,
           payload: {
             ...(payload ?? {}),
             to,
@@ -234,8 +258,8 @@ serve(async (req) => {
             dryRun,
             provider,
             provider_config: config,
+            twilio_call_sid: twilioCallSid,
           },
-          error: null,
         })
         .eq("id", run.id)
 
@@ -244,12 +268,12 @@ serve(async (req) => {
       await logEvaluation(supabase, {
         lead_id: run.lead_id,
         event_source: "dispatcher",
-        label: "sms_sent",
+        label: "voice_sent",
         kpis: { processed, failed: errors.length },
         notes: `provider=${provider}, dryRun=${dryRun}`,
       })
 
-      // 2.6 🔗 SMART ROUTER (solo si no es dryRun)
+      // 2.7 🔗 LLAMAR AL SMART ROUTER (solo si NO es dryRun)
       if (!dryRun && smartRouterUrl) {
         try {
           await fetch(smartRouterUrl, {
@@ -263,11 +287,13 @@ serve(async (req) => {
               lead_id: run.lead_id,
               step: run.step ?? 1,
               dry_run: false,
-              source: "sms_dispatcher",
+              source: "voice_dispatcher",
             }),
           })
+          // No nos importa el body aquí; el router se encarga de crear el siguiente touch si aplica
         } catch (routerErr) {
-          console.error("Smart router call failed (sms):", routerErr)
+          console.error("Smart router call failed:", routerErr)
+          // No rompemos el flujo de envío por culpa del router
         }
       }
     } catch (e: any) {
@@ -285,7 +311,7 @@ serve(async (req) => {
       await logEvaluation(supabase, {
         lead_id: run.lead_id,
         event_source: "dispatcher",
-        label: "sms_failed",
+        label: "voice_failed",
         kpis: { processed, failed: errors.length },
         notes: msg,
       })
@@ -297,11 +323,11 @@ serve(async (req) => {
   //────────────────────────────────────────
   await logEvaluation(supabase, {
     event_source: "dispatcher",
-    label: "sms_summary",
+    label: "voice_summary",
     kpis: { processed, failed: errors.length },
     notes: errors.length
       ? `${errors.length} errors`
-      : "All SMS messages delivered",
+      : "All voice messages delivered",
   })
 
   return new Response(

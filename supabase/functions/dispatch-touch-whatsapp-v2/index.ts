@@ -3,7 +3,7 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts"
 
-const VERSION = "dispatch-touch-whatsapp-v2_2025-12-09_multitenant"
+const VERSION = "dispatch-touch-whatsapp-v2_2025-12-10_multitenant"
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -44,7 +44,7 @@ serve(async (req) => {
 
   const supabase = createClient(SB_URL, SB_KEY)
 
-  // ENV globales (por ahora solo Twilio, pero el switch de proveedor es por tabla)
+  // ENV globales Twilio WhatsApp
   const TWILIO_SID = Deno.env.get("TWILIO_ACCOUNT_SID")
   const TWILIO_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN")
   const WA_FROM = Deno.env.get("TWILIO_WHATSAPP_FROM") // ej: "whatsapp:+14155238886"
@@ -56,20 +56,35 @@ serve(async (req) => {
   try {
     body = await req.json()
   } catch {
-    // si no hay body, usamos defaults
+    body = {}
   }
 
   const limit = Number(body.limit ?? 50)
   const dryRun = Boolean(body.dry_run ?? DRY_DEFAULT)
+
+  // URL del smart-router (misma instancia)
+  const projectRef = (() => {
+    try {
+      const url = new URL(SB_URL)
+      const host = url.hostname
+      return host.split(".")[0]
+    } catch {
+      return null
+    }
+  })()
+
+  const smartRouterUrl = projectRef
+    ? `https://${projectRef}.functions.supabase.co/dispatch-touch-smart-router`
+    : null
 
   //────────────────────────────────────────
   // 1) TRAER TOUCH RUNS WHATSAPP
   //────────────────────────────────────────
   const { data: runs, error: rErr } = await supabase
     .from("touch_runs")
-    .select("id, lead_id, account_id, payload, scheduled_at")
+    .select("id, lead_id, account_id, payload, scheduled_at, step, status")
     .eq("channel", "whatsapp")
-    .eq("status", "scheduled")
+    .in("status", ["queued", "scheduled"])
     .order("scheduled_at", { ascending: true })
     .limit(limit)
 
@@ -164,12 +179,23 @@ serve(async (req) => {
       const toReal = `whatsapp:${phoneRaw}`
       const to = QA_SINK ?? toReal
 
-      const message =
-        run.payload?.message ||
-        run.payload?.body ||
+      const payload = (run.payload ?? {}) as any
+      const message: string =
+        payload.message ||
+        payload.body ||
         "Hola!"
 
-      // 2.3 Enviar por Twilio (a menos que dryRun)
+      // 2.3 (opcional) marcar como processing
+      await supabase
+        .from("touch_runs")
+        .update({
+          status: "processing",
+          executed_at: new Date().toISOString(),
+          error: null,
+        })
+        .eq("id", run.id)
+
+      // 2.4 Enviar por Twilio (a menos que dryRun)
       if (!dryRun) {
         const twilioResp = await fetch(
           `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`,
@@ -193,15 +219,18 @@ serve(async (req) => {
         }
       }
 
-      // 2.4 Marcar como enviado
+      // 2.5 Marcar como enviado
+      const sentAtIso = new Date().toISOString()
+
       await supabase
         .from("touch_runs")
         .update({
           status: "sent",
-          sent_at: new Date().toISOString(),
+          sent_at: sentAtIso,
           payload: {
-            ...(run.payload ?? {}),
+            ...(payload ?? {}),
             to,
+            to_normalized: phoneRaw,
             dryRun,
             provider,
             provider_config: config,
@@ -217,8 +246,31 @@ serve(async (req) => {
         event_source: "dispatcher",
         label: "whatsapp_sent",
         kpis: { processed, failed: errors.length },
-        notes: `provider=${provider}`,
+        notes: `provider=${provider}, dryRun=${dryRun}`,
       })
+
+      // 2.6 🔗 LLAMAR AL SMART ROUTER (solo si NO es dryRun)
+      if (!dryRun && smartRouterUrl) {
+        try {
+          await fetch(smartRouterUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              apikey: SB_KEY,
+              Authorization: `Bearer ${SB_KEY}`,
+            },
+            body: JSON.stringify({
+              lead_id: run.lead_id,
+              step: run.step ?? 1,
+              dry_run: false,
+              source: "whatsapp_dispatcher",
+            }),
+          })
+        } catch (routerErr) {
+          console.error("Smart router call failed (whatsapp):", routerErr)
+          // No rompemos el envío por culpa del router
+        }
+      }
     } catch (e: any) {
       const msg = e?.message ?? String(e)
       errors.push({ id: run.id, lead_id: run.lead_id, error: msg })

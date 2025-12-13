@@ -422,3 +422,6 @@ verify_jwt = false
 [functions.dispatch-touch-whatsapp]
 enabled = true
 verify_jwt = false
+
+[functions.ghl-appointment-webhook]
+verify_jwt = false
