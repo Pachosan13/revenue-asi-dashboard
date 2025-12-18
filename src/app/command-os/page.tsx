@@ -1,9 +1,7 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
-import BrainResponseTranslator, {
-  BrainResponse,
-} from "@/components/BrainResponseTranslator"
+import { useEffect, useMemo, useRef, useState } from "react"
+import BrainResponseTranslator, { BrainResponse } from "@/components/BrainResponseTranslator"
 
 type CommandOsWireResponse = {
   ok: boolean
@@ -11,391 +9,522 @@ type CommandOsWireResponse = {
   explanation: string
   confidence: number
   version: string
-  result: BrainResponse
+  assistant_message?: string
+  artifacts?: BrainResponse
 }
 
-type HistoryEntry =
-  | {
-      type: "user"
-      ts: number
-      text: string
-    }
-  | {
-      type: "system"
-      ts: number
-      payload: CommandOsWireResponse
-    }
-  | {
-      type: "error"
-      ts: number
-      message: string
-    }
+type ChatMsg =
+  | { role: "user"; ts: number; text: string }
+  | { role: "assistant"; ts: number; payload: CommandOsWireResponse }
+  | { role: "error"; ts: number; message: string }
 
 function formatTime(ts: number) {
   const d = new Date(ts)
-  return d.toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  })
+  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n))
+}
+
+function safeStr(v: any, fallback = "") {
+  if (v === null || v === undefined) return fallback
+  const s = String(v).trim()
+  return s || fallback
+}
+
+function safeNum(v: any, fallback = NaN) {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : fallback
+}
+
+// AJUSTA esto al ancho real de tu sidebar (tailwind arbitrary value)
+const SIDEBAR_W = 260 // px
+const SIDEBAR_LEFT_CLASS = `lg:left-[${SIDEBAR_W}px]`
+const SIDEBAR_ML_CLASS = `lg:ml-[${SIDEBAR_W}px]`
+
+/**
+ * Humaniza respuesta en el CLIENTE (fallback robusto si el API no trae assistant_message).
+ * OJO: si el API ya trae assistant_message, eso manda.
+ */
+function humanizeFromPayload(p: CommandOsWireResponse): string {
+  const explicit = safeStr(p?.assistant_message, "")
+  if (explicit) return explicit
+
+  const intent = safeStr(p?.intent, "system.status")
+  const ok = Boolean(p?.ok)
+  const artifacts: any = p?.artifacts ?? null
+  const data: any = artifacts?.data ?? artifacts?.result ?? artifacts ?? null
+
+  if (!ok) {
+    const err =
+      safeStr(data?.error) ||
+      safeStr(data?.message) ||
+      safeStr(p?.explanation) ||
+      "Falló la ejecución."
+    return `No pude completar eso. Motivo: ${err}`
+  }
+
+  // --- lead.list.recents ---
+  if (intent === "lead.list.recents") {
+    const rows = Array.isArray(data?.leads) ? data.leads : Array.isArray(data) ? data : []
+    if (!rows.length) return "No encontré leads recientes."
+
+    const lines = rows.slice(0, 10).map((l: any, i: number) => {
+      const name = safeStr(l?.lead_name || l?.name || l?.contact_name, "Sin nombre")
+      const company = safeStr(l?.company || l?.company_name, "")
+      const bucket = safeStr(l?.lead_brain_bucket || l?.bucket || l?.state || l?.status, "")
+      const score = safeNum(l?.priority_score ?? l?.lead_brain_score ?? l?.score, NaN)
+      const scoreTxt = Number.isFinite(score) ? ` • score ${score}` : ""
+      const companyTxt = company ? ` — ${company}` : ""
+      const bucketTxt = bucket ? ` • ${bucket}` : ""
+      const id = safeStr(l?.lead_id || l?.id, "")
+      const idTxt = id ? ` • id ${id}` : ""
+      return `${i + 1}) ${name}${companyTxt}${bucketTxt}${scoreTxt}${idTxt}`
+    })
+
+    return `Leads recientes:\n${lines.join("\n")}\n\nDime: “inspecciona el #1” o “inspecciona el último lead”.`
+  }
+
+  // --- lead.inspect / lead.inspect.latest ---
+  if (intent === "lead.inspect" || intent === "lead.inspect.latest") {
+    const lead = data?.lead ?? data
+    if (!lead) return "No encontré el lead."
+
+    const name = safeStr(lead?.lead_name || lead?.name || lead?.contact_name, "Sin nombre")
+    const company = safeStr(lead?.company || lead?.company_name, "—")
+    const email = safeStr(lead?.email, "—")
+    const phone = safeStr(lead?.phone, "—")
+    const bucket = safeStr(lead?.lead_brain_bucket || lead?.bucket || lead?.state, "—")
+    const recChan = safeStr(lead?.recommended_channel, "—")
+    const recAct = safeStr(lead?.recommended_action, "—")
+    const reason = safeStr(lead?.reason, "")
+    const id = safeStr(lead?.lead_id || lead?.id, "")
+
+    return [
+      `Lead: ${name}`,
+      `Empresa: ${company}`,
+      `Email: ${email}`,
+      `Tel: ${phone}`,
+      `Bucket: ${bucket}`,
+      `Recomendado: ${recChan} → ${recAct}`,
+      reason ? `Por qué: ${reason}` : null,
+      id ? `ID: ${id}` : null,
+      ``,
+      `Siguiente: “envíale el siguiente touch” o “enróllalo en campaña X”.`,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  }
+
+  // --- system.status ---
+  if (intent === "system.status") {
+    const checks = Array.isArray(data?.checks) ? data.checks : []
+    if (!checks.length) return "Estado del sistema: OK."
+
+    const lines = checks.slice(0, 12).map((c: any) => {
+      const name = safeStr(c?.name, "check")
+      const st = safeStr(c?.status, "unknown").toUpperCase()
+      const msg = safeStr(c?.message, "")
+      return `- ${st} ${name}${msg ? ` — ${msg}` : ""}`
+    })
+    return `Estado del sistema:\n${lines.join("\n")}`
+  }
+
+  // fallback OK
+  return safeStr(p?.explanation, "") || `Hecho. (${intent})`
 }
 
 export default function CommandOsPage() {
   const [command, setCommand] = useState("")
   const [context, setContext] = useState('{"environment":"dev"}')
-  const [history, setHistory] = useState<HistoryEntry[]>([])
-  const [sending, setSending] = useState(false)
+  const [contextOpen, setContextOpen] = useState(false)
   const [contextError, setContextError] = useState<string | null>(null)
-  const [lastResult, setLastResult] = useState<BrainResponse | null>(null)
+
+  const [sending, setSending] = useState(false)
+  const [chat, setChat] = useState<ChatMsg[]>([])
+
+  // Drawer de artifacts
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [drawerTitle, setDrawerTitle] = useState<string>("Detalles")
+  const [drawerArtifacts, setDrawerArtifacts] = useState<BrainResponse | null>(null)
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
-  async function handleSend() {
-    if (!command.trim() || sending) return
+  // --- AUTO account_id (sin que el usuario lo escriba) ---
+  const [autoAccountId, setAutoAccountId] = useState<string | null>(null)
+
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem("revenue_account_id")
+      if (v && v.trim()) setAutoAccountId(v.trim())
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  // Si hay autoAccountId y el context JSON NO lo tiene, lo inyectamos en el textarea (one-time)
+  useEffect(() => {
+    if (!autoAccountId) return
+    try {
+      const obj = context ? JSON.parse(context) : {}
+      if (!obj?.account_id) {
+        const next = { ...obj, account_id: autoAccountId }
+        setContext(JSON.stringify(next, null, 2))
+      }
+    } catch {
+      // si el usuario lo rompió, no tocamos nada aquí
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoAccountId])
+
+  const lastAssistant = useMemo(() => {
+    for (let i = chat.length - 1; i >= 0; i--) {
+      const m = chat[i]
+      if (m.role === "assistant") return m
+    }
+    return null
+  }, [chat])
+
+  function openArtifactsFrom(payload: CommandOsWireResponse) {
+    const artifacts = payload?.artifacts ?? null
+    setDrawerArtifacts(artifacts)
+    setDrawerTitle(
+      `Artifacts · ${payload.intent} · ${Math.round((payload.confidence ?? 0) * 100)}%`,
+    )
+    setDrawerOpen(true)
+  }
+
+  async function handleSend(text?: string) {
+    const raw = (text ?? command).trim()
+    if (!raw || sending) return
+
     setContextError(null)
 
     let parsedContext: any = {}
     try {
       parsedContext = context ? JSON.parse(context) : {}
-    } catch (e: any) {
+    } catch {
       setContextError("Context no es JSON válido")
+      setContextOpen(true)
       return
     }
 
+    // Auto-inject account_id (si existe) para que el chat “sepa” en qué cuenta estás
+    if (!parsedContext?.account_id && autoAccountId) {
+      parsedContext = { ...parsedContext, account_id: autoAccountId }
+    }
+
     const ts = Date.now()
-
-    setHistory((prev) => [...prev, { type: "user", ts, text: command.trim() }])
-
+    setChat((prev) => [...prev, { role: "user", ts, text: raw }])
     setSending(true)
+
     try {
       const res = await fetch("/api/command-os", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: command.trim(),
-          context: parsedContext,
-        }),
+        body: JSON.stringify({ message: raw, context: parsedContext }),
       })
 
       const json = (await res.json()) as CommandOsWireResponse
 
-      setHistory((prev) => [
-        ...prev,
-        { type: "system", ts: Date.now(), payload: json },
-      ])
+      setChat((prev) => [...prev, { role: "assistant", ts: Date.now(), payload: json }])
 
-      // Guardamos solo la parte que nos importa para el traductor humano
-      if (json?.result) {
-        setLastResult(json.result)
+      // Si el usuario escribió "detalles"/"debug", abre drawer
+      const low = raw.toLowerCase()
+      if (low.includes("detalles") || low.includes("artifacts") || low.includes("debug")) {
+        if (json?.artifacts) openArtifactsFrom(json)
       }
     } catch (err: any) {
-      setHistory((prev) => [
+      setChat((prev) => [
         ...prev,
-        {
-          type: "error",
-          ts: Date.now(),
-          message: err?.message ?? "Error desconocido",
-        },
+        { role: "error", ts: Date.now(), message: err?.message ?? "Error desconocido" },
       ])
     } finally {
       setSending(false)
       setCommand("")
+      requestAnimationFrame(() => inputRef.current?.focus())
     }
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       handleSend()
     }
   }
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [history])
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  }, [chat.length])
+
+  function Chip({ label, onClick }: { label: string; onClick: () => void }) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className="px-2 py-1 rounded-full border border-slate-200/60 bg-white hover:bg-slate-50 text-[11px] text-slate-700 transition-colors"
+      >
+        {label}
+      </button>
+    )
+  }
+
+  function Bubble({
+    children,
+    role,
+  }: {
+    children: React.ReactNode
+    role: "user" | "assistant" | "error"
+  }) {
+    const base = "max-w-[820px] w-full rounded-2xl px-4 py-3 border shadow-sm"
+    const styles =
+      role === "user"
+        ? "ml-auto bg-slate-900 text-white border-slate-900"
+        : role === "assistant"
+          ? "mr-auto bg-white text-slate-900 border-slate-200"
+          : "mr-auto bg-red-50 text-red-900 border-red-200"
+
+    return <div className={`${base} ${styles}`}>{children}</div>
+  }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-black to-slate-900 text-slate-50 relative overflow-hidden">
-      {/* HUD overlays */}
-      <div className="pointer-events-none absolute inset-0">
-        <div className="absolute inset-0 opacity-40 bg-[radial-gradient(circle_at_top,_#22c55e20,_transparent_55%),radial-gradient(circle_at_bottom,_#0ea5e920,_transparent_55%)]" />
-        <div className="absolute inset-0 bg-[linear-gradient(transparent_0,transparent_96%,#22c55e15_100%),linear-gradient(90deg,transparent_0,transparent_96%,#22c55e15_100%)] bg-[size:100%_32px,32px_100%] opacity-30 mix-blend-screen" />
-      </div>
-
-      <div className="relative z-10 flex flex-col min-h-screen">
-        {/* TOP BAR */}
-        <header className="border-b border-emerald-700/50 bg-black/60 backdrop-blur-sm">
-          <div className="mx-auto max-w-6xl px-5 py-4 flex items-center justify-between">
+    <div className={`min-h-screen bg-slate-50 text-slate-900 ${SIDEBAR_ML_CLASS}`}>
+      {/* Top bar */}
+      <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/85 backdrop-blur">
+        <div className="mx-auto max-w-5xl px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
             <div>
-              <div className="flex items-center gap-2">
-                <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                <h1 className="text-sm font-semibold tracking-[0.22em] text-emerald-300 uppercase">
-                  Revenue ASI — Command OS
-                </h1>
+              <div className="text-sm font-semibold tracking-wide">
+                Revenue ASI · Command OS
               </div>
-              <p className="text-xs text-emerald-500 mt-1">
-                Brain Interface · Hablas en humano, el sistema traduce a acciones.
-              </p>
-            </div>
-
-            <div className="flex items-center gap-3 text-[11px] text-emerald-400/80">
-              <div className="flex items-center gap-1">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span>ENGINE: ONLINE</span>
+              <div className="text-[11px] text-slate-500">
+                Chat → intents → ejecución. Limpio, rápido, sin ruido.
               </div>
-              <span className="px-2 py-0.5 border border-emerald-700/70 rounded-full bg-black/60">
-                MODE: DEV
-              </span>
             </div>
           </div>
-        </header>
 
-        {/* MAIN GRID */}
-        <main className="flex-1 mx-auto max-w-6xl w-full px-5 py-6 grid grid-cols-1 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1.2fr)] gap-6">
-          {/* LEFT: COMMAND PANEL */}
-          <section className="space-y-4">
-            <div className="rounded-2xl border border-emerald-800/60 bg-black/70 shadow-[0_0_40px_rgba(16,185,129,0.15)] p-4">
-              <div className="flex items-center justify-between mb-3">
-                <div>
-                  <h2 className="text-xs font-semibold tracking-[0.2em] text-emerald-300 uppercase">
-                    Command input
-                  </h2>
-                  <p className="text-[11px] text-emerald-500 mt-1">
-                    Habla como humano. ⌘+Enter / Ctrl+Enter para ejecutar.
-                  </p>
-                </div>
-                <div className="text-[10px] text-emerald-400/80 text-right">
-                  <p>Salida: respuesta humana</p>
-                  <p>Brains: intents + router seguro</p>
-                </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setContextOpen((v) => !v)}
+              className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs"
+            >
+              Context
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (lastAssistant?.payload?.artifacts) {
+                  openArtifactsFrom(lastAssistant.payload)
+                } else {
+                  setDrawerArtifacts(null)
+                  setDrawerTitle("Detalles")
+                  setDrawerOpen(true)
+                }
+              }}
+              className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs"
+            >
+              Detalles
+            </button>
+          </div>
+        </div>
+
+        {/* Context collapsable */}
+        {contextOpen && (
+          <div className="border-t border-slate-200 bg-white">
+            <div className="mx-auto max-w-5xl px-4 py-3">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs font-semibold text-slate-700">Context (JSON)</div>
+                {contextError ? (
+                  <div className="text-[11px] text-red-600">{contextError}</div>
+                ) : (
+                  <div className="text-[11px] text-slate-500">
+                    {autoAccountId ? (
+                      <>
+                        account_id auto: <span className="font-mono">{autoAccountId}</span>
+                      </>
+                    ) : (
+                      <>
+                        Tip: mete <span className="font-mono">account_id</span> (o setéalo en
+                        localStorage como{" "}
+                        <span className="font-mono">revenue_account_id</span>)
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
 
               <textarea
-                className="w-full rounded-xl border border-emerald-800/70 bg-gradient-to-br from-black via-slate-950 to-emerald-950/30 px-3 py-2 text-sm text-emerald-50 focus:outline-none focus:ring-2 focus:ring-emerald-500/70 focus:border-emerald-400/80 h-28 placeholder:text-emerald-700"
-                placeholder='Ej: "inspecciona el lead con email pacho@test.com"'
-                value={command}
-                onChange={(e) => setCommand(e.target.value)}
-                onKeyDown={handleKeyDown}
+                value={context}
+                onChange={(e) => {
+                  setContext(e.target.value)
+                  setContextError(null)
+                }}
+                className={`w-full h-24 rounded-xl border bg-white px-3 py-2 font-mono text-[11px] focus:outline-none focus:ring-2 ${
+                  contextError
+                    ? "border-red-300 focus:ring-red-200"
+                    : "border-slate-200 focus:ring-emerald-100"
+                }`}
               />
+            </div>
+          </div>
+        )}
+      </header>
 
-              <div className="mt-4 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-semibold tracking-[0.18em] text-emerald-300 uppercase">
-                    Context (JSON)
-                  </span>
-                  {contextError && (
-                    <span className="text-[10px] text-red-400 font-mono">
-                      {contextError}
-                    </span>
-                  )}
-                </div>
-                <textarea
-                  className={`w-full rounded-xl border bg-black/80 px-3 py-2 text-[11px] font-mono h-20 focus:outline-none focus:ring-2 ${
-                    contextError
-                      ? "border-red-500/70 focus:ring-red-500/70 text-red-300"
-                      : "border-emerald-800/70 focus:ring-emerald-500/70 text-emerald-300"
-                  }`}
-                  value={context}
-                  onChange={(e) => {
-                    setContext(e.target.value)
-                    setContextError(null)
-                  }}
-                />
-              </div>
+      {/* Chat body */}
+      <main className="mx-auto max-w-5xl px-4 pt-6 pb-28">
+        {/* Quick actions */}
+        <div className="mb-4 flex flex-wrap gap-2">
+          <Chip label="Status" onClick={() => handleSend("dame el status del sistema")} />
+          <Chip label="Leads recientes" onClick={() => handleSend("lista los últimos 10 leads")} />
+          <Chip
+            label="Inspecciona último lead"
+            onClick={() => handleSend("inspecciona el último lead")}
+          />
+          <Chip label="Campaigns" onClick={() => handleSend("lista campañas recientes")} />
+          <Chip label="Touch simulate" onClick={() => handleSend("simula 10 touches")} />
+        </div>
 
-              <div className="mt-4 flex items-center justify-between gap-3">
-                <div className="text-[11px] text-emerald-500/90">
-                  <p className="uppercase tracking-[0.16em] text-emerald-400/90">
-                    Quick macros
-                  </p>
-                  <div className="mt-1 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setCommand("dame el status del sistema")}
-                      className="px-2 py-0.5 rounded-full border border-emerald-800/70 text-[10px] text-emerald-300 bg-black/60 hover:bg-emerald-900/40 transition-colors"
-                    >
-                      system.status
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setCommand(
-                          "inspecciona el lead con email pacho@test.com",
-                        )
-                      }
-                      className="px-2 py-0.5 rounded-full border border-emerald-800/70 text-[10px] text-emerald-300 bg-black/60 hover:bg-emerald-900/40 transition-colors"
-                    >
-                      lead.inspect (email)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setCommand(
-                          "enrola el lead con email pacho@test.com en la campaña de prueba de dentistas y confirma",
-                        )
-                      }
-                      className="px-2 py-0.5 rounded-full border border-emerald-800/70 text-[10px] text-emerald-300 bg-black/60 hover:bg-emerald-900/40 transition-colors"
-                    >
-                      lead.enroll
-                    </button>
+        {chat.length === 0 ? (
+          <div className="rounded-2xl border border-slate-200 bg-white p-6">
+            <div className="text-sm font-semibold">Arranca con algo simple</div>
+            <div className="mt-2 text-sm text-slate-600 space-y-1">
+              <div>• “dame el status del sistema”</div>
+              <div>• “lista los últimos 10 leads”</div>
+              <div>• “inspecciona el lead con email ...”</div>
+              <div>• “enrola el lead con email ... en campaña ... y confirma”</div>
+            </div>
+          </div>
+        ) : (
+          <div ref={scrollRef} className="space-y-3">
+            {chat.map((m, idx) => {
+              if (m.role === "user") {
+                return (
+                  <div key={idx} className="flex flex-col gap-1">
+                    <div className="text-[10px] text-slate-400 text-right">
+                      Tú · {formatTime(m.ts)}
+                    </div>
+                    <Bubble role="user">
+                      <div className="whitespace-pre-wrap text-sm">{m.text}</div>
+                    </Bubble>
                   </div>
-                </div>
+                )
+              }
 
-                <button
-                  type="button"
-                  onClick={handleSend}
-                  disabled={sending || !command.trim()}
-                  className="shrink-0 inline-flex items-center justify-center px-4 py-2 rounded-xl bg-emerald-500 text-black text-xs font-semibold tracking-wide shadow-[0_0_25px_rgba(16,185,129,0.6)] hover:bg-emerald-400 disabled:opacity-40 disabled:shadow-none transition-all"
-                >
-                  {sending ? "Ejecutando…" : "Ejecutar comando"}
-                </button>
-              </div>
+              if (m.role === "error") {
+                return (
+                  <div key={idx} className="flex flex-col gap-1">
+                    <div className="text-[10px] text-slate-400">Error · {formatTime(m.ts)}</div>
+                    <Bubble role="error">
+                      <div className="text-sm">{m.message}</div>
+                    </Bubble>
+                  </div>
+                )
+              }
+
+              const p = m.payload
+              const conf = clamp(Math.round((p.confidence ?? 0) * 100), 0, 100)
+
+              // ✅ CAMBIO CLAVE: humaniza con fallback robusto
+              const assistantText = humanizeFromPayload(p)
+
+              // ✅ Solo mostramos explanation si hubo error o si no hay texto útil
+              const showExplanation =
+                !p.ok || !assistantText || assistantText.trim() === "" || assistantText.trim() === "Hecho."
+
+              return (
+                <div key={idx} className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[10px] text-slate-400">
+                      Sistema · {formatTime(m.ts)}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-slate-500 font-mono">
+                        {p.intent} · {conf}%
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => openArtifactsFrom(p)}
+                        className="text-[11px] px-2 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50"
+                      >
+                        Ver detalles
+                      </button>
+                    </div>
+                  </div>
+
+                  <Bubble role="assistant">
+                    <div className="whitespace-pre-wrap text-sm">{assistantText}</div>
+                    {showExplanation && p.explanation ? (
+                      <div className="mt-2 text-[11px] text-slate-500">{p.explanation}</div>
+                    ) : null}
+                  </Bubble>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </main>
+
+      {/* Composer fixed */}
+      <div className="fixed bottom-0 right-0 left-0 lg:left-72 border-t border-slate-200 bg-white/90 backdrop-blur z-20">
+        <div className="mx-auto max-w-5xl px-4 py-3 flex gap-3 items-end">
+          <div className="flex-1">
+            <textarea
+              ref={inputRef}
+              value={command}
+              onChange={(e) => setCommand(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder='Escribe un comando… (Enter para enviar, Shift+Enter para línea nueva)'
+              className="w-full h-12 max-h-40 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-100"
+            />
+            {contextError ? (
+              <div className="mt-1 text-[11px] text-red-600">{contextError}</div>
+            ) : null}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => handleSend()}
+            disabled={sending || !command.trim()}
+            className="px-4 py-3 rounded-2xl bg-slate-900 text-white text-sm font-semibold disabled:opacity-40"
+          >
+            {sending ? "Enviando…" : "Enviar"}
+          </button>
+        </div>
+      </div>
+
+      {/* Drawer / overlay */}
+      {drawerOpen && (
+        <div className="fixed inset-0 z-40">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setDrawerOpen(false)} />
+          <div className="absolute right-0 top-0 h-full w-full max-w-[720px] bg-white border-l border-slate-200 shadow-xl flex flex-col">
+            <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+              <div className="text-sm font-semibold">{drawerTitle}</div>
+              <button
+                type="button"
+                onClick={() => setDrawerOpen(false)}
+                className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs"
+              >
+                Cerrar
+              </button>
             </div>
 
-            <div className="rounded-2xl border border-emerald-800/40 bg-black/60 px-4 py-3 text-[11px] text-emerald-400 space-y-1">
-              <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                <span className="uppercase tracking-[0.18em] text-emerald-300">
-                  Intents soportados
-                </span>
-              </div>
-              <p>
-                <span className="font-mono text-emerald-300">system.status</span>,{" "}
-                <span className="font-mono text-emerald-300">lead.inspect</span>,{" "}
-                <span className="font-mono text-emerald-300">lead.enroll</span>,{" "}
-                <span className="font-mono text-emerald-300">lead.update</span>,{" "}
-                <span className="font-mono text-emerald-300">
-                  lead.list.recents
-                </span>
-              </p>
-              <p className="text-emerald-500/80">
-                Tú hablas en humano. El brain resuelve emails, phones,
-                nombres de campaña y IDs internos.
-              </p>
-            </div>
-          </section>
-
-          {/* RIGHT: HUMAN VIEW + HISTORY */}
-          <section className="flex flex-col gap-4">
-            {/* HUMAN TRANSLATION */}
-            <div className="rounded-2xl border border-emerald-800/60 bg-black/80 shadow-[0_0_40px_rgba(16,185,129,0.12)] p-4">
-              <div className="flex items-center justify-between mb-3">
-                <div>
-                  <p className="text-xs font-semibold tracking-[0.18em] text-emerald-300 uppercase">
-                    Respuesta del sistema
-                  </p>
-                  <p className="text-[11px] text-emerald-500 mt-1">
-                    Vista explicada en lenguaje humano. Sin JSON, sin ruido.
-                  </p>
-                </div>
-              </div>
-
-              {lastResult ? (
-                <BrainResponseTranslator response={lastResult} />
+            <div className="p-4 overflow-y-auto">
+              {drawerArtifacts ? (
+                <BrainResponseTranslator response={drawerArtifacts} />
               ) : (
-                <p className="text-emerald-500 text-sm">
-                  Aún no hay actividad. Envía tu primer comando al brain.
-                </p>
+                <div className="text-sm text-slate-600">
+                  No hay artifacts disponibles todavía. Ejecuta un comando y luego abre “Detalles”.
+                </div>
               )}
             </div>
-
-            {/* LIGHT HISTORY (HUMAN STYLE) */}
-            <div className="rounded-2xl border border-emerald-800/40 bg-black/70 shadow-[0_0_30px_rgba(16,185,129,0.1)] flex-1 flex flex-col">
-              <div className="border-b border-emerald-800/60 px-4 py-3">
-                <p className="text-xs font-semibold tracking-[0.18em] text-emerald-300 uppercase">
-                  Historial reciente
-                </p>
-                <p className="text-[11px] text-emerald-500 mt-1">
-                  Conversación resumida entre tú y el brain.
-                </p>
-              </div>
-
-              <div
-                ref={scrollRef}
-                className="flex-1 overflow-y-auto px-4 py-4 space-y-3 text-xs"
-              >
-                {history.length === 0 && (
-                  <div className="h-full flex items-center justify-center text-emerald-600/80 italic">
-                    Sin tráfico aún.
-                  </div>
-                )}
-
-                {history.map((entry, idx) => {
-                  if (entry.type === "user") {
-                    return (
-                      <div
-                        key={idx}
-                        className="border border-emerald-800/70 rounded-xl bg-emerald-950/40 px-3 py-2"
-                      >
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-300">
-                            Tú
-                          </span>
-                          <span className="text-[10px] text-emerald-500/80 font-mono">
-                            {formatTime(entry.ts)}
-                          </span>
-                        </div>
-                        <p className="text-emerald-100 text-[11px]">
-                          {entry.text}
-                        </p>
-                      </div>
-                    )
-                  }
-
-                  if (entry.type === "error") {
-                    return (
-                      <div
-                        key={idx}
-                        className="border border-red-700/70 rounded-xl bg-red-950/40 px-3 py-2"
-                      >
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-red-300">
-                            Error del sistema
-                          </span>
-                          <span className="text-[10px] text-red-400/80 font-mono">
-                            {formatTime(entry.ts)}
-                          </span>
-                        </div>
-                        <p className="text-red-200 text-[11px]">
-                          {entry.message}
-                        </p>
-                      </div>
-                    )
-                  }
-
-                  const payload = entry.payload
-                  const conf = Math.round(payload.confidence * 100)
-
-                  return (
-                    <div
-                      key={idx}
-                      className="border border-emerald-800/80 rounded-xl bg-gradient-to-br from-black via-slate-950 to-emerald-950/40 px-3 py-2 space-y-1"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-emerald-300">
-                          Sistema
-                        </span>
-                        <span className="text-[10px] text-emerald-500/80 font-mono">
-                          {formatTime(entry.ts)}
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-emerald-100">
-                        Intento interpretado:{" "}
-                        <span className="font-mono text-emerald-300">
-                          {payload.intent}
-                        </span>{" "}
-                        ({conf}% confianza).
-                      </p>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          </section>
-        </main>
-      </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

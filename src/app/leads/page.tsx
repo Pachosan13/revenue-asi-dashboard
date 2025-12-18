@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useEffect, useMemo, useState } from "react"
-import { AlertTriangle, RefreshCw } from "lucide-react"
+import { AlertTriangle, RefreshCw, Upload, Plus, Link2, X } from "lucide-react"
 
 import { supabaseBrowser } from "@/lib/supabase"
 import {
@@ -84,7 +84,6 @@ const MOCK_LEADS: LeadInboxEntry[] = [
     wa_engaged: 1,
     sms_engaged: 0,
     voice_engaged: 0,
-    // Genome v2
     industry: "Retail",
     sub_industry: "Ecommerce",
     enrichment_status: "completed",
@@ -188,6 +187,30 @@ export default function LeadsPage() {
   const [query, setQuery] = useState("")
   const [stateFilter, setStateFilter] = useState<LeadState | "All">("All")
 
+  // -----------------------------
+  // IMPORT UI (NUEVO)
+  // -----------------------------
+  const [showImport, setShowImport] = useState(false)
+  const [importTab, setImportTab] = useState<"csv" | "manual" | "webhook">("csv")
+  const [importBusy, setImportBusy] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [importSuccess, setImportSuccess] = useState<string | null>(null)
+
+  const [csvFile, setCsvFile] = useState<File | null>(null)
+  const [csvCampaignId, setCsvCampaignId] = useState("")
+  const [csvCampaignName, setCsvCampaignName] = useState("")
+
+  const [manualName, setManualName] = useState("")
+  const [manualEmail, setManualEmail] = useState("")
+  const [manualPhone, setManualPhone] = useState("")
+  const [manualCampaignId, setManualCampaignId] = useState("")
+  const [manualCampaignName, setManualCampaignName] = useState("")
+
+  const webhookUrl = useMemo(() => {
+    if (typeof window === "undefined") return ""
+    return `${window.location.origin}/api/intake/webhook`
+  }, [])
+
   useEffect(() => {
     let alive = true
 
@@ -206,11 +229,22 @@ export default function LeadsPage() {
       setLoading(true)
       const client = supabaseBrowser()
 
-      // 1) Base inbox
+      // 1) Base inbox (fuente operativa)
       const { data, error: dbError } = await client
         .from("inbox_events")
         .select(
-          "lead_id, lead_name, lead_email, lead_phone, lead_state, last_step_at, campaign_id, campaign_name, channel_last, created_at",
+          [
+            "lead_id",
+            "lead_name",
+            "lead_email",
+            "lead_phone",
+            "lead_state",
+            "last_step_at",
+            "campaign_id",
+            "campaign_name",
+            "channel_last",
+            "created_at",
+          ].join(", "),
         )
         .order("last_step_at", { ascending: false })
         .limit(200)
@@ -219,9 +253,7 @@ export default function LeadsPage() {
 
       if (dbError) {
         console.error(dbError)
-        setError(
-          "No se pudo acceder a inbox_events. Se muestran datos mock.",
-        )
+        setError("No se pudo acceder a inbox_events. Se muestran datos mock.")
         setLeads(MOCK_LEADS)
         setMissingFields(collectMissingFields(MOCK_LEADS))
         setUsingMock(true)
@@ -263,9 +295,9 @@ export default function LeadsPage() {
             )
             .in("lead_id", ids)
 
-          // 4) Lead Genome v2 (Enrichment)
+          // 4) Lead Genome v2 (+ campaign fields via nueva view)
           const genomePromise = client2
-            .from("v_lead_with_enrichment_v2")
+            .from("v_lead_with_enrichment_and_campaign_v1")
             .select(
               [
                 "id",
@@ -273,6 +305,11 @@ export default function LeadsPage() {
                 "sub_industry",
                 "ai_lead_score",
                 "enrichment_status",
+                "campaign_id",
+                "campaign_name",
+                "lead_state",
+                "last_step_at",
+                "channel_last",
               ].join(", "),
             )
             .in("id", ids)
@@ -296,8 +333,8 @@ export default function LeadsPage() {
                   typeof row.lead_brain_score === "number"
                     ? row.lead_brain_score
                     : row.lead_brain_score == null
-                    ? null
-                    : Number(row.lead_brain_score) || null,
+                      ? null
+                      : Number(row.lead_brain_score) || null,
                 bucket: row.lead_brain_bucket ?? null,
               })
             })
@@ -332,22 +369,16 @@ export default function LeadsPage() {
                     ? null
                     : Number(row.distinct_channels) || 0,
                 errors_total:
-                  row.errors_total == null
-                    ? null
-                    : Number(row.errors_total) || 0,
+                  row.errors_total == null ? null : Number(row.errors_total) || 0,
                 last_touch_at: row.last_touch_at ?? null,
                 email_engaged:
-                  row.email_engaged == null
-                    ? null
-                    : Number(row.email_engaged) || 0,
+                  row.email_engaged == null ? null : Number(row.email_engaged) || 0,
                 wa_engaged:
                   row.wa_engaged == null ? null : Number(row.wa_engaged) || 0,
                 sms_engaged:
                   row.sms_engaged == null ? null : Number(row.sms_engaged) || 0,
                 voice_engaged:
-                  row.voice_engaged == null
-                    ? null
-                    : Number(row.voice_engaged) || 0,
+                  row.voice_engaged == null ? null : Number(row.voice_engaged) || 0,
               })
             })
           } else if (signalsRes.error) {
@@ -357,7 +388,7 @@ export default function LeadsPage() {
             )
           }
 
-          // Map Lead Genome v2 (solo campos confirmados)
+          // Map Lead Genome v2 (+ campaign fallback)
           const genomeMap = new Map<
             string,
             {
@@ -365,8 +396,14 @@ export default function LeadsPage() {
               sub_industry: string | null
               ai_lead_score: number | null
               enrichment_status: string | null
+              campaign_id: string | null
+              campaign_name: string | null
+              lead_state: string | null
+              last_step_at: string | null
+              channel_last: string | null
             }
           >()
+
           if (!genomeRes.error && Array.isArray(genomeRes.data)) {
             ;(genomeRes.data as any[]).forEach((row) => {
               if (!row.id) return
@@ -374,15 +411,18 @@ export default function LeadsPage() {
                 industry: row.industry ?? null,
                 sub_industry: row.sub_industry ?? null,
                 ai_lead_score:
-                  row.ai_lead_score == null
-                    ? null
-                    : Number(row.ai_lead_score) || 0,
+                  row.ai_lead_score == null ? null : Number(row.ai_lead_score) || 0,
                 enrichment_status: row.enrichment_status ?? null,
+                campaign_id: row.campaign_id ?? null,
+                campaign_name: row.campaign_name ?? null,
+                lead_state: row.lead_state ?? null,
+                last_step_at: row.last_step_at ?? null,
+                channel_last: row.channel_last ?? null,
               })
             })
           } else if (genomeRes.error) {
             console.error(
-              "Error loading v_lead_with_enrichment_v2",
+              "Error loading v_lead_with_enrichment_and_campaign_v1",
               genomeRes.error,
             )
           }
@@ -395,10 +435,20 @@ export default function LeadsPage() {
 
             return {
               ...lead,
+
+              // si inbox_events no trae campaign_name, lo completamos desde la view nueva
+              ...(g?.campaign_id && !lead.campaign_id
+                ? { campaign_id: g.campaign_id }
+                : null),
+              ...(g?.campaign_name && !lead.campaign_name
+                ? { campaign_name: g.campaign_name }
+                : null),
+
               ...(brain && {
                 lead_brain_score: brain.score,
                 lead_brain_bucket: brain.bucket,
               }),
+
               ...(s && {
                 attempts_total: s.attempts_total,
                 distinct_channels: s.distinct_channels,
@@ -409,11 +459,21 @@ export default function LeadsPage() {
                 sms_engaged: s.sms_engaged,
                 voice_engaged: s.voice_engaged,
               }),
+
               ...(g && {
                 industry: g.industry,
                 sub_industry: g.sub_industry,
                 ai_lead_score: g.ai_lead_score,
                 enrichment_status: g.enrichment_status,
+
+                // solo usamos estos si el lead no tiene ya valores desde inbox_events
+                ...(lead.state == null && g.lead_state ? { state: g.lead_state } : null),
+                ...(lead.last_touch_at == null && g.last_step_at
+                  ? { last_touch_at: g.last_step_at }
+                  : null),
+                ...(lead.channel_last == null && g.channel_last
+                  ? { channel_last: g.channel_last }
+                  : null),
               }),
             }
           })
@@ -422,6 +482,7 @@ export default function LeadsPage() {
         }
       }
 
+      if (!alive) return
       setError(null)
       setLeads(mapped)
       setMissingFields(collectMissingFields(mapped))
@@ -447,7 +508,6 @@ export default function LeadsPage() {
 
     const withFilters = leads.filter((lead) => {
       if (stateFilter !== "All" && lead.state !== stateFilter) return false
-
       if (!term) return true
 
       const matchesQuery =
@@ -468,21 +528,144 @@ export default function LeadsPage() {
       const bucketB = (b.lead_brain_bucket ?? "").toLowerCase()
       const bucketScoreA = bucketWeight[bucketA] ?? 0
       const bucketScoreB = bucketWeight[bucketB] ?? 0
-      if (bucketScoreA !== bucketScoreB) {
-        return bucketScoreB - bucketScoreA
-      }
+      if (bucketScoreA !== bucketScoreB) return bucketScoreB - bucketScoreA
 
       const scoreA = a.lead_brain_score ?? -1
       const scoreB = b.lead_brain_score ?? -1
-      if (scoreA !== scoreB) {
-        return scoreB - scoreA
-      }
+      if (scoreA !== scoreB) return scoreB - scoreA
 
       const timeA = a.last_touch_at ? new Date(a.last_touch_at).getTime() : 0
       const timeB = b.last_touch_at ? new Date(b.last_touch_at).getTime() : 0
       return timeB - timeA
     })
   }, [leads, query, stateFilter])
+
+  // -----------------------------------------
+  // IMPORT HANDLERS (NUEVO)
+  // -----------------------------------------
+  async function refreshAfterImport() {
+    // evita reload total: reejecuta el mismo flujo (simple)
+    window.location.reload()
+  }
+
+  async function handleImportCsv() {
+    setImportError(null)
+    setImportSuccess(null)
+
+    if (!csvFile) {
+      setImportError("Selecciona un CSV.")
+      return
+    }
+
+    try {
+      setImportBusy(true)
+      const form = new FormData()
+      form.append("file", csvFile)
+      if (csvCampaignId.trim()) form.append("campaign_id", csvCampaignId.trim())
+      if (csvCampaignName.trim())
+        form.append("campaign_name", csvCampaignName.trim())
+
+      const res = await fetch("/api/intake/csv", {
+        method: "POST",
+        body: form,
+      })
+
+      if (!res.ok) {
+        const txt = await res.text()
+        throw new Error(txt || "CSV import failed")
+      }
+
+      const json = await res.json()
+      setImportSuccess(
+        `Import OK. inserted=${json?.inserted ?? "?"} duplicates=${
+          json?.duplicates ?? "?"
+        }`,
+      )
+      await refreshAfterImport()
+    } catch (e: any) {
+      setImportError(e?.message || "CSV import failed")
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  async function handleManualAdd() {
+    setImportError(null)
+    setImportSuccess(null)
+
+    const email = manualEmail.trim()
+    const phone = manualPhone.trim()
+    const name = manualName.trim()
+
+    if (!email && !phone) {
+      setImportError("Necesitas email o phone.")
+      return
+    }
+
+    try {
+      setImportBusy(true)
+
+      const payload = {
+        name: name || null,
+        email: email || null,
+        phone: phone || null,
+        campaign_id: manualCampaignId.trim() || null,
+        campaign_name: manualCampaignName.trim() || null,
+        source: "manual",
+        confirm: true,
+      }
+
+      const res = await fetch("/api/intake/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+
+      if (!res.ok) {
+        const txt = await res.text()
+        throw new Error(txt || "Manual intake failed")
+      }
+
+      const json = await res.json()
+      setImportSuccess(`Lead OK. lead_id=${json?.lead_id ?? "?"}`)
+      await refreshAfterImport()
+    } catch (e: any) {
+      setImportError(e?.message || "Manual intake failed")
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  async function handleCopyWebhook() {
+    setImportError(null)
+    setImportSuccess(null)
+    try {
+      await navigator.clipboard.writeText(webhookUrl)
+      setImportSuccess("Webhook URL copied.")
+    } catch {
+      setImportError("No se pudo copiar. Copia manualmente.")
+    }
+  }
+
+  function resetImportState() {
+    setImportError(null)
+    setImportSuccess(null)
+    setImportBusy(false)
+    setCsvFile(null)
+    setCsvCampaignId("")
+    setCsvCampaignName("")
+    setManualName("")
+    setManualEmail("")
+    setManualPhone("")
+    setManualCampaignId("")
+    setManualCampaignName("")
+    setImportTab("csv")
+  }
+
+  function closeImport() {
+    setShowImport(false)
+    resetImportState()
+  }
 
   return (
     <div className="space-y-5">
@@ -492,12 +675,22 @@ export default function LeadsPage() {
             <h1 className="text-3xl font-semibold text-white">Leads</h1>
             <Badge variant="neutral">Inbox</Badge>
             <Badge variant="info">Lead Brain v1 + Genome v2</Badge>
-            </div>
+          </div>
           <p className="text-sm text-white/60">
             Campos mínimos: {REQUIRED_FIELDS.join(", ")}
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* ✅ BOTÓN NUEVO */}
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => setShowImport(true)}
+          >
+            <Plus size={16} />
+            Import Leads
+          </Button>
+
           <Button
             variant="outline"
             size="sm"
@@ -518,8 +711,8 @@ export default function LeadsPage() {
               Supabase not configured, showing mock data
             </p>
             <p className="text-sm text-amber-200/90">
-              Define NEXT_PUBLIC_SUPABASE_URL y
-              NEXT_PUBLIC_SUPABASE_ANON_KEY para usar datos reales.
+              Define NEXT_PUBLIC_SUPABASE_URL y NEXT_PUBLIC_SUPABASE_ANON_KEY para
+              usar datos reales.
             </p>
           </div>
         </div>
@@ -531,8 +724,8 @@ export default function LeadsPage() {
           <div>
             <p className="font-semibold">{error}</p>
             <p className="text-sm text-red-200/90">
-              Si la vista no existe o el contrato cambió, comparte el SQL
-              exacto. Se muestran mocks temporalmente.
+              Si la vista no existe o el contrato cambió, comparte el SQL exacto.
+              Se muestran mocks temporalmente.
             </p>
           </div>
         </div>
@@ -581,6 +774,7 @@ export default function LeadsPage() {
                   ? "All"
                   : (state as string).charAt(0).toUpperCase() +
                     (state as string).slice(1)
+
               return (
                 <Button
                   key={state}
@@ -598,6 +792,180 @@ export default function LeadsPage() {
           <LeadInboxTable leads={filteredLeads} loading={loading} />
         </CardContent>
       </Card>
+
+      {/* ==============================
+          MODAL IMPORT (NUEVO)
+         ============================== */}
+      {showImport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-zinc-950 p-5 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-white">Import Leads</h2>
+                <p className="text-sm text-white/60">
+                  UI simple. Backend robusto. (CSV / Manual / Webhook)
+                </p>
+              </div>
+              <button
+                onClick={closeImport}
+                className="rounded-lg p-2 text-white/70 hover:bg-white/10 hover:text-white"
+                aria-label="Close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="mb-4 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant={importTab === "csv" ? "primary" : "outline"}
+                onClick={() => setImportTab("csv")}
+              >
+                <Upload size={16} />
+                CSV
+              </Button>
+              <Button
+                size="sm"
+                variant={importTab === "manual" ? "primary" : "outline"}
+                onClick={() => setImportTab("manual")}
+              >
+                <Plus size={16} />
+                Manual
+              </Button>
+              <Button
+                size="sm"
+                variant={importTab === "webhook" ? "primary" : "outline"}
+                onClick={() => setImportTab("webhook")}
+              >
+                <Link2 size={16} />
+                Webhook
+              </Button>
+            </div>
+
+            {importError && (
+              <div className="mb-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-100">
+                {importError}
+              </div>
+            )}
+            {importSuccess && (
+              <div className="mb-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+                {importSuccess}
+              </div>
+            )}
+
+            {/* CSV */}
+            {importTab === "csv" && (
+              <div className="space-y-3">
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <p className="mb-2 text-sm text-white/70">
+                    CSV must include at least <b>email</b> or <b>phone</b>.
+                  </p>
+
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={(e) => setCsvFile(e.target.files?.[0] ?? null)}
+                    className="w-full text-sm text-white/70"
+                  />
+
+                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <Input
+                      value={csvCampaignId}
+                      onChange={(e) => setCsvCampaignId(e.target.value)}
+                      placeholder="campaign_id (optional)"
+                    />
+                    <Input
+                      value={csvCampaignName}
+                      onChange={(e) => setCsvCampaignName(e.target.value)}
+                      placeholder="campaign_name (optional)"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2">
+                  <Button variant="outline" onClick={closeImport} disabled={importBusy}>
+                    Cancel
+                  </Button>
+                  <Button onClick={handleImportCsv} disabled={importBusy || !csvFile}>
+                    {importBusy ? "Importing..." : "Import CSV"}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Manual */}
+            {importTab === "manual" && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <Input
+                    value={manualName}
+                    onChange={(e) => setManualName(e.target.value)}
+                    placeholder="Name (optional)"
+                  />
+                  <Input
+                    value={manualEmail}
+                    onChange={(e) => setManualEmail(e.target.value)}
+                    placeholder="Email (optional)"
+                  />
+                  <Input
+                    value={manualPhone}
+                    onChange={(e) => setManualPhone(e.target.value)}
+                    placeholder="Phone (optional)"
+                  />
+                  <Input
+                    value={manualCampaignId}
+                    onChange={(e) => setManualCampaignId(e.target.value)}
+                    placeholder="campaign_id (optional)"
+                  />
+                  <div className="sm:col-span-2">
+                    <Input
+                      value={manualCampaignName}
+                      onChange={(e) => setManualCampaignName(e.target.value)}
+                      placeholder="campaign_name (optional)"
+                    />
+                  </div>
+                </div>
+
+                <p className="text-xs text-white/60">
+                  Required: email OR phone.
+                </p>
+
+                <div className="flex items-center justify-end gap-2">
+                  <Button variant="outline" onClick={closeImport} disabled={importBusy}>
+                    Cancel
+                  </Button>
+                  <Button onClick={handleManualAdd} disabled={importBusy}>
+                    {importBusy ? "Adding..." : "Add Lead"}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Webhook */}
+            {importTab === "webhook" && (
+              <div className="space-y-3">
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <p className="mb-2 text-sm text-white/70">
+                    Send leads here (POST JSON):
+                  </p>
+                  <div className="rounded-lg bg-black/40 p-2 text-xs text-white/70">
+                    {webhookUrl}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2">
+                  <Button variant="outline" onClick={closeImport} disabled={importBusy}>
+                    Close
+                  </Button>
+                  <Button onClick={handleCopyWebhook} disabled={importBusy}>
+                    Copy URL
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
