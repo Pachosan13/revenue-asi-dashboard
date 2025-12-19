@@ -8,7 +8,7 @@ begin;
 
 create table if not exists public.lead_enrichments_v2 (
   id uuid primary key default gen_random_uuid(),
-  lead_id uuid not null references public.leads(id) on delete cascade,
+lead_id uuid not null references lead_hunter.leads_canonical(id) on delete cascade,
 
   -- Campos estructurados del Lead Genome
   industry text,
