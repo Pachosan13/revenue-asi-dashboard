@@ -169,9 +169,7 @@ export default function DashboardPage() {
       {/* Error banner */}
       {error ? (
         <div className="flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-100">
-          <span className="mt-0.5">
-            ⚠️
-          </span>
+          <span className="mt-0.5">⚠️</span>
           <div>
             <p className="font-semibold">Error en dashboard</p>
             <p className="text-sm text-red-200/90">{error}</p>
@@ -182,23 +180,23 @@ export default function DashboardPage() {
       {/* KPI row */}
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <StatCard
-          label="Total leads"
-          value={totalLeads}
-          helper="En el sistema"
+          label="Leads activos"
+          value={`${totalLeads}`}
+          helper="Con campaña"
         />
         <StatCard
           label="Attempting"
-          value={attempting}
+          value={`${attempting}`}
           helper="En secuencia de contacto"
         />
         <StatCard
           label="Engaged"
-          value={engaged}
+          value={`${engaged}`}
           helper="Respondieron / activos"
         />
         <StatCard
           label="Booked"
-          value={booked}
+          value={`${booked}`}
           helper="Con cita / deal abierto"
         />
       </div>
@@ -248,9 +246,7 @@ export default function DashboardPage() {
                       </TableCell>
                       <TableCell className="text-sm">
                         {lead.last_touch_at
-                          ? new Date(
-                              lead.last_touch_at
-                            ).toLocaleString()
+                          ? new Date(lead.last_touch_at).toLocaleString()
                           : "—"}
                       </TableCell>
                     </TableRow>
@@ -326,7 +322,9 @@ export default function DashboardPage() {
                 </TableRow>
               ) : (
                 funnelRows.map((row, idx) => (
-                  <TableRow key={`${row.campaign_id}-${row.channel}-${row.status}-${idx}`}>
+                  <TableRow
+                    key={`${row.campaign_id}-${row.channel}-${row.status}-${idx}`}
+                  >
                     <TableCell className="text-sm">
                       {row.campaign_name ?? "Sin nombre"}
                     </TableCell>

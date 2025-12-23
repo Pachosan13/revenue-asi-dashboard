@@ -1,17 +1,9 @@
 "use client"
 
-import React, { useEffect, useMemo, useState, useCallback } from "react"
-import { AlertTriangle, Filter, RefreshCw } from "lucide-react"
+import React, { useEffect, useMemo, useState } from "react"
+import { AlertTriangle, RefreshCw, Upload, Plus, Link2, X } from "lucide-react"
 
 import { supabaseBrowser } from "@/lib/supabase"
-<<<<<<< HEAD
-<<<<<<< HEAD
-import LeadTable from "@/components/LeadTable"
-import type { LeadEnriched, LeadState } from "@/types/lead"
-import { Badge, Button, Card, CardContent, CardHeader, Input, Select } from "@/components/ui-custom"
-=======
-import LeadTable, { deriveLeadDisplayName } from "@/components/LeadTable"
-import type { LeadEnriched } from "@/types/lead"
 import {
   Badge,
   Button,
@@ -19,14 +11,47 @@ import {
   CardContent,
   CardHeader,
   Input,
-  Select,
-  Textarea,
 } from "@/components/ui-custom"
-import NewLeadModal from "./new-lead-modal"
->>>>>>> origin/director-engine-core
+import {
+  LeadInboxTable,
+  type LeadInboxEntry,
+} from "@/components/leads/LeadInboxTable"
 
-const STATUS_OPTIONS = ["All", "New", "Contacted", "Qualified"] as const
-const STATE_FILTERS: ("All" | LeadState)[] = [
+type LeadState =
+  | "new"
+  | "enriched"
+  | "attempting"
+  | "engaged"
+  | "qualified"
+  | "booked"
+  | "dead"
+  | string
+
+type InboxRow = {
+  lead_id: string | null
+  lead_name: string | null
+  lead_email: string | null
+  lead_phone: string | null
+  lead_state: string | null
+  last_step_at: string | null
+  campaign_id: string | null
+  campaign_name: string | null
+  channel_last: string | null
+  created_at: string | null
+}
+
+const REQUIRED_FIELDS = [
+  "lead_id",
+  "lead_name",
+  "lead_email",
+  "lead_phone",
+  "lead_state",
+  "last_step_at",
+  "campaign_id/name",
+  "channel_last",
+]
+
+const STATE_FILTERS: (LeadState | "All")[] = [
   "All",
   "new",
   "enriched",
@@ -36,60 +61,114 @@ const STATE_FILTERS: ("All" | LeadState)[] = [
   "booked",
   "dead",
 ]
-=======
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  Input,
-} from "@/components/ui-custom"
-import { LeadInboxTable, type LeadInboxEntry } from "@/components/leads/LeadInboxTable"
 
-const PAGE_SIZE = 25
->>>>>>> origin/plan-joe-dashboard-v1
-
-const STATE_FILTERS = [
-  { label: "All", value: "all" },
-  { label: "New", value: "new" },
-  { label: "Enriched", value: "enriched" },
-  { label: "Attempting", value: "attempting" },
-  { label: "Engaged", value: "engaged" },
-  { label: "Qualified", value: "qualified" },
-  { label: "Booked", value: "booked" },
-  { label: "Dead", value: "dead" },
+// Mock para cuando no hay Supabase en frontend
+const MOCK_LEADS: LeadInboxEntry[] = [
+  {
+    id: "MOCK-1001",
+    name: "Ana Ruiz",
+    email: "ana.ruiz@example.com",
+    phone: "+34 600 111 222",
+    state: "new",
+    last_touch_at: "2024-11-02T10:15:00Z",
+    campaign_id: "CMP-42",
+    campaign_name: "Q4 Retail Push",
+    channel_last: "email",
+    created_at: "2024-11-01T08:00:00Z",
+    lead_brain_score: 52,
+    lead_brain_bucket: "warm",
+    attempts_total: 3,
+    distinct_channels: 2,
+    errors_total: 0,
+    email_engaged: 0,
+    wa_engaged: 1,
+    sms_engaged: 0,
+    voice_engaged: 0,
+    industry: "Retail",
+    sub_industry: "Ecommerce",
+    enrichment_status: "completed",
+  },
+  {
+    id: "MOCK-1002",
+    name: "Carlos Soto",
+    email: "carlos.soto@example.com",
+    phone: "+34 600 333 444",
+    state: "attempting",
+    last_touch_at: "2024-11-01T16:45:00Z",
+    campaign_id: "CMP-18",
+    campaign_name: "ABM EMEA",
+    channel_last: "phone",
+    created_at: "2024-10-28T12:20:00Z",
+    lead_brain_score: 74,
+    lead_brain_bucket: "hot",
+    attempts_total: 5,
+    distinct_channels: 3,
+    errors_total: 0,
+    email_engaged: 1,
+    wa_engaged: 1,
+    sms_engaged: 0,
+    voice_engaged: 1,
+    industry: "Software",
+    sub_industry: "SaaS",
+    enrichment_status: "completed",
+  },
+  {
+    id: "MOCK-1003",
+    name: "Lucía Romero",
+    email: "lucia.romero@example.com",
+    phone: null,
+    state: "qualified",
+    last_touch_at: null,
+    campaign_id: null,
+    campaign_name: null,
+    channel_last: "ads",
+    created_at: "2024-10-25T09:30:00Z",
+    lead_brain_score: 23,
+    lead_brain_bucket: "cold",
+    attempts_total: 1,
+    distinct_channels: 1,
+    errors_total: 0,
+    email_engaged: 0,
+    wa_engaged: 0,
+    sms_engaged: 0,
+    voice_engaged: 0,
+    enrichment_status: "pending",
+  },
 ]
 
-<<<<<<< HEAD
-=======
-function getLeadStatus(lead: LeadEnriched) {
-  return (lead.state ?? "new").toLowerCase()
+function mapInboxRow(row: InboxRow): LeadInboxEntry {
+  return {
+    id: row.lead_id ?? "",
+    name: row.lead_name,
+    email: row.lead_email,
+    phone: row.lead_phone,
+    state: row.lead_state ?? null,
+    last_touch_at: row.last_step_at,
+    campaign_id: row.campaign_id,
+    campaign_name: row.campaign_name,
+    channel_last: row.channel_last,
+    created_at: row.created_at,
+  }
 }
 
-const STATE_ORDER: Record<string, number> = {
-  booked: 1,
-  engaged: 2,
-  enriched: 3,
-  attempting: 4,
-  new: 5,
-  dead: 6,
+function collectMissingFields(leads: LeadInboxEntry[]) {
+  const missing = new Set<string>()
+
+  leads.forEach((lead) => {
+    if (!lead.id) missing.add("lead_id")
+    if (!lead.name) missing.add("lead_name")
+    if (!lead.email) missing.add("lead_email")
+    if (!lead.phone) missing.add("lead_phone")
+    if (!lead.state) missing.add("lead_state")
+    if (!lead.last_touch_at) missing.add("last_step_at")
+    if (!lead.campaign_id && !lead.campaign_name)
+      missing.add("campaign_id/name")
+    if (!lead.channel_last) missing.add("channel_last")
+  })
+
+  return Array.from(missing)
 }
 
-// tipo para la view lead_activity_summary
-type LeadActivityRow = {
-  lead_id: string
-  state: string | null
-  source: string | null
-  niche: string | null
-  city: string | null
-  country_code: string | null
-  last_channel: string | null
-  last_status: string | null
-  last_step: number | null
-  last_touch_at: string | null
-}
-
->>>>>>> origin/director-engine-core
 export default function LeadsPage() {
   const supabaseReady = useMemo(
     () =>
@@ -102,316 +181,516 @@ export default function LeadsPage() {
 
   const [leads, setLeads] = useState<LeadInboxEntry[]>([])
   const [loading, setLoading] = useState(true)
-<<<<<<< HEAD
-  const [q, setQ] = useState("")
-  const [status, setStatus] = useState<(typeof STATUS_OPTIONS)[number]>("All")
-  const [stateFilter, setStateFilter] = useState<LeadState | "All">("All")
-  const [confidence, setConfidence] = useState(30)
-  const [dateFrom, setDateFrom] = useState("")
-  const [dateTo, setDateTo] = useState("")
-<<<<<<< HEAD
-=======
   const [error, setError] = useState<string | null>(null)
+  const [missingFields, setMissingFields] = useState<string[]>([])
+  const [usingMock, setUsingMock] = useState(!supabaseReady)
   const [query, setQuery] = useState("")
-  const [debouncedQuery, setDebouncedQuery] = useState("")
-  const [stateFilter, setStateFilter] = useState("all")
-  const [page, setPage] = useState(0)
-  const [hasMore, setHasMore] = useState(false)
-  const [isLoadingMore, setIsLoadingMore] = useState(false)
-=======
-  const [newLeadOpen, setNewLeadOpen] = useState(false)
-  const [importOpen, setImportOpen] = useState(false)
->>>>>>> origin/director-engine-core
+  const [stateFilter, setStateFilter] = useState<LeadState | "All">("All")
 
-  const activeQuery = debouncedQuery.trim()
+  // -----------------------------
+  // IMPORT UI (NUEVO)
+  // -----------------------------
+  const [showImport, setShowImport] = useState(false)
+  const [importTab, setImportTab] = useState<"csv" | "manual" | "webhook">("csv")
+  const [importBusy, setImportBusy] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [importSuccess, setImportSuccess] = useState<string | null>(null)
 
-  useEffect(() => {
-    const timer = setTimeout(() => setDebouncedQuery(query), 275)
-    return () => clearTimeout(timer)
-  }, [query])
+  const [csvFile, setCsvFile] = useState<File | null>(null)
+  const [csvCampaignId, setCsvCampaignId] = useState("")
+  const [csvCampaignName, setCsvCampaignName] = useState("")
 
-  const fetchInboxPage = useCallback(async (pageIndex: number) => {
-    const client = supabaseBrowser()
-    const from = pageIndex * PAGE_SIZE
-    const to = from + PAGE_SIZE - 1
+  const [manualName, setManualName] = useState("")
+  const [manualEmail, setManualEmail] = useState("")
+  const [manualPhone, setManualPhone] = useState("")
+  const [manualCampaignId, setManualCampaignId] = useState("")
+  const [manualCampaignName, setManualCampaignName] = useState("")
 
-    // 🔹 USAMOS inbox_events DIRECTO – que ya validaste con datos reales
-    return client
-      .from("inbox_events")
-      .select(
-        `
-        lead_id,
-        lead_name,
-        lead_email,
-        lead_phone,
-        lead_state,
-        last_step_at,
-        campaign_id,
-        campaign_name,
-        channel_last,
-        created_at
-      `,
-      )
-      .order("last_step_at", { ascending: false, nullsLast: true } as any)
-      .range(from, to)
+  const webhookUrl = useMemo(() => {
+    if (typeof window === "undefined") return ""
+    return `${window.location.origin}/api/intake/webhook`
   }, [])
->>>>>>> origin/plan-joe-dashboard-v1
 
   useEffect(() => {
     let alive = true
 
-    async function load() {
+    async function loadLeads() {
+      // Sin Supabase frontend: mostramos mocks pero con Genome simulado
       if (!supabaseReady) {
         if (!alive) return
-        setError("Supabase no está configurado (NEXT_PUBLIC_SUPABASE_URL / ANON_KEY).")
-        setLeads([])
+        setError(null)
+        setLeads(MOCK_LEADS)
+        setMissingFields(collectMissingFields(MOCK_LEADS))
         setLoading(false)
-        setHasMore(false)
-        setPage(0)
+        setUsingMock(true)
         return
       }
 
       setLoading(true)
-<<<<<<< HEAD
-      const { data, error } = await supabase
-        .from("lead_enriched")
+      const client = supabaseBrowser()
+
+      // 1) Base inbox (fuente operativa)
+      const { data, error: dbError } = await client
+        .from("inbox_events")
         .select(
-          "id, lead_raw_id, created_at, full_name, email, phone, company, title, location, confidence, data, state",
+          [
+            "lead_id",
+            "lead_name",
+            "lead_email",
+            "lead_phone",
+            "lead_state",
+            "last_step_at",
+            "campaign_id",
+            "campaign_name",
+            "channel_last",
+            "created_at",
+          ].join(", "),
         )
-        .order("created_at", { ascending: false })
+        .order("last_step_at", { ascending: false })
         .limit(200)
-=======
-      const { data, error: dbError } = await fetchInboxPage(0)
->>>>>>> origin/plan-joe-dashboard-v1
 
       if (!alive) return
 
       if (dbError) {
         console.error(dbError)
-        setError("No se pudo leer inbox_events para /leads.")
-        setLeads([])
+        setError("No se pudo acceder a inbox_events. Se muestran datos mock.")
+        setLeads(MOCK_LEADS)
+        setMissingFields(collectMissingFields(MOCK_LEADS))
+        setUsingMock(true)
         setLoading(false)
-        setHasMore(false)
-        setPage(0)
         return
       }
 
-      const mapped: LeadInboxEntry[] =
-        (data ?? []).map((row: any) => ({
-          id: row.lead_id,
-          name: row.lead_name,
-          email: row.lead_email,
-          phone: row.lead_phone,
-          status: row.lead_state,
-          last_touch_at: row.last_step_at,
-          campaign_id: row.campaign_id,
-          campaign_name: row.campaign_name,
-          channel_last: row.channel_last,
-          created_at: row.created_at,
-        })) ?? []
+      let mapped: LeadInboxEntry[] = (data ?? []).map((row) =>
+        mapInboxRow(row as InboxRow),
+      )
 
+      const ids = mapped.map((l) => l.id).filter(Boolean)
+
+      if (ids.length > 0) {
+        try {
+          const client2 = supabaseBrowser()
+
+          // 2) Lead Brain v1 (score + bucket)
+          const brainPromise = client2
+            .from("leads")
+            .select("id, lead_brain_score, lead_brain_bucket")
+            .in("id", ids)
+
+          // 3) Multichannel signals
+          const signalsPromise = client2
+            .from("multichannel_lead_signals")
+            .select(
+              [
+                "lead_id",
+                "attempts_total",
+                "distinct_channels",
+                "errors_total",
+                "last_touch_at",
+                "email_engaged",
+                "wa_engaged",
+                "sms_engaged",
+                "voice_engaged",
+              ].join(", "),
+            )
+            .in("lead_id", ids)
+
+          // 4) Lead Genome v2 (+ campaign fields via nueva view)
+          const genomePromise = client2
+            .from("v_lead_with_enrichment_and_campaign_v1")
+            .select(
+              [
+                "id",
+                "industry",
+                "sub_industry",
+                "ai_lead_score",
+                "enrichment_status",
+                "campaign_id",
+                "campaign_name",
+                "lead_state",
+                "last_step_at",
+                "channel_last",
+              ].join(", "),
+            )
+            .in("id", ids)
+
+          const [brainRes, signalsRes, genomeRes] = await Promise.all([
+            brainPromise,
+            signalsPromise,
+            genomePromise,
+          ])
+
+          // Map Lead Brain
+          const brainMap = new Map<
+            string,
+            { score: number | null; bucket: string | null }
+          >()
+          if (!brainRes.error && Array.isArray(brainRes.data)) {
+            ;(brainRes.data as any[]).forEach((row) => {
+              if (!row.id) return
+              brainMap.set(row.id, {
+                score:
+                  typeof row.lead_brain_score === "number"
+                    ? row.lead_brain_score
+                    : row.lead_brain_score == null
+                      ? null
+                      : Number(row.lead_brain_score) || null,
+                bucket: row.lead_brain_bucket ?? null,
+              })
+            })
+          } else if (brainRes.error) {
+            console.error("Error loading lead brain", brainRes.error)
+          }
+
+          // Map multichannel signals
+          const signalsMap = new Map<
+            string,
+            {
+              attempts_total: number | null
+              distinct_channels: number | null
+              errors_total: number | null
+              last_touch_at: string | null
+              email_engaged: number | null
+              wa_engaged: number | null
+              sms_engaged: number | null
+              voice_engaged: number | null
+            }
+          >()
+          if (!signalsRes.error && Array.isArray(signalsRes.data)) {
+            ;(signalsRes.data as any[]).forEach((row) => {
+              if (!row.lead_id) return
+              signalsMap.set(row.lead_id, {
+                attempts_total:
+                  row.attempts_total == null
+                    ? null
+                    : Number(row.attempts_total) || 0,
+                distinct_channels:
+                  row.distinct_channels == null
+                    ? null
+                    : Number(row.distinct_channels) || 0,
+                errors_total:
+                  row.errors_total == null ? null : Number(row.errors_total) || 0,
+                last_touch_at: row.last_touch_at ?? null,
+                email_engaged:
+                  row.email_engaged == null ? null : Number(row.email_engaged) || 0,
+                wa_engaged:
+                  row.wa_engaged == null ? null : Number(row.wa_engaged) || 0,
+                sms_engaged:
+                  row.sms_engaged == null ? null : Number(row.sms_engaged) || 0,
+                voice_engaged:
+                  row.voice_engaged == null ? null : Number(row.voice_engaged) || 0,
+              })
+            })
+          } else if (signalsRes.error) {
+            console.error(
+              "Error loading multichannel_lead_signals",
+              signalsRes.error,
+            )
+          }
+
+          // Map Lead Genome v2 (+ campaign fallback)
+          const genomeMap = new Map<
+            string,
+            {
+              industry: string | null
+              sub_industry: string | null
+              ai_lead_score: number | null
+              enrichment_status: string | null
+              campaign_id: string | null
+              campaign_name: string | null
+              lead_state: string | null
+              last_step_at: string | null
+              channel_last: string | null
+            }
+          >()
+
+          if (!genomeRes.error && Array.isArray(genomeRes.data)) {
+            ;(genomeRes.data as any[]).forEach((row) => {
+              if (!row.id) return
+              genomeMap.set(row.id, {
+                industry: row.industry ?? null,
+                sub_industry: row.sub_industry ?? null,
+                ai_lead_score:
+                  row.ai_lead_score == null ? null : Number(row.ai_lead_score) || 0,
+                enrichment_status: row.enrichment_status ?? null,
+                campaign_id: row.campaign_id ?? null,
+                campaign_name: row.campaign_name ?? null,
+                lead_state: row.lead_state ?? null,
+                last_step_at: row.last_step_at ?? null,
+                channel_last: row.channel_last ?? null,
+              })
+            })
+          } else if (genomeRes.error) {
+            console.error(
+              "Error loading v_lead_with_enrichment_and_campaign_v1",
+              genomeRes.error,
+            )
+          }
+
+          // Hidratar todos los leads con Brain + Signals + Genome
+          mapped = mapped.map((lead) => {
+            const brain = brainMap.get(lead.id)
+            const s = signalsMap.get(lead.id)
+            const g = genomeMap.get(lead.id)
+
+            return {
+              ...lead,
+
+              // si inbox_events no trae campaign_name, lo completamos desde la view nueva
+              ...(g?.campaign_id && !lead.campaign_id
+                ? { campaign_id: g.campaign_id }
+                : null),
+              ...(g?.campaign_name && !lead.campaign_name
+                ? { campaign_name: g.campaign_name }
+                : null),
+
+              ...(brain && {
+                lead_brain_score: brain.score,
+                lead_brain_bucket: brain.bucket,
+              }),
+
+              ...(s && {
+                attempts_total: s.attempts_total,
+                distinct_channels: s.distinct_channels,
+                errors_total: s.errors_total,
+                last_touch_at: s.last_touch_at ?? lead.last_touch_at,
+                email_engaged: s.email_engaged,
+                wa_engaged: s.wa_engaged,
+                sms_engaged: s.sms_engaged,
+                voice_engaged: s.voice_engaged,
+              }),
+
+              ...(g && {
+                industry: g.industry,
+                sub_industry: g.sub_industry,
+                ai_lead_score: g.ai_lead_score,
+                enrichment_status: g.enrichment_status,
+
+                // solo usamos estos si el lead no tiene ya valores desde inbox_events
+                ...(lead.state == null && g.lead_state ? { state: g.lead_state } : null),
+                ...(lead.last_touch_at == null && g.last_step_at
+                  ? { last_touch_at: g.last_step_at }
+                  : null),
+                ...(lead.channel_last == null && g.channel_last
+                  ? { channel_last: g.channel_last }
+                  : null),
+              }),
+            }
+          })
+        } catch (e) {
+          console.error("Error hydrating Lead Brain + Genome", e)
+        }
+      }
+
+      if (!alive) return
       setError(null)
       setLeads(mapped)
+      setMissingFields(collectMissingFields(mapped))
+      setUsingMock(false)
       setLoading(false)
-      setPage(0)
-      setHasMore((data?.length ?? 0) === PAGE_SIZE)
     }
 
-    void load()
+    void loadLeads()
 
     return () => {
       alive = false
     }
-  }, [fetchInboxPage, supabaseReady])
+  }, [supabaseReady])
 
-  const loadMore = useCallback(async () => {
-    if (!supabaseReady || !hasMore || isLoadingMore) return
+  const filteredLeads = useMemo(() => {
+    const term = query.trim().toLowerCase()
 
-<<<<<<< HEAD
-    setIsLoadingMore(true)
-    const nextPage = page + 1
-    const { data, error: dbError } = await fetchInboxPage(nextPage)
-=======
-    const displayName = deriveLeadDisplayName(lead)
+    const bucketWeight: Record<string, number> = {
+      hot: 3,
+      warm: 2,
+      cold: 1,
+    }
 
-    if (searchText) {
-      const matchesSearch =
-        displayName.toLowerCase().includes(searchText) ||
-        (lead.full_name ?? "").toLowerCase().includes(searchText) ||
-        (lead.email ?? "").toLowerCase().includes(searchText) ||
-        (lead.phone ?? "").toLowerCase().includes(searchText) ||
-        (lead.campaign_name ?? "").toLowerCase().includes(searchText)
->>>>>>> origin/director-engine-core
+    const withFilters = leads.filter((lead) => {
+      if (stateFilter !== "All" && lead.state !== stateFilter) return false
+      if (!term) return true
 
-    if (dbError) {
-      console.error(dbError)
-      setHasMore(false)
-      setIsLoadingMore(false)
+      const matchesQuery =
+        lead.name?.toLowerCase().includes(term) ||
+        lead.email?.toLowerCase().includes(term) ||
+        lead.phone?.toLowerCase().includes(term) ||
+        lead.campaign_name?.toLowerCase().includes(term) ||
+        lead.channel_last?.toLowerCase().includes(term) ||
+        lead.industry?.toLowerCase().includes(term) ||
+        lead.sub_industry?.toLowerCase().includes(term)
+
+      return Boolean(matchesQuery)
+    })
+
+    // Orden: bucket (hot > warm > cold) → lead_brain_score → recencia
+    return [...withFilters].sort((a, b) => {
+      const bucketA = (a.lead_brain_bucket ?? "").toLowerCase()
+      const bucketB = (b.lead_brain_bucket ?? "").toLowerCase()
+      const bucketScoreA = bucketWeight[bucketA] ?? 0
+      const bucketScoreB = bucketWeight[bucketB] ?? 0
+      if (bucketScoreA !== bucketScoreB) return bucketScoreB - bucketScoreA
+
+      const scoreA = a.lead_brain_score ?? -1
+      const scoreB = b.lead_brain_score ?? -1
+      if (scoreA !== scoreB) return scoreB - scoreA
+
+      const timeA = a.last_touch_at ? new Date(a.last_touch_at).getTime() : 0
+      const timeB = b.last_touch_at ? new Date(b.last_touch_at).getTime() : 0
+      return timeB - timeA
+    })
+  }, [leads, query, stateFilter])
+
+  // -----------------------------------------
+  // IMPORT HANDLERS (NUEVO)
+  // -----------------------------------------
+  async function refreshAfterImport() {
+    // evita reload total: reejecuta el mismo flujo (simple)
+    window.location.reload()
+  }
+
+  async function handleImportCsv() {
+    setImportError(null)
+    setImportSuccess(null)
+
+    if (!csvFile) {
+      setImportError("Selecciona un CSV.")
       return
     }
 
-    const mapped: LeadInboxEntry[] =
-      (data ?? []).map((row: any) => ({
-        id: row.lead_id,
-        name: row.lead_name,
-        email: row.lead_email,
-        phone: row.lead_phone,
-        status: row.lead_state,
-        last_touch_at: row.last_step_at,
-        campaign_id: row.campaign_id,
-        campaign_name: row.campaign_name,
-        channel_last: row.channel_last,
-        created_at: row.created_at,
-      })) ?? []
+    try {
+      setImportBusy(true)
+      const form = new FormData()
+      form.append("file", csvFile)
+      if (csvCampaignId.trim()) form.append("campaign_id", csvCampaignId.trim())
+      if (csvCampaignName.trim())
+        form.append("campaign_name", csvCampaignName.trim())
 
-<<<<<<< HEAD
-    if (stateFilter !== "All" && lead.state !== stateFilter) return false
+      const res = await fetch("/api/intake/csv", {
+        method: "POST",
+        body: form,
+      })
 
-    if ((lead.confidence ?? 0) * 100 < confidence) return false
+      if (!res.ok) {
+        const txt = await res.text()
+        throw new Error(txt || "CSV import failed")
+      }
 
-    if (dateFrom) {
-      const created = new Date(lead.created_at)
-      if (Number.isFinite(created.getTime()) && created < new Date(dateFrom)) return false
+      const json = await res.json()
+      setImportSuccess(
+        `Import OK. inserted=${json?.inserted ?? "?"} duplicates=${
+          json?.duplicates ?? "?"
+        }`,
+      )
+      await refreshAfterImport()
+    } catch (e: any) {
+      setImportError(e?.message || "CSV import failed")
+    } finally {
+      setImportBusy(false)
     }
-    if (dateTo) {
-      const created = new Date(lead.created_at)
-      if (Number.isFinite(created.getTime()) && created > new Date(`${dateTo}T23:59:59`)) return false
-=======
-    setLeads((prev) => [...prev, ...mapped])
-    setPage(nextPage)
-    if ((data?.length ?? 0) < PAGE_SIZE) {
-      setHasMore(false)
->>>>>>> origin/plan-joe-dashboard-v1
-    }
-    setIsLoadingMore(false)
-  }, [fetchInboxPage, hasMore, isLoadingMore, page, supabaseReady])
-
-  const stateCounts = useMemo(() => {
-    const counts: Record<string, number> = { all: leads.length }
-    leads.forEach((lead) => {
-      const key = lead.status?.toLowerCase() ?? "unknown"
-      counts[key] = (counts[key] ?? 0) + 1
-    })
-    return counts
-  }, [leads])
-
-<<<<<<< HEAD
-  const filteredLeads = useMemo(() => {
-    const term = activeQuery.toLowerCase()
-=======
-  const orderedLeads = useMemo(() => {
-    return [...filtered].sort((a, b) => {
-      const stateA = getLeadStatus(a)
-      const stateB = getLeadStatus(b)
-      const orderA = STATE_ORDER[stateA] ?? 99
-      const orderB = STATE_ORDER[stateB] ?? 99
-
-      if (orderA !== orderB) return orderA - orderB
-
-      const timeA = a.last_touch_at ? new Date(a.last_touch_at).getTime() : NaN
-      const timeB = b.last_touch_at ? new Date(b.last_touch_at).getTime() : NaN
-
-      const validA = Number.isFinite(timeA)
-      const validB = Number.isFinite(timeB)
-
-      if (validA && validB) return timeB - timeA
-      if (validA) return -1
-      if (validB) return 1
-      return 0
-    })
-  }, [filtered])
-
-  // --------- HANDLERS ----------
-  const handleSelectLead = (lead: LeadEnriched) => {
-    if (!lead?.id) return
-    console.log("selected lead", lead.id)
-    router.push(`/leads/${lead.id}`)
   }
->>>>>>> origin/director-engine-core
 
-    return leads.filter((lead) => {
-      const matchesQuery =
-        term.length === 0 ||
-        lead.name?.toLowerCase().includes(term) ||
-        lead.email?.toLowerCase().includes(term) ||
-        lead.phone?.toLowerCase().includes(term)
+  async function handleManualAdd() {
+    setImportError(null)
+    setImportSuccess(null)
 
-      const normalizedState = lead.status?.toLowerCase()
-      const matchesState = stateFilter === "all" || normalizedState === stateFilter
+    const email = manualEmail.trim()
+    const phone = manualPhone.trim()
+    const name = manualName.trim()
 
-      return matchesQuery && matchesState
-    })
-  }, [activeQuery, leads, stateFilter])
+    if (!email && !phone) {
+      setImportError("Necesitas email o phone.")
+      return
+    }
 
-<<<<<<< HEAD
+    try {
+      setImportBusy(true)
+
+      const payload = {
+        name: name || null,
+        email: email || null,
+        phone: phone || null,
+        campaign_id: manualCampaignId.trim() || null,
+        campaign_name: manualCampaignName.trim() || null,
+        source: "manual",
+        confirm: true,
+      }
+
+      const res = await fetch("/api/intake/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+
+      if (!res.ok) {
+        const txt = await res.text()
+        throw new Error(txt || "Manual intake failed")
+      }
+
+      const json = await res.json()
+      setImportSuccess(`Lead OK. lead_id=${json?.lead_id ?? "?"}`)
+      await refreshAfterImport()
+    } catch (e: any) {
+      setImportError(e?.message || "Manual intake failed")
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  async function handleCopyWebhook() {
+    setImportError(null)
+    setImportSuccess(null)
+    try {
+      await navigator.clipboard.writeText(webhookUrl)
+      setImportSuccess("Webhook URL copied.")
+    } catch {
+      setImportError("No se pudo copiar. Copia manualmente.")
+    }
+  }
+
+  function resetImportState() {
+    setImportError(null)
+    setImportSuccess(null)
+    setImportBusy(false)
+    setCsvFile(null)
+    setCsvCampaignId("")
+    setCsvCampaignName("")
+    setManualName("")
+    setManualEmail("")
+    setManualPhone("")
+    setManualCampaignId("")
+    setManualCampaignName("")
+    setImportTab("csv")
+  }
+
+  function closeImport() {
+    setShowImport(false)
+    resetImportState()
+  }
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-3xl font-semibold text-white">Leads</h1>
-            <Badge variant="outline" className="border-emerald-500/40 text-emerald-300">
-              Live
-            </Badge>
-=======
-  const handleImported = (inserted: number) => {
-    console.log("Imported leads", inserted)
-    loadLeads()
-  }
-
-  // --------- RENDER ----------
-  return (
-    <>
-      <div className="space-y-5">
-        {/* Header */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-3">
-              <h1 className="text-3xl font-semibold text-white">
-                Leads Inbox
-              </h1>
-              <Badge variant="neutral">
-                {usingMock ? "Mock mode" : "Live engine"}
-              </Badge>
-            </div>
-            <p className="text-sm text-white/60">
-              {loading
-                ? "Cargando..."
-                : `${filtered.length} leads visibles`}
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              aria-label="Refresh"
-              onClick={handleRefreshClick}
-            >
-              <RefreshCw size={16} />
-              Refresh
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setImportOpen(true)}
-            >
-              Import leads
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => setNewLeadOpen(true)}
-            >
-              New lead
-            </Button>
->>>>>>> origin/director-engine-core
+            <Badge variant="neutral">Inbox</Badge>
+            <Badge variant="info">Lead Brain v1 + Genome v2</Badge>
           </div>
           <p className="text-sm text-white/60">
-            Visión consolidada de leads usando inbox_events.
+            Campos mínimos: {REQUIRED_FIELDS.join(", ")}
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* ✅ BOTÓN NUEVO */}
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => setShowImport(true)}
+          >
+            <Plus size={16} />
+            Import Leads
+          </Button>
+
           <Button
             variant="outline"
             size="sm"
@@ -422,8 +701,22 @@ export default function LeadsPage() {
             Refresh
           </Button>
         </div>
-<<<<<<< HEAD
       </div>
+
+      {!supabaseReady && (
+        <div className="flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-100">
+          <AlertTriangle size={18} />
+          <div>
+            <p className="font-semibold">
+              Supabase not configured, showing mock data
+            </p>
+            <p className="text-sm text-amber-200/90">
+              Define NEXT_PUBLIC_SUPABASE_URL y NEXT_PUBLIC_SUPABASE_ANON_KEY para
+              usar datos reales.
+            </p>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-100">
@@ -431,550 +724,248 @@ export default function LeadsPage() {
           <div>
             <p className="font-semibold">{error}</p>
             <p className="text-sm text-red-200/90">
-              Revisa la view inbox_events o las credenciales de Supabase.
+              Si la vista no existe o el contrato cambió, comparte el SQL exacto.
+              Se muestran mocks temporalmente.
             </p>
           </div>
         </div>
       )}
 
-      <Card className="border-white/10 bg-white/5">
-        <CardContent className="flex flex-col gap-4 py-4 md:flex-row md:items-center md:justify-between">
-          <div className="flex items-center gap-3">
-            <Button variant="outline" size="sm" className="flex items-center gap-2">
-              <Filter className="h-4 w-4" />
-              Filtros
-            </Button>
-<<<<<<< HEAD
-          }
-        />
-        <CardContent className="grid gap-4 lg:grid-cols-4">
-          <div className="space-y-2 lg:col-span-4">
-            <p className="text-xs uppercase tracking-[0.1em] text-white/50">State</p>
-            <div className="flex flex-wrap gap-2">
-              {STATE_FILTERS.map((state) => {
-                const active = stateFilter === state
-                const label = state === "All" ? "All" : state.charAt(0).toUpperCase() + state.slice(1)
-                return (
-                  <Button
-                    key={state}
-                    variant={active ? "primary" : "outline"}
-                    size="sm"
-                    onClick={() => setStateFilter(state)}
-                    className="capitalize"
-                  >
-                    {label}
-                  </Button>
-                )
-              })}
-            </div>
-          </div>
-          <div className="space-y-2">
-            <p className="text-xs uppercase tracking-[0.1em] text-white/50">Status</p>
-            <Select value={status} onChange={(e) => setStatus(e.target.value as (typeof STATUS_OPTIONS)[number])}>
-              {STATUS_OPTIONS.map((option) => (
-                <option key={option}>{option}</option>
-              ))}
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs uppercase tracking-[0.1em] text-white/50">
-              <span>Confidence</span>
-              <span className="font-semibold text-white/70">{confidence}%+</span>
-=======
-            <div className="flex flex-wrap items-center gap-2">
-              {STATE_FILTERS.map((option) => {
-                const isActive = stateFilter === option.value
-                const count = stateCounts[option.value] ?? 0
+      {missingFields.length > 0 && (
+        <Card>
+          <CardHeader
+            title="Campos faltantes"
+            description="Se devuelven como null y se muestran en la tabla."
+          />
+          <CardContent className="flex flex-wrap gap-2">
+            {missingFields.map((field) => (
+              <Badge key={field} variant="warning">
+                {field}
+              </Badge>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
-                return (
-                  <Button
-                    key={option.value}
-                    size="sm"
-                    variant={isActive ? "primary" : "outline"}
-                    className="rounded-full"
-                    onClick={() => setStateFilter(option.value)}
-                  >
-                    {option.label} ({count})
-                  </Button>
-                )
-              })}
->>>>>>> origin/plan-joe-dashboard-v1
-            </div>
-          </div>
-          <div className="flex flex-1 justify-end gap-3">
-            <Input
-              placeholder="Buscar por nombre, email o teléfono..."
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              className="max-w-xs rounded-xl border-white/10 bg-black/40 text-sm text-white placeholder:text-white/40"
-            />
-          </div>
-        </CardContent>
-      </Card>
-
-<<<<<<< HEAD
       <Card>
         <CardHeader
-          title="Leads queue"
-          description="Prioritize, contact, and annotate without leaving your desk."
-          action={
-            <Input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Buscar por nombre, empresa, email..."
-              className="w-64"
-            />
+          title="Lead Inbox"
+          description={
+            usingMock
+              ? "Mostrando mock para permitir QA."
+              : "Ordenado por Lead Brain (hot → cold), score y recencia."
           }
         />
-        <CardContent className="p-0">
-          <LeadTable
-            leads={filtered}
-            loading={loading}
-            onSelect={(lead) => {
-              console.log("selected lead", lead.id)
-            }}
-          />
+        <CardContent>
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Buscar por nombre, email, teléfono, campaña o industria"
+              className="max-w-md"
+            />
+          </div>
+
+          <div className="mb-4 flex flex-wrap gap-2">
+            {STATE_FILTERS.map((state) => {
+              const active = stateFilter === state
+              const label =
+                state === "All"
+                  ? "All"
+                  : (state as string).charAt(0).toUpperCase() +
+                    (state as string).slice(1)
+
+              return (
+                <Button
+                  key={state}
+                  variant={active ? "primary" : "outline"}
+                  size="sm"
+                  onClick={() => setStateFilter(state)}
+                  className="capitalize"
+                >
+                  {label}
+                </Button>
+              )
+            })}
+          </div>
+
+          <LeadInboxTable leads={filteredLeads} loading={loading} />
         </CardContent>
       </Card>
-=======
-      <LeadInboxTable leads={filteredLeads} loading={loading} />
 
-      {hasMore && (
-        <div className="mt-4 flex justify-center">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={isLoadingMore}
-            onClick={loadMore}
-            className="min-w-[140px]"
-          >
-            {isLoadingMore ? "Cargando..." : "Load more"}
-          </Button>
-        </div>
-      )}
->>>>>>> origin/plan-joe-dashboard-v1
-    </div>
-=======
-
-        {/* Error banner */}
-        {error ? (
-          <div className="flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-100">
-            <AlertTriangle size={18} className="mt-0.5" />
-            <div>
-              <p className="font-semibold">{error}</p>
-              <p className="text-sm text-red-200/90">
-                Se muestran mocks temporalmente.
-              </p>
-            </div>
-          </div>
-        ) : null}
-
-        {/* Filters */}
-        <Card>
-          <CardHeader
-            title="Filters"
-            description={
-              usingMock
-                ? "Filtrando sobre datos mock."
-                : "Filtra por estado y fecha del último toque."
-            }
-            action={
-              <Button variant="ghost" size="sm">
-                <Filter size={16} />
-                Save view
-              </Button>
-            }
-          />
-          <CardContent className="grid gap-4 lg:grid-cols-4">
-            <div className="space-y-2">
-              <p className="text-xs uppercase tracking-[0.1em] text-white/50">
-                Status
-              </p>
-              <Select
-                value={status}
-                onChange={(e) =>
-                  setStatus(
-                    e.target
-                      .value as (typeof STATUS_OPTIONS)[number]
-                  )
-                }
-              >
-                {STATUS_OPTIONS.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <p className="text-xs uppercase tracking-[0.1em] text-white/50">
-                From
-              </p>
-              <Input
-                type="date"
-                value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <p className="text-xs uppercase tracking-[0.1em] text-white/50">
-                To
-              </p>
-              <Input
-                type="date"
-                value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
-              />
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Table */}
-        <Card>
-          <CardHeader
-            title="Leads queue"
-            description="Prioritize, contact, and annotate without leaving your desk."
-            action={
-              <Input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="Buscar por nombre, email, campaña..."
-                className="w-64"
-              />
-            }
-          />
-          <CardContent className="p-0">
-            <LeadTable
-              leads={orderedLeads}
-              loading={loading}
-              deriveStatus={getLeadStatus}
-              onSelect={handleSelectLead}
-            />
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* New lead modal */}
-      <NewLeadModal
-        open={newLeadOpen}
-        onOpenChange={setNewLeadOpen}
-        supabase={supabase}
-        onCreated={loadLeads}
-      />
-
-      <ImportLeadsModal
-        open={importOpen}
-        onOpenChange={setImportOpen}
-        onImported={handleImported}
-        supabase={supabase}
-      />
-    </>
->>>>>>> origin/director-engine-core
-  )
-}
-
-type ImportLeadsModalProps = {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onImported: (inserted: number) => void
-  supabase: ReturnType<typeof supabaseBrowser> | null
-}
-
-type LeadImportPayload = {
-  source?: string
-  niche?: string
-  company_name?: string
-  contact_name?: string
-  phone: string
-  email?: string
-  city?: string
-  country?: string
-  website?: string
-  campaign_name?: string
-}
-
-const CSV_HEADERS: (keyof LeadImportPayload)[] = [
-  "source",
-  "niche",
-  "company_name",
-  "contact_name",
-  "phone",
-  "email",
-  "city",
-  "country",
-  "website",
-  "campaign_name",
-]
-
-function parseCsvPayload(csvRaw: string) {
-  const lines = csvRaw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-
-  if (lines.length === 0) {
-    throw new Error("CSV vacío")
-  }
-
-  const header = lines[0].split(",").map((col) => col.trim().toLowerCase())
-  const expectedHeader = CSV_HEADERS
-    .map((col) => col.toLowerCase())
-    .join(",")
-
-  if (header.join(",") !== expectedHeader) {
-    throw new Error("Encabezados inválidos")
-  }
-
-  const leads: LeadImportPayload[] = []
-  let invalidWithoutPhone = 0
-
-  for (const line of lines.slice(1)) {
-    const columns = line.split(",").map((value) => value.trim())
-
-    if (columns.length !== CSV_HEADERS.length) {
-      throw new Error("Número de columnas incorrecto")
-    }
-
-    const [
-      source,
-      niche,
-      company_name,
-      contact_name,
-      phone,
-      email,
-      city,
-      country,
-      website,
-      campaign_name,
-    ] = columns
-
-    if (!phone) {
-      invalidWithoutPhone += 1
-      continue
-    }
-
-    const lead: LeadImportPayload = {
-      phone,
-      source: source || "manual",
-    }
-
-    if (niche) lead.niche = niche
-    if (company_name) lead.company_name = company_name
-    if (contact_name) lead.contact_name = contact_name
-    if (email) lead.email = email
-    if (city) lead.city = city
-    if (country) lead.country = country
-    if (website) lead.website = website
-    if (campaign_name) lead.campaign_name = campaign_name
-
-    leads.push(lead)
-  }
-
-  return { leads, invalidWithoutPhone }
-}
-
-function ImportLeadsModal({
-  open,
-  onOpenChange,
-  onImported,
-  supabase,
-}: ImportLeadsModalProps) {
-  const [activeTab, setActiveTab] = useState<"csv" | "json">("csv")
-  const [csvPayload, setCsvPayload] = useState("")
-  const [jsonPayload, setJsonPayload] = useState("")
-  const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [csvSummary, setCsvSummary] = useState<{ valid: number; invalid: number } | null>(
-    null
-  )
-
-  if (!open) return null
-
-  const mutateImport = async (leads: LeadImportPayload[]) => {
-    if (!supabase) return
-
-    setLoading(true)
-    const { data, error } = await supabase.rpc("import_leads_simple", {
-      p_leads: leads,
-    })
-
-    if (error) {
-      console.error(error)
-      setErrorMessage(
-        "No se pudo importar los leads, revisa el formato o prueba con un batch más pequeño."
-      )
-      setLoading(false)
-      return
-    }
-
-    if (data && data.ok === true) {
-      onImported(data.inserted ?? 0)
-      setErrorMessage(null)
-      setCsvSummary(null)
-      setCsvPayload("")
-      setJsonPayload("")
-      onOpenChange(false)
-    }
-
-    setLoading(false)
-  }
-
-  const handleCsvImport = async () => {
-    setErrorMessage(null)
-
-    let parsedCsv
-    try {
-      parsedCsv = parseCsvPayload(csvPayload)
-    } catch (err) {
-      console.error("Invalid CSV", err)
-      setErrorMessage("No se pudo leer el CSV. Revisa encabezados y formato.")
-      return
-    }
-
-    if (parsedCsv.leads.length === 0) {
-      setErrorMessage("No hay leads válidos con phone para importar.")
-      return
-    }
-
-    setCsvSummary({
-      valid: parsedCsv.leads.length,
-      invalid: parsedCsv.invalidWithoutPhone,
-    })
-
-    await mutateImport(parsedCsv.leads)
-  }
-
-  const handleJsonImport = async () => {
-    setErrorMessage(null)
-
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(jsonPayload)
-    } catch (err) {
-      console.error("Invalid JSON", err)
-      setErrorMessage("El JSON no es válido o no es un array de objetos.")
-      return
-    }
-
-    if (
-      !Array.isArray(parsed) ||
-      !parsed.every((item) => item && typeof item === "object")
-    ) {
-      setErrorMessage("El JSON no es válido o no es un array de objetos.")
-      return
-    }
-
-    await mutateImport(parsed as LeadImportPayload[])
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <Card className="w-full max-w-3xl">
-        <CardHeader
-          title="Import leads"
-          description="Carga tus leads vía CSV (recomendado) o JSON (avanzado)."
-        />
-        <CardContent className="space-y-4">
-          {!supabase ? (
-            <p className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-100">
-              Supabase no está configurado (faltan env vars).
-            </p>
-          ) : null}
-
-          <div className="flex gap-2">
-            <Button
-              variant={activeTab === "csv" ? "default" : "ghost"}
-              onClick={() => setActiveTab("csv")}
-              disabled={loading}
-            >
-              CSV (recommended)
-            </Button>
-            <Button
-              variant={activeTab === "json" ? "default" : "ghost"}
-              onClick={() => setActiveTab("json")}
-              disabled={loading}
-            >
-              JSON (advanced)
-            </Button>
-          </div>
-
-          {activeTab === "csv" ? (
-            <div className="space-y-3">
-              <p className="text-sm text-white/80">
-                Pega un CSV con los siguientes encabezados en este orden:
-                <span className="ml-1 font-mono text-xs text-white">
-                  {CSV_HEADERS.join(", ")}
-                </span>
-              </p>
-              <Textarea
-                value={csvPayload}
-                onChange={(e) => setCsvPayload(e.target.value)}
-                placeholder={`source,niche,company_name,contact_name,phone,email,city,country,website,campaign_name\nmanual,dentist,Smile Pro Clinic,Dr. Jane Doe,+13055550001,jane@smilepro.com,Miami,US,https://smilepro.com,Test Campaign`}
-                className="h-60 font-mono"
-              />
-              {csvSummary ? (
-                <p className="text-sm text-white/80">
-                  {csvSummary.valid} leads listos para importar,
-                  {" "}
-                  {csvSummary.invalid} filas ignoradas (sin phone).
+      {/* ==============================
+          MODAL IMPORT (NUEVO)
+         ============================== */}
+      {showImport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-zinc-950 p-5 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-white">Import Leads</h2>
+                <p className="text-sm text-white/60">
+                  UI simple. Backend robusto. (CSV / Manual / Webhook)
                 </p>
-              ) : null}
+              </div>
+              <button
+                onClick={closeImport}
+                className="rounded-lg p-2 text-white/70 hover:bg-white/10 hover:text-white"
+                aria-label="Close"
+              >
+                <X size={18} />
+              </button>
             </div>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-sm text-white/80">
-                Pega un array JSON de leads con campos básicos como source, niche,
-                company_name, contact_name, phone, email, city, country.
-              </p>
-              <Textarea
-                value={jsonPayload}
-                onChange={(e) => setJsonPayload(e.target.value)}
-                placeholder={`[
-  {
-    "source": "joe_dentists_q1",
-    "niche": "dentist",
-    "company_name": "Smile Pro Clinic",
-    "contact_name": "Dr. Jane Doe",
-    "phone": "+13055550001",
-    "email": "jane@smilepro.com",
-    "city": "Miami",
-    "country": "US"
-  }
-]`}
-                className="h-60 font-mono"
-              />
+
+            <div className="mb-4 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant={importTab === "csv" ? "primary" : "outline"}
+                onClick={() => setImportTab("csv")}
+              >
+                <Upload size={16} />
+                CSV
+              </Button>
+              <Button
+                size="sm"
+                variant={importTab === "manual" ? "primary" : "outline"}
+                onClick={() => setImportTab("manual")}
+              >
+                <Plus size={16} />
+                Manual
+              </Button>
+              <Button
+                size="sm"
+                variant={importTab === "webhook" ? "primary" : "outline"}
+                onClick={() => setImportTab("webhook")}
+              >
+                <Link2 size={16} />
+                Webhook
+              </Button>
             </div>
-          )}
 
-          {errorMessage ? (
-            <p className="text-sm text-red-300">{errorMessage}</p>
-          ) : null}
+            {importError && (
+              <div className="mb-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-100">
+                {importError}
+              </div>
+            )}
+            {importSuccess && (
+              <div className="mb-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+                {importSuccess}
+              </div>
+            )}
 
-          <div className="flex justify-end gap-2 pt-2">
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setErrorMessage(null)
-                onOpenChange(false)
-              }}
-              disabled={loading}
-            >
-              Cancel
-            </Button>
-            {activeTab === "csv" ? (
-              <Button onClick={handleCsvImport} disabled={loading || !supabase}>
-                {loading ? "Importing..." : "Import CSV"}
-              </Button>
-            ) : (
-              <Button onClick={handleJsonImport} disabled={loading || !supabase}>
-                {loading ? "Importing..." : "Import JSON"}
-              </Button>
+            {/* CSV */}
+            {importTab === "csv" && (
+              <div className="space-y-3">
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <p className="mb-2 text-sm text-white/70">
+                    CSV must include at least <b>email</b> or <b>phone</b>.
+                  </p>
+
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={(e) => setCsvFile(e.target.files?.[0] ?? null)}
+                    className="w-full text-sm text-white/70"
+                  />
+
+                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <Input
+                      value={csvCampaignId}
+                      onChange={(e) => setCsvCampaignId(e.target.value)}
+                      placeholder="campaign_id (optional)"
+                    />
+                    <Input
+                      value={csvCampaignName}
+                      onChange={(e) => setCsvCampaignName(e.target.value)}
+                      placeholder="campaign_name (optional)"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2">
+                  <Button variant="outline" onClick={closeImport} disabled={importBusy}>
+                    Cancel
+                  </Button>
+                  <Button onClick={handleImportCsv} disabled={importBusy || !csvFile}>
+                    {importBusy ? "Importing..." : "Import CSV"}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Manual */}
+            {importTab === "manual" && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <Input
+                    value={manualName}
+                    onChange={(e) => setManualName(e.target.value)}
+                    placeholder="Name (optional)"
+                  />
+                  <Input
+                    value={manualEmail}
+                    onChange={(e) => setManualEmail(e.target.value)}
+                    placeholder="Email (optional)"
+                  />
+                  <Input
+                    value={manualPhone}
+                    onChange={(e) => setManualPhone(e.target.value)}
+                    placeholder="Phone (optional)"
+                  />
+                  <Input
+                    value={manualCampaignId}
+                    onChange={(e) => setManualCampaignId(e.target.value)}
+                    placeholder="campaign_id (optional)"
+                  />
+                  <div className="sm:col-span-2">
+                    <Input
+                      value={manualCampaignName}
+                      onChange={(e) => setManualCampaignName(e.target.value)}
+                      placeholder="campaign_name (optional)"
+                    />
+                  </div>
+                </div>
+
+                <p className="text-xs text-white/60">
+                  Required: email OR phone.
+                </p>
+
+                <div className="flex items-center justify-end gap-2">
+                  <Button variant="outline" onClick={closeImport} disabled={importBusy}>
+                    Cancel
+                  </Button>
+                  <Button onClick={handleManualAdd} disabled={importBusy}>
+                    {importBusy ? "Adding..." : "Add Lead"}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Webhook */}
+            {importTab === "webhook" && (
+              <div className="space-y-3">
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <p className="mb-2 text-sm text-white/70">
+                    Send leads here (POST JSON):
+                  </p>
+                  <div className="rounded-lg bg-black/40 p-2 text-xs text-white/70">
+                    {webhookUrl}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2">
+                  <Button variant="outline" onClick={closeImport} disabled={importBusy}>
+                    Close
+                  </Button>
+                  <Button onClick={handleCopyWebhook} disabled={importBusy}>
+                    Copy URL
+                  </Button>
+                </div>
+              </div>
             )}
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      )}
     </div>
   )
 }

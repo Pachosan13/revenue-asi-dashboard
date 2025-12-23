@@ -1,38 +1,58 @@
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { logEvaluation } from "../_shared/eval.ts";
 
-const VERSION = "touch-orchestrator-v6_2025-11-24"
+const VERSION = "touch-orchestrator-v6_2025-11-24";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-}
+};
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders })
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
 
-  const SB_URL = Deno.env.get("SUPABASE_URL")!
-  const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  const supabase = createClient(SB_URL, SB_KEY)
+  const SB_URL = Deno.env.get("SUPABASE_URL");
+  const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-  const body = await req.json().catch(() => ({}))
-  const limit = Number(body.limit ?? 20)
-  const dryRun = Boolean(body.dry_run ?? false)
+  if (!SB_URL || !SB_KEY) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        version: VERSION,
+        stage: "env",
+        error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY",
+      }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    );
+  }
 
-  // 1) traer campaign_leads activos
+  const supabase = createClient(SB_URL, SB_KEY);
+
+  const body = await req.json().catch(() => ({}));
+  const limit = Number(body.limit ?? 20);
+  const dryRun = Boolean(body.dry_run ?? false);
+
+  // 1) Traer campaign_leads activos
   const { data: enrolled, error: eErr } = await supabase
     .from("campaign_leads")
     .select("campaign_id, lead_id, enrolled_at, status")
     .eq("status", "active")
     .order("enrolled_at", { ascending: true })
-    .limit(limit)
+    .limit(limit);
 
   if (eErr) {
     return new Response(
       JSON.stringify({
         ok: false,
+        version: VERSION,
         stage: "select_campaign_leads",
         error: eErr.message,
       }),
@@ -40,7 +60,7 @@ serve(async (req) => {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       },
-    )
+    );
   }
 
   if (!enrolled?.length) {
@@ -51,9 +71,8 @@ serve(async (req) => {
       inserted: 0,
       dry_run: dryRun,
       errors: [],
-    }
+    };
 
-    // 🔴 registrar evaluación aunque no haya leads
     try {
       await logEvaluation(supabase, {
         scope: "system",
@@ -65,31 +84,32 @@ serve(async (req) => {
           dry_run_runs: dryRun ? 1 : 0,
         },
         notes: "Run without active enrolled leads",
-      })
+      });
     } catch (err) {
-      console.error("logEvaluation error (no leads):", err)
+      console.error("logEvaluation error (no leads):", err);
     }
 
     return new Response(JSON.stringify(result), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
-    })
+    });
   }
 
-  // 2) campaigns únicas
-  const campaignIds = [...new Set(enrolled.map((r) => r.campaign_id))]
+  const campaignIds = [...new Set(enrolled.map((r: any) => r.campaign_id))];
 
-  // 3) steps por campaign
   const { data: steps, error: sErr } = await supabase
     .from("campaign_steps")
-    .select("id, campaign_id, step, channel, delay_minutes, payload, is_active")
+    .select(
+      "id, campaign_id, step, channel, delay_minutes, payload, is_active",
+    )
     .in("campaign_id", campaignIds)
     .eq("is_active", true)
-    .order("step", { ascending: true })
+    .order("step", { ascending: true });
 
   if (sErr) {
     return new Response(
       JSON.stringify({
         ok: false,
+        version: VERSION,
         stage: "select_campaign_steps",
         error: sErr.message,
       }),
@@ -97,49 +117,54 @@ serve(async (req) => {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       },
-    )
+    );
   }
 
-  const stepsByCampaign = new Map<string, any[]>()
+  const stepsByCampaign = new Map<string, any[]>();
   for (const st of steps ?? []) {
-    if (!stepsByCampaign.has(st.campaign_id)) stepsByCampaign.set(st.campaign_id, [])
-    stepsByCampaign.get(st.campaign_id)!.push(st)
+    if (!stepsByCampaign.has(st.campaign_id)) {
+      stepsByCampaign.set(st.campaign_id, []);
+    }
+    stepsByCampaign.get(st.campaign_id)!.push(st);
   }
 
-  let inserted = 0
-  const errors: any[] = []
-  const now = Date.now()
+  let inserted = 0;
+  const errors: any[] = [];
+  const nowMs = Date.now();
 
-  for (const row of enrolled) {
-    const campaignSteps = stepsByCampaign.get(row.campaign_id) || []
-    if (!campaignSteps.length) continue
+  for const { data: futureAppt, error: faErr } = await supabase
+  .from("v_lead_has_future_appointment")
+  .select("lead_id")
+  .eq("lead_id", row.lead_id)
+  .limit(1);
 
-    const enrolledAt = row.enrolled_at ? new Date(row.enrolled_at).getTime() : now
-
-    // 4) dedupe: tocar touch_runs (cola real)
-    const { data: existing, error: xErr } = await supabase
-      .from("touch_runs")
-      .select("step, channel")
-      .eq("lead_id", row.lead_id)
-      .eq("campaign_id", row.campaign_id)
-
-    if (xErr) {
-      errors.push({ lead_id: row.lead_id, campaign_id: row.campaign_id, error: xErr.message })
-      continue
+if (!faErr && futureAppt && futureAppt.length > 0) {
+  // Opcional: log
+  await logEvaluation(supabase, {
+    lead_id: row.lead_id,
+    account_id: row.account_id,
+    event_source: "orchestrator",
+    label: "skip_lead_due_to_future_appointment",
+    notes: "Lead tiene cita futura programada",
+    meta: {}
+  });
+      continue;
     }
 
-    const existingKey = new Set((existing ?? []).map((r) => `${r.step}:${r.channel}`))
+    const existingKey = new Set(
+      (existing ?? []).map((r: any) => `${r.step}:${r.channel}`),
+    );
 
-    const toInsert: any[] = []
+    const toInsert: any[] = [];
+
     for (const st of campaignSteps) {
-      const key = `${st.step}:${st.channel}`
-      if (existingKey.has(key)) continue
+      const key = `${st.step}:${st.channel}`;
+      if (existingKey.has(key)) continue;
 
-      const delayMin = Number(st.delay_minutes ?? 0)
-      const scheduledAtMs = enrolledAt + delayMin * 60_000
-      const scheduledAtIso = new Date(scheduledAtMs).toISOString()
-
-      const status = scheduledAtMs <= now ? "queued" : "scheduled"
+      const delayMin = Number(st.delay_minutes ?? 0);
+      const scheduledAtMs = enrolledAtMs + delayMin * 60_000;
+      const scheduledAtIso = new Date(scheduledAtMs).toISOString();
+      const status = scheduledAtMs <= nowMs ? "queued" : "scheduled";
 
       toInsert.push({
         campaign_id: row.campaign_id,
@@ -151,23 +176,29 @@ serve(async (req) => {
         payload: st.payload ?? {},
         error: null,
         meta: { orchestrator: VERSION },
-      })
+      });
     }
 
-    if (!toInsert.length) continue
+    if (!toInsert.length) continue;
 
     if (!dryRun) {
-      const { error: iErr } = await supabase.from("touch_runs").insert(toInsert)
+      const { error: iErr } = await supabase
+        .from("touch_runs")
+        .insert(toInsert);
+
       if (iErr) {
-        errors.push({ lead_id: row.lead_id, campaign_id: row.campaign_id, error: iErr.message })
-        continue
+        errors.push({
+          lead_id: row.lead_id,
+          campaign_id: row.campaign_id,
+          error: iErr.message,
+        });
+        continue;
       }
     }
 
-    inserted += toInsert.length
+    inserted += toInsert.length;
   }
 
-  // 🔴 resultado final
   const result = {
     ok: true,
     version: VERSION,
@@ -175,9 +206,8 @@ serve(async (req) => {
     inserted,
     dry_run: dryRun,
     errors,
-  }
+  };
 
-  // 🔴 evaluación: siempre después de toda la lógica, antes del return
   try {
     await logEvaluation(supabase, {
       scope: "system",
@@ -191,13 +221,12 @@ serve(async (req) => {
       notes: errors.length
         ? `Run completed with ${errors.length} errors`
         : "Run completed without errors",
-    })
+    });
   } catch (err) {
-    console.error("logEvaluation error:", err)
-    // No rompemos la función por culpa del logging
+    console.error("logEvaluation error:", err);
   }
 
   return new Response(JSON.stringify(result), {
     headers: { ...corsHeaders, "Content-Type": "application/json" },
-  })
-})
+  });
+});

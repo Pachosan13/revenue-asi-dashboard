@@ -1,48 +1,53 @@
 "use client"
 
-import React, { useMemo, useState } from "react"
+import React, { useState } from "react"
+import Link from "next/link"
 import { usePathname } from "next/navigation"
-<<<<<<< HEAD
-<<<<<<< HEAD
-import { Menu, X, Home, Mails, Send, Activity, FlaskConical, Settings, Crown } from "lucide-react"
-=======
 import {
   Activity,
+  CalendarDays,
+  Crown,
   FlaskConical,
   Home,
+  Menu,
   Mails,
+  PhoneCall,
   Send,
   Settings,
-  CalendarDays,
+  Stethoscope,
   X,
-  Menu,
-} from "lucide-react";
->>>>>>> origin/plan-joe-dashboard-v1
-=======
-import { Menu, X, Home, Mails, Send, Activity, FlaskConical, Settings, CalendarDays } from "lucide-react"
->>>>>>> origin/director-engine-core
-import { cn } from "@/lib/utils"
-import { Button, Input } from "@/components/ui-custom"
+} from "lucide-react"
 
-const navItems = [
-<<<<<<< HEAD
-  { label: "Dashboard", href: "/dashboard", icon: Home, subtitle: "Operating picture" },
-  { label: "Director Console", href: "/director", icon: Crown, subtitle: "CEO overview" },
-  { label: "Leads Inbox", href: "/leads-inbox", icon: Mails, subtitle: "Inbox & actions" },
-  { label: "Voice Insights", href: "/voice-insights", icon: Activity, subtitle: "Calls & intents" },
-  { label: "Appointments", href: "/appointments", icon: CalendarDays, subtitle: "Bookings" },
-  { label: "Campaigns", href: "/campaigns", icon: Send, subtitle: "Outbound" },
-  { label: "Prompt Lab", href: "/prompt-lab", icon: FlaskConical, subtitle: "Experiments" },
-  { label: "Health", href: "/health", icon: Activity, subtitle: "Systems" },
-  { label: "Settings", href: "/settings", icon: Settings, subtitle: "Org" },
-]
-=======
+import { cn } from "@/lib/utils"
+import { Badge, Button, Input } from "@/components/ui-custom"
+
+type AppShellProps = {
+  children: React.ReactNode
+}
+
+type NavItem = {
+  label: string
+  href: string
+  icon: React.ComponentType<React.SVGProps<SVGSVGElement>>
+  subtitle?: string
+}
+
+const overviewNav: NavItem[] = [
   {
     label: "Dashboard",
     href: "/dashboard",
     icon: Home,
     subtitle: "Operating picture",
   },
+  {
+    label: "Director Console",
+    href: "/director",
+    icon: Crown,
+    subtitle: "CEO overview",
+  },
+]
+
+const pipelineNav: NavItem[] = [
   {
     label: "Leads",
     href: "/leads",
@@ -58,7 +63,7 @@ const navItems = [
   {
     label: "Voice Insights",
     href: "/voice-insights",
-    icon: Activity,
+    icon: PhoneCall,
     subtitle: "Calls & intents",
   },
   {
@@ -73,10 +78,13 @@ const navItems = [
     icon: FlaskConical,
     subtitle: "Experiments",
   },
+]
+
+const systemsNav: NavItem[] = [
   {
     label: "Health",
     href: "/health",
-    icon: Activity,
+    icon: Stethoscope,
     subtitle: "Systems",
   },
   {
@@ -85,110 +93,175 @@ const navItems = [
     icon: Settings,
     subtitle: "Org",
   },
-];
->>>>>>> origin/plan-joe-dashboard-v1
+]
 
-export function AppShell({ children }: React.PropsWithChildren) {
-  const pathname = usePathname()
-  const [open, setOpen] = useState(false)
-
-  const current = useMemo(() => navItems.find((item) => pathname?.startsWith(item.href)), [pathname])
-
+function NavSection({
+  title,
+  items,
+  onNavigate,
+  pathname,
+}: {
+  title: string
+  items: NavItem[]
+  onNavigate?: () => void
+  pathname: string
+}) {
   return (
-    <div className="relative isolate min-h-screen bg-[#05060a] text-white">
-      <div className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(circle_at_20%_20%,rgba(94,234,212,0.15),transparent_35%),radial-gradient(circle_at_80%_0%,rgba(129,140,248,0.08),transparent_35%),radial-gradient(circle_at_60%_80%,rgba(248,113,113,0.08),transparent_30%)]" />
-      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[260px,1fr]">
-        <aside
-          className={cn(
-            "sticky top-0 z-40 flex h-screen flex-col gap-8 border-r border-white/10 bg-black/40 px-4 py-6 backdrop-blur lg:translate-x-0 lg:opacity-100",
-            open ? "translate-x-0" : "-translate-x-full opacity-0",
-            "transition duration-200 ease-out lg:relative lg:transition-none",
-          )}
-        >
-          <div className="flex items-center justify-between px-2">
-            <div className="text-lg font-semibold tracking-tight">Revenue ASI</div>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="lg:hidden"
-              onClick={() => setOpen(false)}
-              aria-label="Close navigation"
+    <div className="space-y-2">
+      <p className="px-2 text-[11px] font-medium uppercase tracking-[0.16em] text-white/40">
+        {title}
+      </p>
+      <div className="space-y-1">
+        {items.map((item) => {
+          const Icon = item.icon
+          const active = pathname === item.href
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              onClick={onNavigate}
+              className={cn(
+                "group flex items-center justify-between rounded-xl px-3 py-2 text-sm transition",
+                active
+                  ? "bg-emerald-500/15 text-emerald-100 ring-1 ring-emerald-400/60 shadow-[0_0_20px_rgba(16,185,129,0.35)]"
+                  : "text-white/70 hover:bg-white/5 hover:text-white"
+              )}
             >
-              <X size={18} />
-            </Button>
-          </div>
-
-          <div className="space-y-1">
-            {navItems.map((item) => {
-              const active = pathname === item.href || pathname?.startsWith(`${item.href}/`)
-              return (
-                <a
-                  key={item.href}
-                  href={item.href}
+              <div className="flex items-center gap-3">
+                <div
                   className={cn(
-                    "group flex items-center gap-3 rounded-2xl px-3 py-3 transition",
+                    "flex h-7 w-7 items-center justify-center rounded-xl border text-xs transition",
                     active
-                      ? "bg-emerald-500/15 text-white shadow-[0_10px_30px_rgba(16,185,129,0.35)]"
-                      : "text-white/70 hover:bg-white/5",
+                      ? "border-emerald-400/60 bg-emerald-500/20 text-emerald-100"
+                      : "border-white/10 bg-white/5 text-white/70 group-hover:border-white/30"
                   )}
                 >
-                  <item.icon size={18} className={active ? "text-emerald-300" : "text-white/60"} />
-                  <div className="flex flex-col">
-                    <span className="font-semibold">{item.label}</span>
-                    <span className="text-xs text-white/50">{item.subtitle}</span>
-                  </div>
-                  <div
-                    className={cn(
-                      "ml-auto h-2 w-2 rounded-full transition",
-                      active ? "bg-emerald-400" : "bg-white/10 group-hover:bg-white/30",
-                    )}
-                  />
-                </a>
-              )
-            })}
-          </div>
-
-          <div className="mt-auto space-y-3 rounded-2xl border border-white/5 bg-white/5 px-4 py-4">
-            <p className="text-xs uppercase tracking-[0.16em] text-white/50">Focus</p>
-            <p className="text-sm text-white/70">
-              Stay on the critical signals. Summaries refresh every hour.
-            </p>
-            <Button variant="primary" size="sm" className="w-full">
-              Quick briefing
-            </Button>
-          </div>
-        </aside>
-
-        <div className="flex min-h-screen flex-col">
-          <header className="sticky top-0 z-30 flex items-center justify-between border-b border-white/10 bg-black/50 px-5 py-4 backdrop-blur">
-            <div className="flex items-center gap-3">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="lg:hidden"
-                onClick={() => setOpen((v) => !v)}
-                aria-label="Toggle navigation"
-              >
-                {open ? <X size={18} /> : <Menu size={18} />}
-              </Button>
-              <div>
-                <p className="text-xs uppercase tracking-[0.16em] text-white/50">{current?.subtitle ?? "Overview"}</p>
-                <h1 className="text-xl font-semibold text-white">{current?.label ?? "Revenue OS"}</h1>
+                  <Icon className="h-4 w-4" />
+                </div>
+                <div className="flex flex-col">
+                  <span className="font-medium leading-tight">
+                    {item.label}
+                  </span>
+                  {item.subtitle ? (
+                    <span className="text-[11px] text-white/45">
+                      {item.subtitle}
+                    </span>
+                  ) : null}
+                </div>
               </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <Input placeholder="Search actions, leads..." className="hidden w-64 lg:block" />
-              <div className="flex items-center gap-3 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">
-                <div className="h-2 w-2 rounded-full bg-emerald-400" />
-                <span>Live</span>
-              </div>
-            </div>
-          </header>
+              {active ? (
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              ) : null}
+            </Link>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
 
-          <main className="flex-1 px-4 pb-10 pt-6 sm:px-6 lg:px-8">
-            {children}
-          </main>
+export default function AppShell({ children }: AppShellProps) {
+  const pathname = usePathname()
+  const [mobileOpen, setMobileOpen] = useState(false)
+
+  return (
+    <div className="flex min-h-screen bg-gradient-to-b from-slate-950 via-black to-slate-900 text-white">
+      {/* SIDEBAR */}
+      <aside
+        className={cn(
+          "fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-white/10 bg-gradient-to-b from-slate-950/95 to-black/95 px-4 py-4 backdrop-blur-xl transition-transform",
+          mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+        )}
+      >
+        <div className="mb-4 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/20 ring-1 ring-emerald-400/60">
+              <Activity className="h-4 w-4 text-emerald-300" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold leading-tight">
+                Revenue ASI
+              </p>
+              <p className="text-[11px] text-white/45">
+                Pipeline director & brain
+              </p>
+            </div>
+          </div>
+          <Badge
+            variant="outline"
+            className="flex items-center gap-2 border-emerald-400/60 bg-emerald-500/15 px-2 py-1 text-[11px] text-emerald-100"
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            Live
+          </Badge>
         </div>
+
+        <div className="mb-4">
+          <Input
+            placeholder="Search actions, leads..."
+            className="h-9 border-white/15 bg-white/5 text-sm placeholder:text-white/40"
+          />
+        </div>
+
+        <div className="flex-1 space-y-5 overflow-y-auto pb-6">
+          <NavSection
+            title="Overview"
+            items={overviewNav}
+            pathname={pathname}
+            onNavigate={() => setMobileOpen(false)}
+          />
+          <NavSection
+            title="Pipeline & actions"
+            items={pipelineNav}
+            pathname={pathname}
+            onNavigate={() => setMobileOpen(false)}
+          />
+          <NavSection
+            title="Systems"
+            items={systemsNav}
+            pathname={pathname}
+            onNavigate={() => setMobileOpen(false)}
+          />
+        </div>
+
+        <div className="mt-auto border-t border-white/10 pt-3 text-[11px] text-white/40">
+          <p>Estado en tiempo casi real del motor de Revenue ASI.</p>
+        </div>
+      </aside>
+
+      {/* MOBILE TOGGLE */}
+      <button
+        type="button"
+        onClick={() => setMobileOpen((v) => !v)}
+        className="fixed left-3 top-3 z-50 flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-black/60 text-white shadow-lg backdrop-blur lg:hidden"
+      >
+        {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+      </button>
+
+      {/* MAIN AREA */}
+      <div className="flex min-h-screen flex-1 flex-col lg:pl-72">
+        <header className="sticky top-0 z-20 border-b border-white/10 bg-gradient-to-r from-black/80 via-slate-950/80 to-black/80 px-5 py-3 backdrop-blur-xl">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs text-white/50">
+              <span className="hidden text-[11px] uppercase tracking-[0.16em] text-white/45 sm:inline">
+                Pipeline & actions
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Badge
+                variant="outline"
+                className="flex items-center gap-2 border-white/20 bg-white/5 text-[11px] text-white/70"
+              >
+                <Activity className="h-3 w-3" />
+                Engine ok · summaries refresh every hour
+              </Badge>
+            </div>
+          </div>
+        </header>
+
+        <main className="flex-1 px-5 pb-10 pt-5">
+          <div className="mx-auto max-w-6xl">{children}</div>
+        </main>
       </div>
     </div>
   )
