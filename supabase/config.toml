@@ -7,24 +7,9 @@ project_id = "revenue-asi-dashboard"
 [api]
 enabled = true
 port = 54321
-<<<<<<< Updated upstream
-# Schemas to expose in your API. Tables, views and stored procedures in this schema will get API
-# endpoints. `public` and `graphql_public` schemas are included by default.
 schemas = ["public", "graphql_public", "lead_hunter"]
-# Extra schemas to add to the search_path of every request.
-extra_search_path = ["public", "extensions"]
-# The maximum number of rows returns from a view, table, or stored procedure. Limits payload size
-# for accidental or malicious requests.
-=======
-
-schemas = ["public", "graphql_public", "lead_hunter"]
-
-# 👇 ESTE ES EL QUE TE FALTABA
 extra_search_path = ["public", "extensions", "lead_hunter"]
-
->>>>>>> Stashed changes
 max_rows = 1000
-
 
 [api.tls]
 # Enable HTTPS endpoints locally using a self-signed certificate.
