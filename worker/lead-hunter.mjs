@@ -1,37 +1,54 @@
 // worker/lead-hunter.mjs
-// Run:
-//   export SUPABASE_URL="https://cdrrlkxgurckuyceiguo.supabase.co"
-//   export SUPABASE_SERVICE_ROLE_KEY="..."
-//   export WORKER_ID="local-dev-1"
-//   node worker/lead-hunter.mjs
-//
-// Debug (specific job):
-//   export JOB_ID="uuid"
-//   node worker/lead-hunter.mjs
-
+import "dotenv/config";
 import * as cheerio from "cheerio";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const WORKER_ID = process.env.WORKER_ID || "local-dev-1";
-const JOB_ID = process.env.JOB_ID || null;
+const WORKER_ID = process.env.WORKER_ID || "local-macbook-hunter";
 
 if (!SUPABASE_URL) throw new Error("Missing SUPABASE_URL");
 if (!SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
 
-// =====================
-// Encuentra24 URL builder
-// =====================
-// Base:  https://www.encuentra24.com/panama-es/autos-usados
-// Pages: /autos-usados.2, /autos-usados.3, ...
-function buildEncuentra24Url({ page }) {
-  const base = "https://www.encuentra24.com/panama-es/autos-usados";
-  return page && page > 1 ? `${base}.${page}` : base;
+const SOURCE = "encuentra24";
+const NICHE = "autos";
+
+const UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+
+function log(msg, obj) {
+  const ts = new Date().toISOString();
+  if (obj !== undefined) console.log(`[${ts}] ${msg}`, obj);
+  else console.log(`[${ts}] ${msg}`);
 }
 
-// =====================
-// Dealer filter (solo personas naturales)
-// =====================
+// ---------- RPC helper (solo public.lh_*) ----------
+async function rpc(fn, body) {
+  const url = `${SUPABASE_URL}/rest/v1/rpc/${fn}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+
+  const text = await res.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    // si no es JSON, igual lo devolvemos en error
+  }
+
+  if (!res.ok) {
+    throw new Error(`RPC ${fn} failed ${res.status}: ${text}`);
+  }
+  return json;
+}
+
+// ---------- Encuentra24 parsing ----------
 function isLikelyBusinessName(s) {
   if (!s) return false;
   const x = s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -40,10 +57,6 @@ function isLikelyBusinessName(s) {
     "autos",
     "auto ",
     "carspot",
-    "galería",
-    "galeria",
-    "ventas",
-    "venta",
     "dealer",
     "agencia",
     "showroom",
@@ -54,51 +67,20 @@ function isLikelyBusinessName(s) {
     "inc",
     "ltd",
     "corp",
-    "company",
-    "comercial",
-    "importadora",
-    "multimarca",
-    "sucursal",
-    "financiamiento disponible",
-    "aceptamos trade-in",
     "trade-in",
+    "venta",
+    "ventas",
+    "financiamiento",
   ];
   return bad.some((k) => x.includes(k));
 }
 
-// =====================
-// Parser helpers
-// =====================
-function parseGa4Addata(html) {
-  // match: ga4addata[31437579] = {...};
-  const re = /ga4addata\[(\d+)\]\s*=\s*(\{.*?\});/gs;
-  const out = {};
-  let m;
-  while ((m = re.exec(html))) {
-    const id = Number(m[1]);
-    const json = m[2];
-    try {
-      out[id] = JSON.parse(json);
-    } catch {}
-  }
-  return out;
-}
-
-function text1($node) {
-  const t = $node.text();
-  return t ? t.replace(/\s+/g, " ").trim() : "";
-}
-
 function parseEncuentra24Listings(html, country = "PA") {
   const $ = cheerio.load(html);
-  const ga4 = parseGa4Addata(html);
-
   const rows = [];
 
   $(".d3-ad-tile").each((_, el) => {
     const tile = $(el);
-
-    // link al detalle (contiene external_id al final)
     const link = tile.find("a.d3-ad-tile__description").first();
     const href = link.attr("href");
     if (!href) return;
@@ -108,105 +90,75 @@ function parseEncuentra24Listings(html, country = "PA") {
 
     const external_id = idMatch[1];
 
-    // seller / location (lo guardamos para filtro y raw)
-    const sellerRaw = text1(tile.find(".d3-ad-tile__seller").first()) || null;
+    const title =
+      tile.find(".d3-ad-tile__title").text().trim() ||
+      link.text().trim() ||
+      null;
 
-    // FILTRO: NO comercios
+    const sellerRaw = tile.find(".d3-ad-tile__seller").text().trim() || null;
     if (sellerRaw && isLikelyBusinessName(sellerRaw)) return;
 
-    // title limpio: primero el title node, luego fallback al link text
-    const title =
-      text1(tile.find(".d3-ad-tile__title").first()) ||
-      text1(link) ||
-      null;
-
-    // price
-    const priceStr =
-      tile.find("a.tool-favorite[data-price]").first().attr("data-price") ||
-      tile.find("[data-price]").first().attr("data-price") ||
-      null;
-    const price = priceStr ? String(priceStr).replace(/[^\d]/g, "") : null;
-
-    const g = ga4[Number(external_id)] || {};
-
-    // city: si GA4 trae location ok; si no, intenta inferir de sellerRaw (a veces incluye zona)
-    const city =
-      (g.location ? String(g.location) : null) ||
-      null;
+    const price = (tile.find("[data-price]").attr("data-price") || "")
+      .replace(/[^\d]/g, "")
+      .trim();
 
     rows.push({
       external_id,
       title,
       url: `https://www.encuentra24.com${href}`,
-      price,
-      city,
+      price: price || null,
+      city: null,
       country,
-      raw: {
-        ga4: g,
-        seller: sellerRaw,
-      },
+      raw: { seller: sellerRaw },
     });
   });
 
-  // dedup por external_id
+  // dedupe por external_id
   const map = new Map();
   for (const r of rows) map.set(r.external_id, r);
   return [...map.values()];
 }
 
-// =====================
-// Supabase helpers
-// =====================
-async function postgrestRpc(fn, body) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
-    method: "POST",
-    headers: {
-      apikey: SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify(body ?? {}),
+async function fetchListPage() {
+  const url = "https://www.encuentra24.com/panama-es/autos-usados";
+  const res = await fetch(url, {
+    headers: { "User-Agent": UA, Accept: "text/html" },
   });
+  if (!res.ok) throw new Error(`List fetch failed status=${res.status}`);
+  return await res.text();
+}
 
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`${fn} ${res.status}: ${txt}`);
+// ---------- Core flow ----------
+async function claimJob() {
+  // NOTA: este es el ÚNICO claim permitido
+  return await rpc("lh_claim_next_job", {
+    p_worker_id: WORKER_ID,
+    p_source: SOURCE,
+    p_niche: NICHE,
+  });
+}
+
+async function heartbeat(jobId, patchMeta, status = "running") {
+  // Mantén el job actualizado (esto NO cambia cursor column; solo meta + status)
+  return await rpc("lh_update_job", {
+    p_job_id: jobId,
+    p_status: status,
+    p_meta: patchMeta ?? {},
+  });
+}
+
+async function upsertLeads(job, listings) {
+  if (!Array.isArray(listings) || listings.length === 0) {
+    return { inserted: 0 };
   }
 
-  const data = await res.json().catch(() => null);
-  if (!data) return null;
-  if (Array.isArray(data)) return data[0] ?? null;
-  return data;
-}
-
-async function patchJob(jobId, patch) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/jobs?id=eq.${jobId}`, {
-    method: "PATCH",
-    headers: {
-      apikey: SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-      "Accept-Profile": "lead_hunter",
-      "Content-Profile": "lead_hunter",
-    },
-    body: JSON.stringify(patch),
-  });
-
-  if (!res.ok) throw new Error(`update job ${res.status}: ${await res.text()}`);
-  const rows = await res.json();
-  return rows?.[0] ?? null;
-}
-
-async function insertLeads(job, listings) {
-  if (!listings.length) return 0;
-
+  // IMPORTANT: public.lh_upsert_leads ignora p_job_id y lee job_id dentro del json,
+  // así que lo incluimos por lead. (sin inventar schema)
   const payload = listings.map((l) => ({
     job_id: job.id,
     account_id: job.account_id,
-    source: job.source,
-    niche: job.niche,
+    source: job.source || SOURCE,
+    niche: job.niche || NICHE,
     external_id: l.external_id,
     title: l.title,
     url: l.url,
@@ -216,173 +168,73 @@ async function insertLeads(job, listings) {
     raw: l.raw,
   }));
 
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/leads?on_conflict=account_id,source,external_id`,
-    {
-      method: "POST",
-      headers: {
-        apikey: SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "resolution=merge-duplicates,return=representation",
-        "Accept-Profile": "lead_hunter",
-        "Content-Profile": "lead_hunter",
-      },
-      body: JSON.stringify(payload),
-    }
-  );
-
-  if (!res.ok) throw new Error(`insert leads ${res.status}: ${await res.text()}`);
-
-  const data = await res.json().catch(() => []);
-  return Array.isArray(data) ? data.length : 0;
+  return await rpc("lh_upsert_leads", {
+    p_job_id: job.id,
+    p_leads: payload,
+  });
 }
 
-// =====================
-// Batch runner (cursor = page)
-// =====================
-async function runBatch(job, page, pagesPerBatch = 1) {
-  let totalFound = 0;
-  let totalInserted = 0;
-
-  let currentPage = page;
-  let hasMore = true;
-
-  for (let i = 0; i < pagesPerBatch; i++) {
-    const url = buildEncuentra24Url({ page: currentPage });
-
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        Accept: "text/html",
-      },
-    });
-
-    if (!res.ok) throw new Error(`fetch encuentra24 ${res.status} page=${currentPage}`);
-
-    const html = await res.text();
-    const listings = parseEncuentra24Listings(html, job.geo?.country || "PA");
-
-    totalFound += listings.length;
-    totalInserted += await insertLeads(job, listings);
-
-    hasMore = listings.length > 0;
-    currentPage += 1;
-
-    if (!hasMore) break;
-  }
-
-  return {
-    found: totalFound,
-    inserted: totalInserted,
-    nextCursor: currentPage,
-    done: !hasMore,
-  };
-}
-
-// =====================
-// Main
-// =====================
 async function main() {
-  let job = null;
+  log(`🤖 lead-hunter worker starting`, { worker_id: WORKER_ID, SOURCE, NICHE });
 
-  if (JOB_ID) {
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/jobs?select=*&id=eq.${JOB_ID}&limit=1`,
-      {
-        headers: {
-          apikey: SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-          "Accept-Profile": "lead_hunter",
-        },
-      }
-    );
-    if (!res.ok) throw new Error(`load job ${res.status}: ${await res.text()}`);
-    const rows = await res.json();
-    job = rows?.[0] ?? null;
+  // 1) claim
+  const job = await claimJob();
+  log("RPC RESULT (claim):", job);
 
-    if (!job) {
-      console.log("JOB_ID provided but not found:", JOB_ID);
-      return;
-    }
-  } else {
-    job = await postgrestRpc("claim_next_job", {
-      p_worker_id: WORKER_ID,
-      p_source: "encuentra24",
-      p_niche: "autos",
-    });
-
-    if (!job || !job.id) {
-      console.log("No job claimed. Exiting clean.");
-      return;
-    }
+  if (!job || !job.id) {
+    log("💤 no job");
+    return;
   }
 
-  console.log("START", job.id, "cursor(page)=", job.cursor);
-
-  let cursor = Number(job.cursor) || 1;
-  if (cursor < 1) cursor = 1;
-
-  let totalFound = 0;
-  let totalInserted = 0;
-
-  try {
-    // 1 página por batch x 3 iteraciones (ajusta luego)
-    for (let i = 0; i < 3; i++) {
-      const { found, inserted, nextCursor, done } = await runBatch(job, cursor, 1);
-
-      totalFound += found;
-      totalInserted += inserted;
-
-      console.log(
-        `batch ${i + 1}: page=${cursor} found=${found} inserted=${inserted} next=${nextCursor}`
-      );
-
-      await patchJob(job.id, {
-        last_heartbeat_at: new Date().toISOString(),
-        cursor: nextCursor,
-        progress: {
-          cursor: nextCursor,
-          leads_found: totalFound,
-          leads_inserted: totalInserted,
-          last_page_processed: cursor,
-        },
-      });
-
-      cursor = nextCursor;
-      if (done) break;
-    }
-
-    const finished = await patchJob(job.id, {
-      status: "done",
-      error: null,
-      updated_at: new Date().toISOString(),
-      progress: {
-        cursor,
-        leads_found: totalFound,
-        leads_inserted: totalInserted,
-      },
-    });
-
-    console.log("FINISH", finished?.id || job.id, "done");
-  } catch (err) {
-    const msg = String(err?.message || err);
-    console.error("WORKER ERROR:", msg);
-
-    if (job?.id) {
-      await patchJob(job.id, {
-        status: "error",
-        error: msg,
-        updated_at: new Date().toISOString(),
-      });
-    }
-
-    process.exit(1);
+  // sanity checks
+  if ((job.source || SOURCE) !== SOURCE || (job.niche || NICHE) !== NICHE) {
+    log("⚠️ claimed job mismatch", { job_source: job.source, job_niche: job.niche });
   }
+
+  // 2) heartbeat start
+  await heartbeat(job.id, {
+    worker_id: WORKER_ID,
+    last_heartbeat_at: new Date().toISOString(),
+    phase: "fetch_list",
+  });
+
+  // 3) fetch list (WAO = page 1)
+  const html = await fetchListPage();
+
+  await heartbeat(job.id, {
+    worker_id: WORKER_ID,
+    last_heartbeat_at: new Date().toISOString(),
+    phase: "parse_list",
+  });
+
+  // 4) parse
+  const listings = parseEncuentra24Listings(html, job.geo?.country || "PA");
+  log(`🔎 listings parsed`, { found: listings.length });
+
+  // 5) upsert
+  await heartbeat(job.id, {
+    worker_id: WORKER_ID,
+    last_heartbeat_at: new Date().toISOString(),
+    phase: "upsert",
+    found: listings.length,
+  });
+
+  const up = await upsertLeads(job, listings);
+  log("✅ upsert result", up);
+
+  // 6) done
+  await heartbeat(job.id, {
+    worker_id: WORKER_ID,
+    last_heartbeat_at: new Date().toISOString(),
+    phase: "done",
+    found: listings.length,
+    upsert: up,
+  }, "done");
+
+  log("🏁 done", { job_id: job.id });
 }
 
 main().catch((e) => {
-  console.error("FATAL:", e);
+  log("❌ FATAL", { error: String(e?.message || e) });
   process.exit(1);
 });
