@@ -76,11 +76,27 @@ CÓMO ELEGIR
 FIN >>>
 ` as const
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-})
+// ✅ CAMBIO CLAVE: OpenAI "lazy" (no se instancia en import-time)
+// Esto evita que next build reviente al "collect page data"
+let _openai: OpenAI | null = null
+function getOpenAI(): OpenAI {
+  if (_openai) return _openai
 
-export async function callCommandOs(input: { message: string; context?: any }): Promise<CommandOsResponse> {
+  const key = process.env.OPENAI_API_KEY
+  if (!key) {
+    throw new Error("Missing credentials. Please set OPENAI_API_KEY environment variable.")
+  }
+
+  _openai = new OpenAI({ apiKey: key })
+  return _openai
+}
+
+export async function callCommandOs(input: {
+  message: string
+  context?: any
+}): Promise<CommandOsResponse> {
+  const openai = getOpenAI()
+
   const completion = await openai.chat.completions.create({
     model: "gpt-5.1",
     messages: [

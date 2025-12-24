@@ -103,9 +103,21 @@ export default function DashboardPage() {
 
       if (funnelError) throw funnelError
       setFunnelRows((funnelData ?? []) as FunnelRow[])
-    } catch (err: any) {
-      console.error(err)
-      setError(err.message ?? "Error cargando dashboard_overview")
+    } catch (err: unknown) {
+      const e = err as any
+
+      // mensaje útil
+      const msg =
+        e?.message ||
+        e?.error?.message ||
+        (typeof e === "string" ? e : "") ||
+        (e ? JSON.stringify(e) : "") ||
+        "Error cargando dashboard_overview"
+
+      // log útil (no "{}")
+      console.error("Dashboard loadData error:", e)
+
+      setError(msg)
     } finally {
       setLoading(false)
     }
@@ -117,11 +129,10 @@ export default function DashboardPage() {
   }, [supabase])
 
   // --- Derivados para los KPIs arriba ---
-
   const totalsByState = useMemo(() => {
     const acc: Record<string, number> = {}
     for (const row of stateRows) {
-      const key = row.state?.toLowerCase() ?? "unknown"
+      const key = row.state?.toLowerCase?.() ?? "unknown"
       acc[key] = (acc[key] ?? 0) + Number(row.total_leads ?? 0)
     }
     return acc
@@ -179,26 +190,14 @@ export default function DashboardPage() {
 
       {/* KPI row */}
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          label="Leads activos"
-          value={`${totalLeads}`}
-          helper="Con campaña"
-        />
+        <StatCard label="Leads activos" value={`${totalLeads}`} helper="Con campaña" />
         <StatCard
           label="Attempting"
           value={`${attempting}`}
           helper="En secuencia de contacto"
         />
-        <StatCard
-          label="Engaged"
-          value={`${engaged}`}
-          helper="Respondieron / activos"
-        />
-        <StatCard
-          label="Booked"
-          value={`${booked}`}
-          helper="Con cita / deal abierto"
-        />
+        <StatCard label="Engaged" value={`${engaged}`} helper="Respondieron / activos" />
+        <StatCard label="Booked" value={`${booked}`} helper="Con cita / deal abierto" />
       </div>
 
       {/* Second row: Hot leads + Dead */}
@@ -232,7 +231,7 @@ export default function DashboardPage() {
                     <TableRow key={lead.lead_id}>
                       <TableCell className="text-sm">
                         <span className="font-mono text-xs text-white/60">
-                          {lead.lead_id.slice(0, 8)}
+                          {lead.lead_id?.slice?.(0, 8) ?? "—"}
                         </span>
                       </TableCell>
                       <TableCell className="text-sm capitalize">
@@ -290,12 +289,7 @@ export default function DashboardPage() {
           title="Funnel por campaña & canal"
           description="Resumen de toques por campaña, canal y estado."
           action={
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={loadData}
-              disabled={loading}
-            >
+            <Button variant="ghost" size="sm" onClick={loadData} disabled={loading}>
               <ArrowRight size={14} />
               Ver últimos datos
             </Button>
@@ -308,9 +302,7 @@ export default function DashboardPage() {
                 <TableHeaderCell>Campaña</TableHeaderCell>
                 <TableHeaderCell>Canal</TableHeaderCell>
                 <TableHeaderCell>Status touch</TableHeaderCell>
-                <TableHeaderCell className="text-right">
-                  Touches
-                </TableHeaderCell>
+                <TableHeaderCell className="text-right">Touches</TableHeaderCell>
               </TableRow>
             </TableHead>
             <TableBody>

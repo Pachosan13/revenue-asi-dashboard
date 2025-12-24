@@ -1,34 +1,38 @@
+// src/app/api/_lib/getAccountContextOrThrow.ts
 import { NextRequest } from "next/server"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
 
-export async function getAccountContextOrThrow(req?: NextRequest) {
-  const supabase = createSupabaseServerClient()
+export async function getAccountContextOrThrow(req: NextRequest) {
+  // ✅ Ya no creamos NextResponse aquí. En API routes normalmente solo necesitas leer sesión.
+  // Si algún endpoint necesita refrescar cookies, lo manejas en ese endpoint retornando NextResponse.
+  const supabase = createSupabaseServerClient(req)
 
   const { data: auth, error: authErr } = await supabase.auth.getUser()
+  if (authErr) throw new Error(authErr.message)
+
   const userId = auth?.user?.id
+  if (!userId) throw new Error("Unauthorized (no supabase session)")
 
-  if (authErr || !userId) {
-    throw new Error("Unauthorized (no supabase session)")
-  }
-
-  // Si mandan account_id explícito (query/body), lo respetamos,
-  // pero igual validamos membership para evitar spoofing.
-  const url = req ? new URL(req.url) : null
-  const hintedAccountId = url?.searchParams.get("account_id") ?? null
+  // 1) account_id explícito (header o query)
+  const hintedAccountId =
+    req.headers.get("x-account-id") ||
+    new URL(req.url).searchParams.get("account_id")
 
   if (hintedAccountId) {
-    const { data: okMember } = await supabase
+    const { data: okMember, error: memErr } = await supabase
       .from("account_members")
       .select("account_id")
       .eq("account_id", hintedAccountId)
       .eq("user_id", userId)
       .maybeSingle()
 
-    if (!okMember?.account_id) throw new Error("Forbidden (not a member of account_id)")
+    if (memErr) throw new Error(memErr.message)
+    if (!okMember) throw new Error("Forbidden (not member of hinted account)")
+
     return { supabase, userId, accountId: hintedAccountId }
   }
 
-  // Default: primera cuenta donde es miembro
+  // 2) fallback: primera membresía
   const { data: m, error: mErr } = await supabase
     .from("account_members")
     .select("account_id")
@@ -37,8 +41,8 @@ export async function getAccountContextOrThrow(req?: NextRequest) {
     .limit(1)
     .maybeSingle()
 
-  if (mErr) throw new Error(`Failed to load membership: ${mErr.message}`)
-  if (!m?.account_id) throw new Error("Missing account_id (no membership found)")
+  if (mErr) throw new Error(mErr.message)
+  if (!m?.account_id) throw new Error("No account membership")
 
   return { supabase, userId, accountId: m.account_id as string }
 }

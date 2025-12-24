@@ -13,11 +13,14 @@ async function run() {
   console.log("🚀 Running touch.simulate", { DRY_RUN, LIMIT })
 
   const result = await handleCommandOsIntent({
+    version: "v1",
     intent: "touch.simulate",
     args: {
       dry_run: DRY_RUN,
       limit: LIMIT,
     },
+    explanation: "Local script: simulate touch runs via Command OS router.",
+    confidence: 0.9,
   })
 
   console.log("✅ Simulation result:")

@@ -16,7 +16,7 @@ type Listing = {
 
 function parseGa4Addata(html: string): Record<number, any> {
   // match: ga4addata[31437579] = {...}
-  const re = /ga4addata\[(\d+)\]\s*=\s*(\{.*?\})<\/script>/gs;
+  const re = /ga4addata\[(\d+)\]\s*=\s*(\{[\s\S]*?\})<\/script>/g;
   const out: Record<number, any> = {};
   let m: RegExpExecArray | null;
 

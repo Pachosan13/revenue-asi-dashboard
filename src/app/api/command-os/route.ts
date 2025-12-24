@@ -11,7 +11,11 @@ type CommandOsBody = {
   context?: Record<string, any>
 }
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
+function getOpenAIClient() {
+  const key = process.env.OPENAI_API_KEY
+  if (!key) return null
+  return new OpenAI({ apiKey: key })
+}
 
 function safeStr(v: any, fallback = "") {
   if (v === null || v === undefined) return fallback
@@ -24,7 +28,7 @@ function safeNum(v: any, fallback = 0) {
   return Number.isFinite(n) ? n : fallback
 }
 
-/** Fallback deterministic (si OpenAI #2 falla) */
+/** Fallback deterministic (si OpenAI #2 falla o no hay API key) */
 function fallbackAssistantMessage(execution: any) {
   if (!execution || typeof execution !== "object") return "No hubo respuesta del sistema."
 
@@ -44,7 +48,10 @@ function fallbackAssistantMessage(execution: any) {
     const rows = Array.isArray(data?.leads) ? data.leads : []
     if (!rows.length) return "No encontré leads recientes."
     const lines = rows.slice(0, 10).map((l: any, i: number) => {
-      const name = safeStr(l?.contact_name || l?.lead_name || l?.name || l?.email, "Sin nombre")
+      const name = safeStr(
+        l?.contact_name || l?.lead_name || l?.name || l?.email,
+        "Sin nombre",
+      )
       const state = safeStr(l?.state || l?.status || l?.lead_state, "—")
       const score = safeNum(l?.priority_score ?? l?.lead_brain_score ?? l?.score, NaN)
       const scoreTxt = Number.isFinite(score) ? ` • score ${score}` : ""
@@ -65,7 +72,6 @@ function fallbackAssistantMessage(execution: any) {
     return `Estado del sistema:\n${lines.join("\n")}`
   }
 
-  // si hay message en data úsalo
   const explicit = safeStr(data?.message, "")
   if (explicit) return explicit
 
@@ -79,6 +85,9 @@ async function llmAssistantMessage(input: {
   args: any
   execution: any
 }) {
+  const openai = getOpenAIClient()
+  if (!openai) return "" // sin key => fuerza fallback deterministic
+
   const completion = await openai.chat.completions.create({
     model: "gpt-5.1",
     temperature: 0.2,
@@ -96,10 +105,7 @@ async function llmAssistantMessage(input: {
           "Si hay error: explica causa + siguiente acción concreta.",
         ].join("\n"),
       },
-      {
-        role: "user",
-        content: JSON.stringify(input),
-      },
+      { role: "user", content: JSON.stringify(input) },
     ],
   })
 
@@ -111,7 +117,10 @@ export async function POST(req: NextRequest) {
     const body = (await req.json().catch(() => null)) as CommandOsBody | null
     const message = body?.message?.toString?.().trim?.() ?? ""
     if (!message) {
-      return NextResponse.json({ ok: false, error: "message is required" }, { status: 400 })
+      return NextResponse.json(
+        { ok: false, error: "message is required" },
+        { status: 400 },
+      )
     }
 
     // ✅ server-derived tenant context (session + account_members)
@@ -129,7 +138,7 @@ export async function POST(req: NextRequest) {
     // 2) Router → ejecución real (DB, etc)
     const execution = await handleCommandOsIntent(command)
 
-    // 3) OpenAI #2 → respuesta humana para el chat
+    // 3) OpenAI #2 → respuesta humana para el chat (si hay key)
     let assistant_message = ""
     try {
       assistant_message = await llmAssistantMessage({
@@ -142,7 +151,6 @@ export async function POST(req: NextRequest) {
       assistant_message = ""
     }
 
-    // fallback si el LLM #2 no devolvió nada
     if (!assistant_message) assistant_message = fallbackAssistantMessage(execution)
 
     return NextResponse.json({

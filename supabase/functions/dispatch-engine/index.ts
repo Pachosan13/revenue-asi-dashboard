@@ -26,7 +26,7 @@ function nowIso() {
 function channelFn(channel: string) {
   switch (channel) {
     case "email":
-      return "dispatch-touch-email" // si no existe, cámbialo
+      return "dispatch-touch-email"
     case "sms":
       return "dispatch-touch-sms"
     case "whatsapp":
@@ -55,44 +55,43 @@ serve(async (req) => {
   const BATCH = Math.min(Math.max(Number(body?.batch ?? 25), 1), 200)
   const CONCURRENCY = Math.min(Math.max(Number(body?.concurrency ?? 5), 1), 25)
 
-  // 1) fetch due queued
-  const { data: due, error: dueErr } = await supabase
-    .from("touch_runs")
-    .select("id,account_id,lead_id,channel,step,status,scheduled_at,payload,meta,retry_count,max_retries")
-    .eq("status", "queued")
-    .lte("scheduled_at", nowIso())
-    .order("scheduled_at", { ascending: true })
-    .limit(BATCH)
+  // 1️⃣ CLAIM SEGURO (RPC con FOR UPDATE SKIP LOCKED)
+  const { data: runs, error: claimErr } = await supabase.rpc("claim_touch_runs", {
+    p_limit: BATCH,
+  })
 
-  if (dueErr) return Response.json({ ok: false, stage: "fetch_due", error: dueErr.message }, { status: 500 })
+  if (claimErr) {
+    return Response.json(
+      { ok: false, stage: "claim_touch_runs", error: claimErr.message },
+      { status: 500 }
+    )
+  }
 
-  const runs = (due ?? []) as TouchRun[]
-  if (!runs.length) return Response.json({ ok: true, processed: 0, claimed: 0, dry_run: DRY_RUN })
-
-  // 2) claim atomico (si otro worker ya los tomó, no regresan)
-  const ids = runs.map((r) => r.id)
-  const { data: claimedRows, error: claimErr } = await supabase
-    .from("touch_runs")
-    .update({ status: "executing", executed_at: nowIso() })
-    .in("id", ids)
-    .eq("status", "queued")
-    .select("id")
-
-  if (claimErr) return Response.json({ ok: false, stage: "claim", error: claimErr.message }, { status: 500 })
-
-  const claimedIds = new Set((claimedRows ?? []).map((r: any) => r.id))
-  const claimed = runs.filter((r) => claimedIds.has(r.id))
-  if (!claimed.length) return Response.json({ ok: true, processed: 0, claimed: 0, dry_run: DRY_RUN })
+  if (!runs || runs.length === 0) {
+    return Response.json({ ok: true, claimed: 0, processed: 0, dry_run: DRY_RUN })
+  }
 
   async function mark(id: string, patch: Record<string, any>) {
     const { error } = await supabase.from("touch_runs").update(patch).eq("id", id)
     if (error) console.error("mark failed", id, error.message)
   }
 
+  async function emitEvent(run: TouchRun, event: "sent" | "failed", payload: any) {
+    const { error } = await supabase.from("dispatch_events").insert({
+      touch_run_id: run.id,
+      account_id: run.account_id,
+      channel: run.channel,
+      provider: channelFn(run.channel),
+      event,
+      payload,
+    })
+    if (error) console.error("dispatch_events insert failed", error.message)
+  }
+
   async function invoke(run: TouchRun) {
     const started = Date.now()
+    const fn = channelFn(run.channel)
 
-    // contrato recomendado: touch_run_id manda todo lo demás lo puedes derivar
     const payload = {
       touch_run_id: run.id,
       lead_id: run.lead_id,
@@ -102,47 +101,71 @@ serve(async (req) => {
       dry_run: DRY_RUN,
     }
 
-    const fn = channelFn(run.channel)
-
     const res = await supabase.functions.invoke(fn, { body: payload })
-
     const ms = Date.now() - started
 
+    // ❌ FAIL
     if (res.error) {
-      await mark(run.id, {
-        status: "failed",
+      const nextRetry = (run.retry_count ?? 0) + 1
+      const max = run.max_retries ?? 3
+
+      await emitEvent(run, "failed", {
         error: res.error.message,
         execution_ms: ms,
-        meta: { ...(run.meta ?? {}), dispatch_engine: { at: nowIso(), fn, dry_run: DRY_RUN } },
+        retry: nextRetry,
+        dry_run: DRY_RUN,
       })
+
+      if (nextRetry <= max) {
+        await mark(run.id, {
+          status: "queued",
+          retry_count: nextRetry,
+          scheduled_at: new Date(Date.now() + 60_000).toISOString(),
+          execution_ms: ms,
+          error: res.error.message,
+        })
+      } else {
+        await mark(run.id, {
+          status: "failed",
+          retry_count: nextRetry,
+          execution_ms: ms,
+          error: res.error.message,
+        })
+      }
+
       return { ok: false, id: run.id, fn, error: res.error.message }
     }
 
-    // Si tu function ya marca touch_runs, igual esto no rompe (idempotente si estado final es mismo)
+    // ✅ SUCCESS
     await mark(run.id, {
       status: DRY_RUN ? "simulated" : "sent",
       sent_at: DRY_RUN ? null : nowIso(),
       execution_ms: ms,
       error: null,
-      meta: {
-        ...(run.meta ?? {}),
-        dispatch_engine: { at: nowIso(), fn, dry_run: DRY_RUN },
-        function_result: res.data ?? null,
-      },
+    })
+
+    await emitEvent(run, "sent", {
+      execution_ms: ms,
+      dry_run: DRY_RUN,
+      function_result: res.data ?? null,
     })
 
     return { ok: true, id: run.id, fn }
   }
 
-  // 3) pool
+  // 2️⃣ POOL DE EJECUCIÓN
   let i = 0
   const results: any[] = []
-  const workers = Array.from({ length: Math.min(CONCURRENCY, claimed.length) }).map(async () => {
-    while (i < claimed.length) {
-      const run = claimed[i++]
+
+  const workers = Array.from({
+    length: Math.min(CONCURRENCY, runs.length),
+  }).map(async () => {
+    while (i < runs.length) {
+      const run = runs[i++]
       results.push(await invoke(run))
     }
   })
+
   await Promise.all(workers)
 
   const processed = results.filter((r) => r.ok).length
@@ -151,8 +174,7 @@ serve(async (req) => {
   return Response.json({
     ok: true,
     dry_run: DRY_RUN,
-    fetched_due: runs.length,
-    claimed: claimed.length,
+    claimed: runs.length,
     processed,
     failed,
     results,

@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState } from "react"
+import React, { useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { supabaseBrowser } from "@/lib/supabase"
 import {
@@ -15,6 +15,8 @@ import {
 } from "@/components/ui-custom"
 import { Sparkles, ArrowRight, Loader2 } from "lucide-react"
 
+export const dynamic = "force-dynamic"
+
 const TYPE_OPTIONS = [
   { value: "outbound", label: "Outbound" },
   { value: "nurture", label: "Nurture" },
@@ -26,7 +28,14 @@ const TYPE_OPTIONS = [
 
 export default function NewCampaignPage() {
   const router = useRouter()
-  const supabase = supabaseBrowser()
+
+  // ✅ NO crear el client si faltan env vars (esto es lo que rompe `next build`)
+  const supabase = useMemo(() => {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    if (!url || !key) return null
+    return supabaseBrowser()
+  }, [])
 
   const [name, setName] = useState("")
   const [type, setType] = useState("outbound")
@@ -42,6 +51,14 @@ export default function NewCampaignPage() {
   async function createCampaign() {
     if (!name.trim()) {
       setError("Name is required.")
+      return
+    }
+
+    // ✅ si por alguna razón el entorno no tiene env vars, no explotes
+    if (!supabase) {
+      setError(
+        "Supabase no está configurado en este entorno (missing NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY).",
+      )
       return
     }
 
@@ -92,12 +109,20 @@ export default function NewCampaignPage() {
             Define strategy, ICP, copy & cadence. The OS will orchestrate everything else.
           </p>
         </div>
-        <Badge
-          variant="outline"
-          className="text-emerald-300 border-emerald-400/50"
-        >
-          V1 Composer
-        </Badge>
+
+        <div className="flex items-center gap-2">
+          <Badge
+            variant="outline"
+            className="text-emerald-300 border-emerald-400/50"
+          >
+            V1 Composer
+          </Badge>
+
+          {/* ✅ indicador sin romper UI */}
+          <Badge variant={supabase ? "success" : "warning"}>
+            {supabase ? "Live engine" : "Offline env"}
+          </Badge>
+        </div>
       </div>
 
       {/* FORM */}

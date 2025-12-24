@@ -15,7 +15,7 @@ const DEFAULT_COOLDOWNS = { voice: 120, whatsapp: 120, sms: 120, email: 120 }
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+    "authorization, x-client-info, apikey, content-type, x-revenue-secret",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 }
 
@@ -69,23 +69,15 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders })
   if (req.method !== "POST") return json({ ok: false, version: VERSION, error: "POST only" }, 405)
 
-    const REVENUE_SECRET = Deno.env.get("REVENUE_SECRET")
+  const REVENUE_SECRET = Deno.env.get("REVENUE_SECRET")
+  if (!REVENUE_SECRET) {
+    return json({ ok: false, version: VERSION, error: "REVENUE_SECRET not configured" }, 500)
+  }
 
-if (!REVENUE_SECRET) {
-  return json(
-    { ok: false, version: VERSION, error: "REVENUE_SECRET not configured" },
-    500
-  )
-}
-
-const incomingSecret = req.headers.get("x-revenue-secret")
-
-if (incomingSecret !== REVENUE_SECRET) {
-  return json(
-    { ok: false, version: VERSION, error: "unauthorized" },
-    401
-  )
-}
+  const incomingSecret = req.headers.get("x-revenue-secret")
+  if (incomingSecret !== REVENUE_SECRET) {
+    return json({ ok: false, version: VERSION, error: "unauthorized" }, 401)
+  }
 
   const SB_URL = Deno.env.get("SUPABASE_URL")
   const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -98,27 +90,34 @@ if (incomingSecret !== REVENUE_SECRET) {
 
   const supabase = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } })
 
-  const body = await req.json().catch(() => ({}))
+  const body = await req.json().catch(() => ({} as any))
+  const accountId = String(body.account_id ?? "").trim()
+  if (!accountId) return json({ ok: false, version: VERSION, stage: "parse_body", error: "account_id required" }, 400)
+
   const limit = Math.min(Math.max(Number(body.limit ?? 20), 1), 200)
   const dryRun = Boolean(body.dry_run ?? false)
 
-  // 1) campaign_leads activos
+  // 1) campaign_leads DUE + (active|enrolled)
+  const nowIso = new Date().toISOString()
+
   const { data: enrolled, error: eErr } = await supabase
     .from("campaign_leads")
-    .select("campaign_id, lead_id, enrolled_at, status, account_id")
-    .eq("status", "active")
-    .order("enrolled_at", { ascending: true })
+    .select("id, campaign_id, lead_id, enrolled_at, next_action_at, status, account_id")
+    .eq("account_id", accountId)
+    .in("status", ["active", "enrolled"])
+    .lte("next_action_at", nowIso)
+    .order("next_action_at", { ascending: true })
     .limit(limit)
 
   if (eErr) return json({ ok: false, version: VERSION, stage: "select_campaign_leads", error: eErr.message }, 500)
 
   if (!enrolled?.length) {
-    const result = { ok: true, version: VERSION, processed_leads: 0, inserted: 0, dry_run: dryRun, errors: [], note: "no active enrolled leads" }
+    const result = { ok: true, version: VERSION, processed_leads: 0, inserted: 0, dry_run: dryRun, errors: [], note: "no due enrolled leads" }
     await logEvalSafe(supabase, {
       scope: "system",
       label: "touch_orchestrator_v7_run",
       kpis: { processed_leads: 0, inserted: 0, errors_count: 0, dry_run_runs: dryRun ? 1 : 0 },
-      notes: "Run without active enrolled leads",
+      notes: "Run without due enrolled leads",
     })
     return json(result)
   }
@@ -149,17 +148,16 @@ if (incomingSecret !== REVENUE_SECRET) {
   // 4) batch lookup lead state + account_id
   const leadIds = [...new Set(enrolled.map((r: any) => r.lead_id).filter(Boolean))]
   const { data: leadRows, error: lErr } = await supabase
-    .from("leads")
-    .select("id, state, status, account_id")
-    .in("id", leadIds)
+  .from("leads")
+  .select("id, account_id")
+  .in("id", leadIds)
 
-  if (lErr) return json({ ok: false, version: VERSION, stage: "select_leads_state", error: lErr.message }, 500)
+if (lErr) return json({ ok: false, version: VERSION, stage: "select_leads_state", error: lErr.message }, 500)
 
-  const leadInfo = new Map<string, { lead_state: string; account_id: string | null }>()
-  for (const r of leadRows ?? []) {
-    const st = toLower((r as any).state ?? (r as any).status ?? "")
-    leadInfo.set((r as any).id, { lead_state: st, account_id: (r as any).account_id ?? null })
-  }
+const leadInfo = new Map<string, { lead_state: string; account_id: string | null }>()
+for (const r of leadRows ?? []) {
+  leadInfo.set((r as any).id, { lead_state: "", account_id: (r as any).account_id ?? null })
+}
 
   const futureApptCache = new Map<string, boolean>()
 
@@ -172,7 +170,6 @@ if (incomingSecret !== REVENUE_SECRET) {
 
     const info = leadInfo.get(row.lead_id)
     const lead_state = info?.lead_state ?? ""
-    if (lead_state === "dead") continue
 
     const account_id = row.account_id ?? info?.account_id ?? null
     if (!account_id) {
@@ -199,7 +196,7 @@ if (incomingSecret !== REVENUE_SECRET) {
 
     const enrolledAtMs = row.enrolled_at ? new Date(row.enrolled_at).getTime() : nowMs
 
-    // dedupe por activos (para no romper ux_touch_runs_active_dedupe*)
+    // dedupe por activos
     const stepNums = [...new Set(campaignSteps.map((s: any) => Number(s.step ?? 1)))]
     const channels = [...new Set(campaignSteps.map((s: any) => toLower(s.channel)).filter(Boolean))]
 
@@ -254,7 +251,7 @@ if (incomingSecret !== REVENUE_SECRET) {
       toUpsert.push({
         account_id,
         campaign_id: row.campaign_id,
-        campaign_run_id: null, // consistente con tu dedupe COALESCE
+        campaign_run_id: null,
         lead_id: row.lead_id,
         step: stepNum,
         channel,

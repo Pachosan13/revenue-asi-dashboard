@@ -231,23 +231,24 @@ export default function LeadsPage() {
 
       // 1) Base inbox (fuente operativa)
       const { data, error: dbError } = await client
-        .from("inbox_events")
-        .select(
-          [
-            "lead_id",
-            "lead_name",
-            "lead_email",
-            "lead_phone",
-            "lead_state",
-            "last_step_at",
-            "campaign_id",
-            "campaign_name",
-            "channel_last",
-            "created_at",
-          ].join(", "),
-        )
-        .order("last_step_at", { ascending: false })
-        .limit(200)
+  .from("inbox_events")
+  .select(
+    [
+      "lead_id",
+      "lead_name",
+      "lead_email",
+      "lead_phone",
+      "lead_state",
+      "last_step_at",
+      "campaign_id",
+      "campaign_name",
+      "channel_last",
+      "created_at",
+    ].join(", "),
+  )
+  .order("last_step_at", { ascending: false })
+  .limit(200)
+  .returns<InboxRow[]>()
 
       if (!alive) return
 
@@ -261,9 +262,7 @@ export default function LeadsPage() {
         return
       }
 
-      let mapped: LeadInboxEntry[] = (data ?? []).map((row) =>
-        mapInboxRow(row as InboxRow),
-      )
+      let mapped: LeadInboxEntry[] = (data ?? []).map(mapInboxRow)
 
       const ids = mapped.map((l) => l.id).filter(Boolean)
 
