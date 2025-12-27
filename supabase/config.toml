@@ -463,7 +463,7 @@ entrypoint = "./functions/lh_enrich_apollo/index.ts"
 
 [functions.lh_collect_encuentra24_listings]
 enabled = true
-verify_jwt = true
+verify_jwt = false
 import_map = "./functions/lh_collect_encuentra24_listings/deno.json"
 # Uncomment to specify a custom file path to the entrypoint.
 # Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
