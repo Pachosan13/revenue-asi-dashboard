@@ -5,19 +5,14 @@ import { AlertTriangle, Clock4, Mail, PhoneCall, ServerCrash } from "lucide-reac
 
 import { supabaseBrowser } from "@/lib/supabase"
 import { Badge, Card, CardContent, CardHeader } from "@/components/ui-custom"
-<<<<<<< HEAD
+import { formatTouchPreview } from "./lead-activity-labels"
 import {
   channelLabel,
   fetchLeadTouchRuns,
-  formatPreview,
   getWhen,
   statusVariant,
   type TouchRunRow,
 } from "./timeline-utils"
-=======
-import { formatTouchPreview } from "./lead-activity-labels"
-import { channelLabel, fetchLeadTouchRuns, getWhen, statusVariant, type TouchRunRow } from "./timeline-utils"
->>>>>>> origin/codex/implement-lead-detail-timeline-2.0
 
 type LeadTimelineProps = {
   leadId: string
@@ -87,9 +82,14 @@ function channelIcon(channel?: string | null) {
 
 export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
   const supabaseReady = useMemo(
-    () => Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+    () =>
+      Boolean(
+        process.env.NEXT_PUBLIC_SUPABASE_URL &&
+          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+      ),
     [],
   )
+
   const [touches, setTouches] = useState<TouchRunRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -127,7 +127,8 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
       setLoading(false)
     }
 
-    load()
+    void load()
+
     return () => {
       alive = false
     }
@@ -147,10 +148,14 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
           </div>
         ) : null}
 
-        {loading ? <p className="text-sm text-white/70">Cargando timeline...</p> : null}
+        {loading ? (
+          <p className="text-sm text-white/70">Cargando timeline...</p>
+        ) : null}
 
         {!loading && touches.length === 0 ? (
-          <p className="text-sm text-white/70">No hay eventos de touch_runs para este lead.</p>
+          <p className="text-sm text-white/70">
+            No hay eventos de touch_runs para este lead.
+          </p>
         ) : null}
 
         <div className="space-y-3">
@@ -176,18 +181,25 @@ export function LeadTimeline({ leadId, leadName }: LeadTimelineProps) {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Badge variant={statusVariant(touch.status)} className="capitalize">
+                    <Badge
+                      variant={statusVariant(touch.status)}
+                      className="capitalize"
+                    >
                       {touch.status ?? "Sin estado"}
                     </Badge>
                     <span className="text-xs text-white/60">{timestamp}</span>
                   </div>
                 </div>
 
-                  <div className="space-y-1 text-sm text-white/80">
-                    <div className="flex items-start gap-2">
-                      <span className="text-xs uppercase tracking-[0.14em] text-white/50">Payload</span>
-                      <span className="flex-1 break-words text-white/80">{formatTouchPreview(touch.payload) || "—"}</span>
-                    </div>
+                <div className="space-y-1 text-sm text-white/80">
+                  <div className="flex items-start gap-2">
+                    <span className="text-xs uppercase tracking-[0.14em] text-white/50">
+                      Payload
+                    </span>
+                    <span className="flex-1 break-words text-white/80">
+                      {formatTouchPreview(touch.payload) || "—"}
+                    </span>
+                  </div>
                   {touch.error ? (
                     <div className="flex items-start gap-2 text-amber-200">
                       <ServerCrash size={16} />

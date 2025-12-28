@@ -1,21 +1,17 @@
 import "./globals.css"
+import type { Metadata } from "next"
 import React from "react"
-import { AppShell } from "@/components/navigation/AppShell"
+import ShellGate from "@/components/navigation/ShellGate"
 
-export const metadata = {
+export const metadata: Metadata = {
   title: "Revenue ASI Dashboard",
-  description: "AI campaign & lead ops",
 }
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="h-full">
       <body className="h-full font-sans">
-        <AppShell>{children}</AppShell>
+        <ShellGate>{children}</ShellGate>
       </body>
     </html>
   )

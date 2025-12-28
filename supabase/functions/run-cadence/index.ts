@@ -1,13 +1,9 @@
-<<<<<<< HEAD
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { setLeadState } from "../_shared/state.ts";
-=======
+// supabase/functions/run-cadence/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts"
 
-const VERSION = "run-cadence-v4_2025-11-23"
+const VERSION = "run-cadence-v5_2025-12-13_deadstop"
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -15,15 +11,10 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
 }
->>>>>>> origin/plan-joe-dashboard-v1
 
 serve(async (req) => {
-  // Preflight
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders })
-  }
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders })
 
-  // Env
   const SB_URL = Deno.env.get("SUPABASE_URL")
   const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
   if (!SB_URL || !SB_KEY) {
@@ -33,63 +24,30 @@ serve(async (req) => {
         version: VERSION,
         error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY",
       }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   }
 
-<<<<<<< HEAD
-    if (inserts.length) {
-      await supabase.from("touch_runs").insert(inserts);
+  const supabase = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } })
 
-      for (const lead of leads ?? []) {
-        await setLeadState({
-          supabase,
-          leadId: lead.id,
-          newState: "attempting",
-          reason: "added_to_cadence",
-          actor: "system",
-          source: "run-cadence",
-          meta: { campaign_id: c.id, campaign_run_id: run?.id },
-        });
-      }
-
-      // TODO: Mark leads as "qualified", "booked", or "dead" once outcomes are known
-      // (e.g., after responses or appointment scheduling flows are implemented).
-=======
-  const supabase = createClient(SB_URL, SB_KEY)
-
-  // Body
   let body: any = {}
-  try {
-    body = await req.json()
-  } catch {
-    body = {}
-  }
+  try { body = await req.json() } catch { body = {} }
 
   const campaign_id = body?.campaign_id
   const debug = body?.debug === true
-
   if (!campaign_id) {
     return new Response(
-      JSON.stringify({
-        ok: false,
-        version: VERSION,
-        error: "campaign_id required",
-      }),
-      {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
+      JSON.stringify({ ok: false, version: VERSION, error: "campaign_id required" }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   }
 
-  // 1) Verifica campaña existe y está active
+  const nowIso = new Date().toISOString()
+
+  // 1) campaign
   const { data: campaign, error: cErr } = await supabase
     .from("campaigns")
-    .select("id,status")
+    .select("id,status,account_id")
     .eq("id", campaign_id)
     .maybeSingle()
 
@@ -101,10 +59,7 @@ serve(async (req) => {
         stage: "load_campaign",
         error: cErr?.message ?? "campaign not found",
       }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   }
 
@@ -124,7 +79,7 @@ serve(async (req) => {
     )
   }
 
-  // 2) Cargar touches GLOBAL (NO por campaña)
+  // 2) cadence
   const { data: touches, error: tErr } = await supabase
     .from("touches")
     .select("id, step, channel, payload")
@@ -132,16 +87,8 @@ serve(async (req) => {
 
   if (tErr) {
     return new Response(
-      JSON.stringify({
-        ok: false,
-        version: VERSION,
-        stage: "load_touches",
-        error: tErr.message,
-      }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
+      JSON.stringify({ ok: false, version: VERSION, stage: "load_touches", error: tErr.message }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   }
 
@@ -156,56 +103,37 @@ serve(async (req) => {
             payload: {
               script:
                 "Hey {{first_name}}, voy rápido — te contacto porque vimos tu empresa y estamos ayudando negocios como el tuyo a generar 10–20 clientes nuevos al mes con automatización real.",
-              // OJO: esto usa process.env solo si ya lo tienes shimeado.
-              voice_id: (process as any)?.env?.REVENUE_ASI_ELEVEN_VOICE_ID,
-              render_webhook: (process as any)?.env?.REVENUE_ASI_VOICE_WEBHOOK,
             },
           },
         ]
 
-  // 3) Traer leads elegibles (versión simple por ahora)
+  // 3) leads elegibles (dead=stop, phone required, account required)
   const { data: leads, error: lErr } = await supabase
     .from("leads")
-    .select("id, phone, status")
+    .select("id, phone, status, account_id, lead_state")
     .eq("status", "new")
     .not("phone", "is", null)
+    .not("account_id", "is", null)
+    .neq("lead_state", "dead")
     .limit(200)
 
   if (lErr) {
     return new Response(
-      JSON.stringify({
-        ok: false,
-        version: VERSION,
-        stage: "load_leads",
-        error: lErr.message,
-      }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
+      JSON.stringify({ ok: false, version: VERSION, stage: "load_leads", error: lErr.message }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   }
 
   const leads_seen = leads?.length ?? 0
-
   if (!leads_seen) {
-    // No leads → igual podemos loggear
     try {
-      await logEvaluation({
-        supabase,
-        event_type: "evaluation",
-        actor: "cadence",
-        label: "run_cadence_v4",
-        kpis: {
-          campaign_id,
-          leads_seen: 0,
-          queued: 0,
-        },
-        notes: "No leads available",
+      await logEvaluation(supabase, {
+        event_source: "cadence",
+        label: "run_cadence_v5",
+        kpis: { campaign_id, leads_seen: 0, queued: 0 },
+        notes: "No eligible leads (dead/phone/account filtered)",
       })
-    } catch (e) {
-      console.error("logEvaluation failed in run-cadence (no leads)", e)
-    }
+    } catch (_) {}
 
     return new Response(
       JSON.stringify({
@@ -216,95 +144,109 @@ serve(async (req) => {
         queued: 0,
         errors: [],
         debug,
-        note: "no leads",
+        note: "no eligible leads",
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   }
 
-  // 4) Crear campaign_run
-  const nowIso = new Date().toISOString()
+  // 4) campaign_run
   const { data: run, error: rErr } = await supabase
     .from("campaign_runs")
-    .insert({
-      campaign_id,
-      status: "running",
-      started_at: nowIso,
-      meta: {},
-    })
+    .insert({ campaign_id, status: "running", started_at: nowIso, meta: {} })
     .select("id")
     .single()
 
   if (rErr || !run) {
     return new Response(
-      JSON.stringify({
-        ok: false,
-        version: VERSION,
-        stage: "create_run",
-        error: rErr?.message ?? "run insert failed",
-      }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
+      JSON.stringify({ ok: false, version: VERSION, stage: "create_run", error: rErr?.message ?? "run insert failed" }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   }
 
-  // 5) Insertar touch_runs
+  // 5) build inserts + dedupe básico (evitar duplicar queued/scheduled)
+  // (si tu schema ya dedupea con unique index, esto igual ayuda)
+  const leadIds = (leads ?? []).map((l: any) => l.id)
+  const { data: existing, error: xErr } = await supabase
+    .from("touch_runs")
+    .select("lead_id, step, channel, status")
+    .in("lead_id", leadIds)
+    .in("status", ["queued", "scheduled", "executing"])
+
+  if (xErr) {
+    return new Response(
+      JSON.stringify({ ok: false, version: VERSION, stage: "load_existing_touch_runs", error: xErr.message }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    )
+  }
+
+  const existingKey = new Set((existing ?? []).map((r: any) => `${r.lead_id}:${r.step}:${r.channel}`))
+
   const inserts: any[] = []
   for (const lead of leads ?? []) {
     for (const touch of cadence) {
+      const step = Number(touch.step ?? 1)
+      const channel = String(touch.channel ?? "whatsapp").toLowerCase()
+      const key = `${lead.id}:${step}:${channel}`
+      if (existingKey.has(key)) continue
+
       inserts.push({
         campaign_id,
         campaign_run_id: run.id,
         lead_id: lead.id,
-        step: touch.step ?? 1,
-        channel: touch.channel ?? "whatsapp",
+        step,
+        channel,
         payload: touch.payload ?? {},
         scheduled_at: nowIso,
         status: "queued",
+        account_id: (lead as any).account_id ?? campaign.account_id ?? null,
+        meta: { source: VERSION },
       })
->>>>>>> origin/plan-joe-dashboard-v1
     }
+  }
+
+  if (!inserts.length) {
+    try {
+      await logEvaluation(supabase, {
+        event_source: "cadence",
+        label: "run_cadence_v5",
+        kpis: { campaign_id, leads_seen, queued: 0 },
+        notes: "No inserts (all deduped)",
+      })
+    } catch (_) {}
+
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        version: VERSION,
+        runs_created: 1,
+        leads_seen,
+        queued: 0,
+        errors: [],
+        debug,
+        note: "all deduped",
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    )
   }
 
   const { error: insErr } = await supabase.from("touch_runs").insert(inserts)
   if (insErr) {
     return new Response(
-      JSON.stringify({
-        ok: false,
-        version: VERSION,
-        stage: "insert_touch_runs",
-        error: insErr.message,
-      }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
+      JSON.stringify({ ok: false, version: VERSION, stage: "insert_touch_runs", error: insErr.message }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   }
 
-  // 6) Log en core_memory_events (best-effort)
   try {
-    await logEvaluation({
-      supabase,
-      event_type: "evaluation",
-      actor: "cadence",
-      label: "run_cadence_v4",
-      kpis: {
-        campaign_id,
-        leads_seen,
-        queued: inserts.length,
-      },
-      notes: debug
-        ? "run-cadence run with debug=true"
-        : "run-cadence normal run",
+    await logEvaluation(supabase, {
+      event_source: "cadence",
+      label: "run_cadence_v5",
+      kpis: { campaign_id, leads_seen, queued: inserts.length },
+      notes: debug ? "debug=true" : "ok",
     })
-  } catch (e) {
-    console.error("logEvaluation failed in run-cadence", e)
-  }
+  } catch (_) {}
 
-  // 7) Respuesta
   return new Response(
     JSON.stringify({
       ok: true,

@@ -6,15 +6,9 @@ project_id = "revenue-asi-dashboard"
 
 [api]
 enabled = true
-# Port to use for the API URL.
 port = 54321
-# Schemas to expose in your API. Tables, views and stored procedures in this schema will get API
-# endpoints. `public` and `graphql_public` schemas are included by default.
-schemas = ["public", "graphql_public"]
-# Extra schemas to add to the search_path of every request.
-extra_search_path = ["public", "extensions"]
-# The maximum number of rows returns from a view, table, or stored procedure. Limits payload size
-# for accidental or malicious requests.
+schemas = ["public", "graphql_public", "lead_hunter"]
+extra_search_path = ["public", "extensions", "lead_hunter"]
 max_rows = 1000
 
 [api.tls]
@@ -73,7 +67,7 @@ allowed_cidrs = ["0.0.0.0/0"]
 allowed_cidrs_v6 = ["::/0"]
 
 [realtime]
-enabled = true
+enabled = false
 # Bind realtime via either IPv4 or IPv6. (default: IPv4)
 # ip_version = "IPv6"
 # The maximum length in bytes of HTTP request headers. (default: 4096)
@@ -101,7 +95,7 @@ port = 54324
 # sender_name = "Admin"
 
 [storage]
-enabled = true
+enabled = false
 # The maximum file size allowed (e.g. "5MB", "500KB").
 file_size_limit = "50MiB"
 
@@ -325,20 +319,16 @@ allow_dynamic_registration = false
 
 [edge_runtime]
 enabled = true
-# Supported request policies: `oneshot`, `per_worker`.
-# `per_worker` (default) — enables hot reload during local development.
-# `oneshot` — fallback mode if hot reload causes issues (e.g. in large repos or with symlinks).
 policy = "per_worker"
-# Port to attach the Chrome inspector for debugging edge functions.
 inspector_port = 8083
-# The Deno major version to use.
 deno_version = 2
 
-# [edge_runtime.secrets]
-# secret_key = "env(SECRET_VALUE)"
+[edge_runtime.secrets]
+PROJECT_URL = "http://host.docker.internal:54321"
+SERVICE_ROLE_KEY = "sb_secret_N7UND0UgjKTVK-Uodkm0Hg_xSvEMPvz"
 
 [analytics]
-enabled = true
+enabled = false
 port = 54327
 # Configure one of the supported backends: `postgres`, `bigquery`.
 backend = "postgres"
@@ -372,10 +362,10 @@ enabled = true
 verify_jwt = false
 entrypoint = "./functions/campaign-engine/index.ts"
 
-[functions.dispatch-touch-voice]
-enabled = true
-verify_jwt = false
-entrypoint = "./functions/dispatch-touch-voice/index.ts"
+# [functions.dispatch-touch-voice]
+# enabled = true
+# verify_jwt = false
+# entrypoint = "./functions/dispatch-touch-voice/index.ts"
 
 [functions.voice-webhook]
 enabled = true
@@ -387,9 +377,9 @@ enabled = true
 verify_jwt = false
 entrypoint = "./functions/render-voice/index.ts"
 
-[functions.touch-orchestrator-v4]
-enabled = true
-verify_jwt = false
+# [functions.touch-orchestrator-v4]
+# enabled = true
+# verify_jwt = false
 
 [functions.domain-create]
 enabled = true
@@ -419,6 +409,178 @@ verify_jwt = false
 enabled = true
 verify_jwt = false
 
-[functions.dispatch-touch-whatsapp]
+# [functions.dispatch-touch-whatsapp]
+# enabled = true
+# verify_jwt = false
+
+[functions.ghl-appointment-webhook]
+verify_jwt = false
+
+[functions.lh_collect_maps]
 enabled = true
 verify_jwt = false
+import_map = "./functions/lh_collect_maps/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/lh_collect_maps/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/lh_collect_maps/*.html" ]
+
+[functions.lh_build_canonical]
+enabled = true
+verify_jwt = false
+import_map = "./functions/lh_build_canonical/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/lh_build_canonical/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/lh_build_canonical/*.html" ]
+
+[functions.lh_verify_email]
+enabled = true
+verify_jwt = true
+import_map = "./functions/lh_verify_email/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/lh_verify_email/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/lh_verify_email/*.html" ]
+
+[functions.lh_enrich_apollo]
+enabled = true
+verify_jwt = true
+import_map = "./functions/lh_enrich_apollo/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/lh_enrich_apollo/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/lh_enrich_apollo/*.html" ]
+
+
+[functions.lh_collect_encuentra24_listings]
+enabled = true
+verify_jwt = false
+import_map = "./functions/lh_collect_encuentra24_listings/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/lh_collect_encuentra24_listings/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/lh_collect_encuentra24_listings/*.html" ]
+
+[functions.lh_queue_contact_reveal_tasks]
+enabled = true
+verify_jwt = true
+import_map = "./functions/lh_queue_contact_reveal_tasks/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/lh_queue_contact_reveal_tasks/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/lh_queue_contact_reveal_tasks/*.html" ]
+
+[functions.lh_run_contact_reveal_batch]
+enabled = true
+verify_jwt = true
+import_map = "./functions/lh_run_contact_reveal_batch/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/lh_run_contact_reveal_batch/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/lh_run_contact_reveal_batch/*.html" ]
+
+[functions.lh_normalize_score_handoff]
+enabled = true
+verify_jwt = true
+import_map = "./functions/lh_normalize_score_handoff/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/lh_normalize_score_handoff/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/lh_normalize_score_handoff/*.html" ]
+
+[functions.create-job]
+enabled = true
+verify_jwt = true
+import_map = "./functions/create-job/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/create-job/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/create-job/*.html" ]
+
+[functions.start-job]
+enabled = true
+verify_jwt = true
+import_map = "./functions/start-job/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/start-job/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/start-job/*.html" ]
+
+[functions.heartbeat-job]
+enabled = true
+verify_jwt = true
+import_map = "./functions/heartbeat-job/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/heartbeat-job/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/heartbeat-job/*.html" ]
+
+[functions.finish-job]
+enabled = true
+verify_jwt = true
+import_map = "./functions/finish-job/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/finish-job/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/finish-job/*.html" ]
+
+[functions.update-job]
+enabled = true
+verify_jwt = true
+import_map = "./functions/update-job/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/update-job/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/update-job/*.html" ]
+
+[functions.insert-leads]
+enabled = true
+verify_jwt = true
+import_map = "./functions/insert-leads/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/insert-leads/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/insert-leads/*.html" ]
+
+[functions.claim-next-job]
+enabled = true
+verify_jwt = true
+import_map = "./functions/claim-next-job/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/claim-next-job/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/claim-next-job/*.html" ]
+
+[functions.lead-hunter-tick]
+entrypoint = "./functions/lead-hunter-tick/index.ts"

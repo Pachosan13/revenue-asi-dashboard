@@ -1,50 +1,26 @@
 // supabase/functions/dispatch-touch-email/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
-import { corsHeaders } from "../_shared/cors.ts"
 import { logEvaluation } from "../_shared/eval.ts"
 
-const VERSION = "dispatch-touch-email-v3_2025-11-24_fix_errors_qa"
+const VERSION = "dispatch-touch-email-v2_2025-12-10_multitenant"
 
-async function sendElasticEmail({
-  apiKey,
-  from,
-  fromName,
-  to,
-  subject,
-  bodyHtml,
-  bodyText,
-  replyTo,
-}: {
-  apiKey: string
-  from: string
-  fromName?: string
-  to: string
-  subject: string
-  bodyHtml: string
-  bodyText?: string
-  replyTo?: string
-}) {
-  const res = await fetch("https://api.elasticemail.com/v2/email/send", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      apikey: apiKey,
-      from,
-      fromName: fromName || from,
-      to,
-      subject,
-      bodyHtml,
-      bodyText: bodyText || "",
-      replyTo: replyTo || from,
-      isTransactional: "false",
-    }),
-  })
-  const json = await res.json()
-  if (!res.ok || json?.success === false) {
-    throw new Error(JSON.stringify(json))
-  }
-  return json
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+}
+
+function cleanEmail(e: string | null) {
+  if (!e) return null
+  return e.trim().toLowerCase()
+}
+
+function isValidEmail(e: string | null) {
+  if (!e) return false
+  // simple pero suficiente
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)
 }
 
 serve(async (req) => {
@@ -54,152 +30,318 @@ serve(async (req) => {
 
   const SB_URL = Deno.env.get("SUPABASE_URL")
   const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
-  const ELASTIC_KEY = Deno.env.get("ELASTICEMAIL_API_KEY") || ""
-
-  // QA overrides (para free tier)
-  const QA_TO = Deno.env.get("QA_EMAIL_SINK") || ""
-  const QA_FROM = Deno.env.get("QA_EMAIL_FROM") || ""
 
   if (!SB_URL || !SB_KEY) {
     return new Response(
       JSON.stringify({
         ok: false,
         stage: "env",
-        error: "Missing supabase env",
+        error: "Missing Supabase env vars",
         version: VERSION,
       }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
+      { status: 500, headers: corsHeaders },
     )
   }
 
   const supabase = createClient(SB_URL, SB_KEY)
 
+  // ENV para Elastic Email (ajusta nombres si ya usas otros)
+  const ELASTIC_API_KEY = Deno.env.get("ELASTIC_EMAIL_API_KEY")
+  const ELASTIC_FROM = Deno.env.get("ELASTIC_EMAIL_FROM")
+  const ELASTIC_FROM_NAME = Deno.env.get("ELASTIC_EMAIL_FROM_NAME") ?? "Revenue ASI"
+
+  const DRY_DEFAULT = Deno.env.get("DRY_RUN_EMAIL") === "true"
+
+  let body: any = {}
   try {
-    // 1) trae touch_runs email scheduled
-    const { data: runs, error: rErr } = await supabase
-      .from("touch_runs")
-      .select("id, lead_id, payload")
-      .eq("channel", "email")
-      .eq("status", "scheduled")
-      .limit(50)
+    body = await req.json()
+  } catch {
+    body = {}
+  }
 
-    if (rErr) throw rErr
+  const limit = Number(body.limit ?? 50)
+  const dryRun = Boolean(body.dry_run ?? DRY_DEFAULT)
 
-    let processed = 0
-    const errors: any[] = []
-
-    for (const run of runs ?? []) {
-      try {
-        // 2) trae lead email (prioriza lead_enriched)
-        const { data: leadE } = await supabase
-          .from("lead_enriched")
-          .select("email, name")
-          .eq("id", run.lead_id)
-          .maybeSingle()
-
-        const { data: lead } = await supabase
-          .from("leads")
-          .select("email, contact_name, company_name")
-          .eq("id", run.lead_id)
-          .maybeSingle()
-
-        const toEmail = (leadE?.email || lead?.email || "").trim()
-        if (!toEmail) throw new Error("Lead has no email")
-
-        // 3) elige sender activo (primero gmail QA si existe)
-        const { data: senderAcc, error: sErr } = await supabase
-          .from("domain_accounts")
-          .select("email, status")
-          .eq("status", "active")
-          .order("created_at", { ascending: true })
-          .limit(1)
-          .maybeSingle()
-        if (sErr || !senderAcc?.email) {
-          throw new Error("No active sender account")
-        }
-
-        const subject = run.payload?.subject || "Hello"
-        const body = run.payload?.body || "Hi there"
-        const bodyHtml = `<p>${body}</p>`
-
-        // 4) QA overrides para elastic free tier
-        const finalFrom = QA_FROM || senderAcc.email
-        const finalTo = QA_TO || toEmail
-
-        // 5) send
-        await sendElasticEmail({
-          apiKey: ELASTIC_KEY,
-          from: finalFrom,
-          to: finalTo,
-          subject,
-          bodyHtml,
-          bodyText: body,
-        })
-
-        // 6) mark sent
-        await supabase
-          .from("touch_runs")
-          .update({
-            status: "sent",
-            sent_at: new Date().toISOString(),
-            error: null,
-          })
-          .eq("id", run.id)
-
-        processed++
-      } catch (e: any) {
-        const msg = e?.message ?? String(e)
-        errors.push({ run_id: run.id, lead_id: run.lead_id, error: msg })
-
-        await supabase
-          .from("touch_runs")
-          .update({ status: "failed", error: msg })
-          .eq("id", run.id)
-      }
-    }
-
-    // 7) Log en core_memory_events (best-effort)
+  // URL del smart-router
+  const projectRef = (() => {
     try {
-      await logEvaluation({
-        supabase,
-        event_type: "evaluation",
-        actor: "dispatcher",
-        label: "dispatch_touch_email_v3",
-        kpis: {
-          channel: "email",
-          processed,
-          failed: errors.length,
-        },
-        notes:
-          errors.length === 0
-            ? "All email touches processed successfully"
-            : `Email dispatch completed with ${errors.length} errors`,
-      })
-    } catch (e) {
-      console.error("logEvaluation failed in dispatch-touch-email", e)
+      const url = new URL(SB_URL)
+      const host = url.hostname
+      return host.split(".")[0]
+    } catch {
+      return null
     }
+  })()
 
-    return new Response(
-      JSON.stringify({ ok: true, version: VERSION, processed, errors }),
-      {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
-    )
-  } catch (e: any) {
+  const smartRouterUrl = projectRef
+    ? `https://${projectRef}.functions.supabase.co/dispatch-touch-smart-router`
+    : null
+
+  //────────────────────────────────────────
+  // 1) TRAER TOUCH RUNS EMAIL
+  //────────────────────────────────────────
+  const { data: runs, error: rErr } = await supabase
+    .from("touch_runs")
+    .select("id, lead_id, account_id, payload, scheduled_at, step, status")
+    .eq("channel", "email")
+    .in("status", ["queued", "scheduled"])
+    .order("scheduled_at", { ascending: true })
+    .limit(limit)
+
+  if (rErr) {
     return new Response(
       JSON.stringify({
         ok: false,
-        stage: "fatal",
-        error: e?.message ?? String(e),
+        stage: "select_runs",
+        error: rErr.message,
         version: VERSION,
       }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
+      { status: 500, headers: corsHeaders },
     )
   }
+
+  if (!runs?.length) {
+    await logEvaluation(supabase, {
+      event_source: "dispatcher",
+      label: "email_empty",
+      kpis: { processed: 0, failed: 0 },
+      notes: "No email runs to dispatch",
+    })
+
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        version: VERSION,
+        processed: 0,
+        failed: 0,
+        dryRun,
+      }),
+      { headers: corsHeaders },
+    )
+  }
+
+  //────────────────────────────────────────
+  // 2) LOOP PRINCIPAL
+  //────────────────────────────────────────
+  let processed = 0
+  const errors: any[] = []
+
+  for (const run of runs) {
+    try {
+      if (!run.account_id) {
+        throw new Error("missing_account_id_on_run")
+      }
+
+      // 2.1 Resolver proveedor para esta cuenta/canal
+      const { data: providerRow, error: provErr } = await supabase
+        .from("account_provider_settings")
+        .select("provider, config")
+        .eq("account_id", run.account_id)
+        .eq("channel", "email")
+        .eq("is_default", true)
+        .maybeSingle()
+
+      if (provErr) {
+        throw new Error(`provider_lookup_failed:${provErr.message}`)
+      }
+      if (!providerRow?.provider) {
+        throw new Error("no_default_provider_for_account_email")
+      }
+
+      const provider = providerRow.provider
+      const config = (providerRow.config ?? {}) as Record<string, unknown>
+
+      if (provider !== "elastic_email") {
+        throw new Error(`unsupported_provider:${provider}`)
+      }
+
+      if (!ELASTIC_API_KEY || !ELASTIC_FROM) {
+        throw new Error("missing_elastic_env")
+      }
+
+      // 2.2 Resolver email del lead (lead_enriched primero)
+      const { data: leadE, error: leErr } = await supabase
+        .from("lead_enriched")
+        .select("email")
+        .eq("id", run.lead_id)
+        .maybeSingle()
+
+      if (leErr) {
+        throw new Error("lead_enriched_lookup_failed")
+      }
+
+      const emailRaw = cleanEmail(leadE?.email ?? null)
+
+      if (!isValidEmail(emailRaw)) {
+        throw new Error(`invalid_email:${emailRaw}`)
+      }
+
+      const to = emailRaw!
+
+      const payload = (run.payload ?? {}) as any
+      const subject: string =
+        payload.subject ||
+        payload.title ||
+        "Actualiza tu sistema de generación de clientes"
+
+      const bodyHtml: string =
+        payload.body_html ||
+        payload.html ||
+        `<p>${payload.body ?? "Hola, esto es un correo de prueba de Revenue ASI."}</p>`
+
+      const bodyText: string =
+        payload.body_text ||
+        payload.body ||
+        "Hola, esto es un correo de prueba de Revenue ASI."
+
+      // 2.3 (opcional) marcar como processing
+      await supabase
+        .from("touch_runs")
+        .update({
+          status: "processing",
+          executed_at: new Date().toISOString(),
+          error: null,
+        })
+        .eq("id", run.id)
+
+      // 2.4 Enviar por Elastic Email (si no dryRun)
+      if (!dryRun) {
+        const resp = await fetch(
+          "https://api.elasticemail.com/v4/emails/transactional",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-ElasticEmail-ApiKey": ELASTIC_API_KEY,
+            },
+            body: JSON.stringify({
+              Recipients: [
+                {
+                  Email: to,
+                },
+              ],
+              Content: {
+                From: ELASTIC_FROM,
+                FromName: ELASTIC_FROM_NAME,
+                Subject: subject,
+                Body: [
+                  {
+                    ContentType: "HTML",
+                    Charset: "utf-8",
+                    Content: bodyHtml,
+                  },
+                  {
+                    ContentType: "PlainText",
+                    Charset: "utf-8",
+                    Content: bodyText,
+                  },
+                ],
+              },
+            }),
+          },
+        )
+
+        if (!resp.ok) {
+          const txt = await resp.text()
+          throw new Error(`ElasticEmail error: ${txt}`)
+        }
+      }
+
+      // 2.5 Marcar como enviado
+      const sentAtIso = new Date().toISOString()
+
+      await supabase
+        .from("touch_runs")
+        .update({
+          status: "sent",
+          sent_at: sentAtIso,
+          payload: {
+            ...(payload ?? {}),
+            to,
+            to_normalized: to,
+            dryRun,
+            provider,
+            provider_config: config,
+          },
+          error: null,
+        })
+        .eq("id", run.id)
+
+      processed++
+
+      await logEvaluation(supabase, {
+        lead_id: run.lead_id,
+        event_source: "dispatcher",
+        label: "email_sent",
+        kpis: { processed, failed: errors.length },
+        notes: `provider=${provider}, dryRun=${dryRun}`,
+      })
+
+      // 2.6 🔗 SMART ROUTER (solo si no es dryRun)
+      if (!dryRun && smartRouterUrl) {
+        try {
+          await fetch(smartRouterUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              apikey: SB_KEY,
+              Authorization: `Bearer ${SB_KEY}`,
+            },
+            body: JSON.stringify({
+              lead_id: run.lead_id,
+              step: run.step ?? 1,
+              dry_run: false,
+              source: "email_dispatcher",
+            }),
+          })
+        } catch (routerErr) {
+          console.error("Smart router call failed (email):", routerErr)
+          // no rompemos el envío por culpa del router
+        }
+      }
+    } catch (e: any) {
+      const msg = e?.message ?? String(e)
+      errors.push({ id: run.id, lead_id: run.lead_id, error: msg })
+
+      await supabase
+        .from("touch_runs")
+        .update({
+          status: "failed",
+          error: msg,
+        })
+        .eq("id", run.id)
+
+      await logEvaluation(supabase, {
+        lead_id: run.lead_id,
+        event_source: "dispatcher",
+        label: "email_failed",
+        kpis: { processed, failed: errors.length },
+        notes: msg,
+      })
+    }
+  }
+
+  //────────────────────────────────────────
+  // 3) LOG RESUMEN
+  //────────────────────────────────────────
+  await logEvaluation(supabase, {
+    event_source: "dispatcher",
+    label: "email_summary",
+    kpis: { processed, failed: errors.length },
+    notes: errors.length
+      ? `${errors.length} errors`
+      : "All email messages delivered",
+  })
+
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      version: VERSION,
+      processed,
+      failed: errors.length,
+      errors,
+      dryRun,
+    }),
+    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+  )
 })
