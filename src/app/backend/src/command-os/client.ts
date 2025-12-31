@@ -5,7 +5,12 @@ export const COMMAND_OS_VERSION = "v1"
 
 export type CommandOsIntent =
   | "system.status"
+  | "system.metrics"
+  | "system.kill_switch"
+  | "enc24.autos_usados.start"
   | "touch.simulate"
+  | "touch.list"
+  | "touch.inspect"
   | "lead.inspect"
   | "lead.inspect.latest"
   | "lead.list.recents"
@@ -14,6 +19,13 @@ export type CommandOsIntent =
   | "campaign.list"
   | "campaign.inspect"
   | "campaign.create"
+  | "campaign.toggle"
+  | "campaign.metrics"
+  | "orchestrator.run"
+  | "dispatcher.run"
+  | "enrichment.run"
+  | "appointment.list"
+  | "appointment.inspect"
 
 export interface CommandOsResponse {
   version: string
@@ -49,16 +61,28 @@ Responde SOLO con un JSON válido (sin texto fuera):
 }
 
 INTENTS SOPORTADOS EN ESTE BUILD
-- "system.status"
-- "touch.simulate"
-- "lead.inspect"
-- "lead.inspect.latest"
-- "lead.list.recents"
-- "lead.enroll"
-- "lead.update"
-- "campaign.list"
-- "campaign.inspect"
-- "campaign.create"
+- "system.status" - Estado general del sistema
+- "system.metrics" - Métricas y KPIs del sistema
+- "system.kill_switch" - Ver/controlar kill switch global
+- "enc24.autos_usados.start" - Buscar autos usados en Panamá (stage1 collect + enqueue reveal)
+- "touch.simulate" - Simular touches
+- "touch.list" - Listar touch_runs con filtros
+- "touch.inspect" - Ver detalle de un touch_run
+- "lead.inspect" - Inspeccionar lead por id/email/phone/nombre
+- "lead.inspect.latest" - Ver el último lead creado
+- "lead.list.recents" - Listar leads recientes
+- "lead.enroll" - Enrolar leads en campañas
+- "lead.update" - Actualizar campos de un lead
+- "campaign.list" - Listar campañas
+- "campaign.inspect" - Ver detalle de campaña
+- "campaign.create" - Crear nueva campaña
+- "campaign.toggle" - Activar/desactivar campaña
+- "campaign.metrics" - Métricas de una campaña
+- "orchestrator.run" - Ejecutar orchestrator manualmente
+- "dispatcher.run" - Ejecutar dispatcher manualmente
+- "enrichment.run" - Ejecutar enrichment manualmente
+- "appointment.list" - Listar appointments
+- "appointment.inspect" - Ver detalle de appointment
 
 REGLA CRÍTICA: "último lead"
 - Si el usuario dice: "último lead", "más reciente" + "inspeccionar/ver"
@@ -69,9 +93,19 @@ REGLAS DE SEGURIDAD
 - No inventes campos. Usa solo lo que el usuario te dio + context.
 
 CÓMO ELEGIR
-- Ver info => lead.inspect, lead.inspect.latest, lead.list.recents, campaign.inspect, campaign.list, system.status
-- Cambiar => lead.update, lead.enroll
-- Simular => touch.simulate
+- Ver info => lead.inspect, lead.inspect.latest, lead.list.recents, campaign.inspect, campaign.list, campaign.metrics, system.status, system.metrics, touch.list, touch.inspect, appointment.list, appointment.inspect
+- Cambiar => lead.update, lead.enroll, campaign.toggle, system.kill_switch
+- Simular/Ejecutar => touch.simulate, orchestrator.run, dispatcher.run, enrichment.run
+- Control => campaign.toggle, system.kill_switch
+
+EJEMPLOS DE USO
+- "dame métricas del sistema" => system.metrics
+- "vamos a buscar carros usados en panamá" => enc24.autos_usados.start (country: "PA", limit: 50)
+- "muéstrame la campaña X" => campaign.inspect (campaign_name: "X")
+- "activa la campaña Y" => campaign.toggle (campaign_name: "Y", is_active: true)
+- "ejecuta el orchestrator de touch" => orchestrator.run (orchestrator: "touch")
+- "lista los últimos 20 touches" => touch.list (limit: 20)
+- "muéstrame appointments de hoy" => appointment.list (status: "scheduled")
 
 FIN >>>
 ` as const
