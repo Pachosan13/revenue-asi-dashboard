@@ -20,7 +20,13 @@ $$;
 -- 2) Table-level constraint (NOT VALID so existing bad rows don't break migrations).
 do $$
 begin
-  if not exists (
+  if exists (
+    select 1
+    from pg_class t
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'lead_hunter'
+      and t.relname = 'enc24_reveal_tasks'
+  ) and not exists (
     select 1
     from pg_constraint c
     join pg_class t on t.oid = c.conrelid
@@ -40,13 +46,24 @@ end$$;
 
 -- 3) Cleanup: mark known-bad queued tasks as failed so they don't pollute the queue.
 -- NOTE: does not delete rows (preserves audit).
-update lead_hunter.enc24_reveal_tasks
-set
-  status = 'failed',
-  last_error = 'invalid_listing_url_format',
-  updated_at = now()
-where status = 'queued'
-  and not lead_hunter.is_valid_enc24_listing_url(listing_url);
+do $$
+begin
+  if exists (
+    select 1
+    from pg_class t
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'lead_hunter'
+      and t.relname = 'enc24_reveal_tasks'
+  ) then
+    update lead_hunter.enc24_reveal_tasks
+    set
+      status = 'failed',
+      last_error = 'invalid_listing_url_format',
+      updated_at = now()
+    where status = 'queued'
+      and not lead_hunter.is_valid_enc24_listing_url(listing_url);
+  end if;
+end$$;
 
 -- 4) Patch existing 2-arg claimer to skip invalid URLs.
 create or replace function lead_hunter.claim_enc24_reveal_tasks(p_worker_id text, p_limit integer default 5)
