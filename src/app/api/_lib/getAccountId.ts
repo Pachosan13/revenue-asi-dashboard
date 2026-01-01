@@ -10,6 +10,11 @@ type AccountContext = {
   role: string
 }
 
+function isLocalSupabaseUrl() {
+  const u = process.env.NEXT_PUBLIC_SUPABASE_URL ?? ""
+  return /localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(u)
+}
+
 function cookieAdapter(req?: NextRequest) {
   // ✅ API route: usa req.cookies (esto es lo que funciona en Next 16)
   if (req) {
@@ -49,7 +54,35 @@ export async function getAccountContext(req?: NextRequest): Promise<AccountConte
     .maybeSingle()
 
   if (mErr) throw new Error(`Membership lookup failed: ${mErr.message}`)
-  if (!m?.account_id) throw new Error("Unauthorized: no membership in account_members")
+  if (!m?.account_id) {
+    // Local-only convenience: auto-provision a default account + membership for the logged-in user.
+    // This prevents Command OS from being unusable right after `supabase db reset`.
+    if (!isLocalSupabaseUrl()) throw new Error("Unauthorized: no membership in account_members")
+
+    const { data: acct, error: aErr } = await supabase
+      .from("accounts")
+      .insert({ name: "Local Account" })
+      .select("id")
+      .single()
+
+    if (aErr) throw new Error(`Account auto-provision failed: ${aErr.message}`)
+
+    const { error: amErr } = await supabase.from("account_members").insert({
+      account_id: acct.id,
+      user_id: userId,
+      role: "owner",
+    })
+
+    if (amErr) throw new Error(`Membership auto-provision failed: ${amErr.message}`)
+
+    return {
+      supabase,
+      user: { id: userId, email: auth.user.email ?? null },
+      userId,
+      accountId: acct.id as string,
+      role: "owner",
+    }
+  }
 
   return {
     supabase,

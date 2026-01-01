@@ -457,6 +457,10 @@ type KnownIntent =
   | "system.metrics"
   | "system.kill_switch"
   | "enc24.autos_usados.start"
+  | "enc24.autos_usados.voice_start"
+  | "enc24.autos_usados.autopilot.start"
+  | "enc24.autos_usados.autopilot.stop"
+  | "enc24.autos_usados.autopilot.status"
   | "touch.simulate"
   | "touch.list"
   | "touch.inspect"
@@ -595,17 +599,94 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
   const intent = cmd.intent as KnownIntent
   const args = (cmd.args ?? {}) as Record<string, any>
 
+  const panamaNow = () => {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Panama",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date())
+    const hh = Number(parts.find((p) => p.type === "hour")?.value ?? "0")
+    const mm = Number(parts.find((p) => p.type === "minute")?.value ?? "0")
+    return { hh, mm }
+  }
+
   try {
     switch (intent) {
+      case "enc24.autos_usados.autopilot.start": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const country = typeof args.country === "string" && args.country.trim() ? args.country.trim().toUpperCase() : "PA"
+        const intervalMinutes = Math.min(Math.max(Number(args.interval_minutes ?? 5), 1), 60)
+        const maxNew = Math.min(Math.max(Number(args.max_new_per_tick ?? 2), 1), 5)
+        const startHour = Math.min(Math.max(Number(args.start_hour ?? 8), 0), 23)
+        const endHour = Math.min(Math.max(Number(args.end_hour ?? 19), 0), 23)
+
+        const { error } = await supabase
+          .schema("lead_hunter")
+          .from("enc24_autopilot_settings")
+          .upsert(
+            {
+              account_id: accountId,
+              enabled: true,
+              country,
+              interval_minutes: intervalMinutes,
+              max_new_per_tick: maxNew,
+              start_hour: startHour,
+              end_hour: endHour,
+              updated_at: new Date().toISOString(),
+            } as any,
+            { onConflict: "account_id" },
+          )
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: "autopilot.start failed", details: error.message } }
+        }
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId, country, intervalMinutes, maxNew, startHour, endHour },
+          data: { enabled: true, note: "Autopilot enabled. Run the daemon worker to execute ticks." },
+        }
+      }
+
+      case "enc24.autos_usados.autopilot.stop": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const { error } = await supabase
+          .schema("lead_hunter")
+          .from("enc24_autopilot_settings")
+          .upsert({ account_id: accountId, enabled: false, updated_at: new Date().toISOString() } as any, { onConflict: "account_id" })
+        if (error) return { ok: false, intent, args, data: { error: "autopilot.stop failed", details: error.message } }
+        return { ok: true, intent, args: { account_id: accountId }, data: { enabled: false } }
+      }
+
+      case "enc24.autos_usados.autopilot.status": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const { data, error } = await supabase
+          .schema("lead_hunter")
+          .from("enc24_autopilot_settings")
+          .select("*")
+          .eq("account_id", accountId)
+          .maybeSingle()
+        if (error) return { ok: false, intent, args, data: { error: "autopilot.status failed", details: error.message } }
+        return { ok: true, intent, args: { account_id: accountId }, data: { settings: data ?? { account_id: accountId, enabled: false } } }
+      }
       case "enc24.autos_usados.start": {
         const accountId = requireAccountId(args, intent)
         const supabase = getSupabaseAdmin()
 
         const country = typeof args.country === "string" && args.country.trim() ? args.country.trim().toUpperCase() : "PA"
-        const limit = Math.min(Math.max(Number(args.limit ?? 50), 1), 500)
+        // Soft defaults: collect only 1–2 new listings per run to reduce anti-bot triggers.
+        const limit = Math.min(Math.max(Number(args.limit ?? 2), 1), 500)
         const maxPages = Math.min(Math.max(Number(args.max_pages ?? args.maxPages ?? 1), 1), 5)
         const minYear = Math.min(Math.max(Number(args.min_year ?? args.minYear ?? 2014), 1990), 2035)
-        const enqueueLimit = Math.min(Math.max(Number(args.enqueue_limit ?? 200), 1), 5000)
+        const enqueueLimit = Math.min(Math.max(Number(args.enqueue_limit ?? limit), 1), 5000)
+        const businessHoursOnly = args.business_hours_only !== false
+        const startHour = Math.min(Math.max(Number(args.start_hour ?? 8), 0), 23)
+        const endHour = Math.min(Math.max(Number(args.end_hour ?? 19), 0), 23)
 
         if (country !== "PA") {
           return {
@@ -613,6 +694,18 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
             intent,
             args: { ...args, country },
             data: { error: "Por ahora solo soportamos Panamá (country=PA) para Encuentra24 autos usados." },
+          }
+        }
+
+        if (businessHoursOnly) {
+          const { hh } = panamaNow()
+          if (!(hh >= startHour && hh < endHour)) {
+            return {
+              ok: true,
+              intent,
+              args: { account_id: accountId, country, limit, maxPages, minYear, enqueueLimit, businessHoursOnly, startHour, endHour },
+              data: { skipped: true, reason: "outside_business_hours", tz: "America/Panama", hour: hh },
+            }
           }
         }
 
@@ -630,7 +723,16 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
             Authorization: `Bearer ${key}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ account_id: accountId, country, limit, maxPages, minYear }),
+          body: JSON.stringify({
+            account_id: accountId,
+            country,
+            limit,
+            maxPages,
+            minYear,
+            businessHoursOnly,
+            startHour,
+            endHour,
+          }),
         })
 
         const collectText = await collectRes.text().catch(() => "")
@@ -662,12 +764,314 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
         return {
           ok: true,
           intent,
-          args: { account_id: accountId, country, limit, maxPages, minYear, enqueueLimit },
+          args: { account_id: accountId, country, limit, maxPages, minYear, enqueueLimit, businessHoursOnly, startHour, endHour },
           data: {
             collected: collectJson,
             enqueued: enq,
             note:
               "La cola quedó preparada. Para producción necesitas el reveal worker corriendo (CDP Chrome real) para consumir lead_hunter.enc24_reveal_tasks.",
+          },
+        }
+      }
+
+      case "enc24.autos_usados.voice_start": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+
+        const country = typeof args.country === "string" && args.country.trim() ? args.country.trim().toUpperCase() : "PA"
+        const limit = Math.min(Math.max(Number(args.limit ?? 2), 1), 500)
+        const maxPages = Math.min(Math.max(Number(args.max_pages ?? args.maxPages ?? 1), 1), 5)
+        const minYear = Math.min(Math.max(Number(args.min_year ?? args.minYear ?? 2014), 1990), 2035)
+        const enqueueLimit = Math.min(Math.max(Number(args.enqueue_limit ?? limit), 1), 5000)
+        const promoteLimit = Math.min(Math.max(Number(args.promote_limit ?? limit), 1), 500)
+        const dispatchNow = Boolean(args.dispatch_now ?? false)
+        const dryRun = Boolean(args.dry_run ?? true)
+        const businessHoursOnly = args.business_hours_only !== false
+        const startHour = Math.min(Math.max(Number(args.start_hour ?? 8), 0), 23)
+        const endHour = Math.min(Math.max(Number(args.end_hour ?? 19), 0), 23)
+
+        if (country !== "PA") {
+          return {
+            ok: false,
+            intent,
+            args: { ...args, country },
+            data: { error: "Por ahora solo soportamos Panamá (country=PA) para Encuentra24 autos usados." },
+          }
+        }
+
+        if (businessHoursOnly) {
+          const { hh } = panamaNow()
+          if (!(hh >= startHour && hh < endHour)) {
+            return {
+              ok: true,
+              intent,
+              args: { account_id: accountId, country, limit, maxPages, minYear, enqueueLimit, promoteLimit, dispatchNow, dryRun, businessHoursOnly, startHour, endHour },
+              data: { skipped: true, reason: "outside_business_hours", tz: "America/Panama", hour: hh },
+            }
+          }
+        }
+
+        const url = process.env.SUPABASE_URL
+        const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+        if (!url || !key) {
+          return { ok: false, intent, args, data: { error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" } }
+        }
+
+        // 1) Collect stage1
+        const collectRes = await fetch(`${url}/functions/v1/enc24-collect-stage1`, {
+          method: "POST",
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            account_id: accountId,
+            country,
+            limit,
+            maxPages,
+            minYear,
+            businessHoursOnly,
+            startHour,
+            endHour,
+          }),
+        })
+
+        const collectText = await collectRes.text().catch(() => "")
+        let collectJson: any = null
+        try {
+          collectJson = collectText ? JSON.parse(collectText) : null
+        } catch {
+          collectJson = { raw: collectText }
+        }
+
+        if (!collectRes.ok || !collectJson?.ok) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: { error: "enc24-collect-stage1 failed", status: collectRes.status, result: collectJson },
+          }
+        }
+
+        // 2) Enqueue reveal tasks
+        const { data: enq, error: enqErr } = await supabase
+          .schema("lead_hunter")
+          .rpc("enqueue_enc24_reveal_tasks", { p_limit: enqueueLimit })
+
+        if (enqErr) {
+          return { ok: false, intent, args, data: { error: "enqueue_enc24_reveal_tasks failed", details: enqErr.message } }
+        }
+
+        // 3) Promote revealed phones -> public.leads (idempotent by account+phone)
+        const { data: encRows, error: encErr } = await supabase
+          .schema("lead_hunter")
+          .from("enc24_listings")
+          .select("id, account_id, listing_url, seller_name, phone_e164, raw, first_seen_at, last_seen_at")
+          .eq("account_id", accountId)
+          .not("phone_e164", "is", null)
+          .order("last_seen_at", { ascending: false })
+          .limit(promoteLimit)
+
+        if (encErr) {
+          return { ok: false, intent, args, data: { error: "read enc24_listings failed", details: encErr.message } }
+        }
+
+        const phones = Array.from(new Set((encRows ?? []).map((r: any) => String(r.phone_e164 ?? "").trim()).filter(Boolean)))
+        let existingPhones = new Set<string>()
+        if (phones.length) {
+          const { data: existing, error: exErr } = await supabase
+            .from("leads")
+            .select("phone")
+            .eq("account_id", accountId)
+            .in("phone", phones)
+          if (!exErr && existing) existingPhones = new Set(existing.map((r: any) => String(r.phone ?? "").trim()).filter(Boolean))
+        }
+
+        const toInsert = (encRows ?? [])
+          .filter((r: any) => {
+            const p = String(r.phone_e164 ?? "").trim()
+            return p && !existingPhones.has(p)
+          })
+          .map((r: any) => ({
+            account_id: accountId,
+            phone: String(r.phone_e164).trim(),
+            contact_name: r.seller_name ? String(r.seller_name).trim() : null,
+            company: null,
+            lead_state: "new",
+            status: "new",
+            enriched: {
+              source: "encuentra24",
+              listing_url: r.listing_url,
+              listing_id: r.id,
+              title: r?.raw?.listing_text ?? null,
+            },
+          }))
+
+        let promoted = 0
+        if (toInsert.length) {
+          const { error: insErr } = await supabase.from("leads").insert(toInsert)
+          if (insErr) {
+            return { ok: false, intent, args, data: { error: "promote to public.leads failed", details: insErr.message } }
+          }
+          promoted = toInsert.length
+        }
+
+        // 4) Ensure a VOICE campaign exists + step1
+        const campaignKey = "enc24-autos-usados-pa-voice-v1"
+        let campaignId: string | null = null
+        {
+          const { data: c, error: cErr } = await supabase
+            .from("campaigns")
+            .select("id")
+            .eq("account_id", accountId)
+            .eq("campaign_key", campaignKey)
+            .maybeSingle()
+
+          if (cErr) return { ok: false, intent, args, data: { error: "campaign lookup failed", details: cErr.message } }
+
+          if (c?.id) {
+            campaignId = c.id as string
+          } else {
+            const { data: created, error: crErr } = await supabase
+              .from("campaigns")
+              .insert({
+                account_id: accountId,
+                campaign_key: campaignKey,
+                name: "Enc24 Autos Usados PA — Voice",
+                type: "outbound",
+                status: "active",
+              })
+              .select("id")
+              .single()
+            if (crErr) return { ok: false, intent, args, data: { error: "campaign create failed", details: crErr.message } }
+            campaignId = created.id as string
+          }
+        }
+
+        // step 1 voice (idempotent)
+        {
+          const { data: st, error: stErr } = await supabase
+            .from("campaign_steps")
+            .select("id")
+            .eq("campaign_id", campaignId!)
+            .eq("step", 1)
+            .eq("channel", "voice")
+            .eq("account_id", accountId)
+            .maybeSingle()
+
+          if (stErr) return { ok: false, intent, args, data: { error: "campaign_steps lookup failed", details: stErr.message } }
+
+          if (!st?.id) {
+            const { error: insErr } = await supabase.from("campaign_steps").insert({
+              account_id: accountId,
+              campaign_id: campaignId!,
+              step: 1,
+              channel: "voice",
+              delay_minutes: 0,
+              is_active: true,
+              payload: {
+                delivery: {
+                  body:
+                    "Hola, ¿hablo con {contact_name}? Vi tu anuncio en Encuentra24. Te llamo rápido: trabajamos con dueños particulares para vender el carro más rápido. ¿Te interesa que te explique cómo funciona?",
+                },
+              },
+            })
+            if (insErr) return { ok: false, intent, args, data: { error: "campaign_steps insert failed", details: insErr.message } }
+          }
+        }
+
+        // 5) Enroll promoted/existing leads by phone -> campaign_leads
+        // Fetch leads by the phones we just saw (both new and existing), then upsert enrollments.
+        const phonesToEnroll = phones.slice(0, promoteLimit)
+        let enrolled = 0
+        if (phonesToEnroll.length) {
+          const { data: leads, error: lErr } = await supabase
+            .from("leads")
+            .select("id, phone")
+            .eq("account_id", accountId)
+            .in("phone", phonesToEnroll)
+
+          if (lErr) return { ok: false, intent, args, data: { error: "lead lookup for enroll failed", details: lErr.message } }
+
+          const rows = (leads ?? []).map((l: any) => ({
+            account_id: accountId,
+            campaign_id: campaignId!,
+            lead_id: l.id,
+            status: "active",
+            next_action_at: new Date().toISOString(),
+          }))
+
+          if (rows.length) {
+            const { error: eErr } = await supabase
+              .from("campaign_leads")
+              .upsert(rows, { onConflict: "account_id,campaign_id,lead_id", ignoreDuplicates: true })
+            if (eErr) return { ok: false, intent, args, data: { error: "campaign_leads upsert failed", details: eErr.message } }
+            enrolled = rows.length
+          }
+        }
+
+        // 6) Orchestrate -> touch_runs (uses service role auth fallback in the function)
+        const orchRes = await fetch(`${url}/functions/v1/touch-orchestrator-v7`, {
+          method: "POST",
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ account_id: accountId, limit: 200, dry_run: dryRun }),
+        })
+        const orchText = await orchRes.text().catch(() => "")
+        let orchJson: any = null
+        try { orchJson = orchText ? JSON.parse(orchText) : null } catch { orchJson = { raw: orchText } }
+
+        if (!orchRes.ok || orchJson?.ok !== true) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: { error: "touch-orchestrator-v7 failed", status: orchRes.status, result: orchJson },
+          }
+        }
+
+        // 7) Optionally dispatch voice
+        let dispatchJson: any = null
+        if (dispatchNow) {
+          const dRes = await fetch(`${url}/functions/v1/dispatch-touch-voice-v5`, {
+            method: "POST",
+            headers: {
+              apikey: key,
+              Authorization: `Bearer ${key}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ account_id: accountId, limit: 50, dry_run: dryRun }),
+          })
+          const dText = await dRes.text().catch(() => "")
+          try { dispatchJson = dText ? JSON.parse(dText) : null } catch { dispatchJson = { raw: dText } }
+          if (!dRes.ok || dispatchJson?.ok !== true) {
+            return {
+              ok: false,
+              intent,
+              args,
+              data: { error: "dispatch-touch-voice-v5 failed", status: dRes.status, result: dispatchJson },
+            }
+          }
+        }
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId, country, limit, maxPages, minYear, enqueueLimit, promoteLimit, dispatchNow, dryRun },
+          data: {
+            collected: collectJson,
+            enqueued: enq,
+            promoted,
+            enrolled,
+            campaign_id: campaignId,
+            orchestrator: orchJson,
+            dispatcher: dispatchJson,
+            note:
+              "Si dry_run=true no se insertan touch_runs reales / no se dispara Twilio. Para producción: corre el reveal worker y pon dispatch_now=true + configura Twilio env.",
           },
         }
       }

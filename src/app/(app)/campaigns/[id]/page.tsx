@@ -169,12 +169,12 @@ export default function CampaignDetailPage() {
     setStartFeedback(null)
 
     try {
-      const response = await fetch("/functions/v1/start-campaign", {
+      const response = await fetch("/api/campaigns/start", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ campaign_id: campaign.id }),
+        body: JSON.stringify({ campaign_id: campaign.id, dry_run: true }),
       })
 
       let payload: StartCampaignResponse | null = null

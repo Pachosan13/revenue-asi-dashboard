@@ -12,7 +12,7 @@ type CommandOsBody = {
 }
 
 function getOpenAIClient() {
-  const key = process.env.OPENAI_API_KEY
+  const key = process.env.OPENAI_API_KEY ?? process.env.OPEN_API_KEY
   if (!key) return null
   return new OpenAI({ apiKey: key })
 }
@@ -165,6 +165,24 @@ export async function POST(req: NextRequest) {
   } catch (e: any) {
     const msg = e?.message ?? "Unknown error"
     const status = msg.includes("Unauthorized") ? 401 : 500
-    return NextResponse.json({ ok: false, error: msg }, { status })
+    const artifacts = {
+      ok: false,
+      intent: "system.status",
+      args: {},
+      data: { error: msg },
+    }
+    return NextResponse.json(
+      {
+        ok: false,
+        version: "v1",
+        intent: "system.status",
+        explanation: "",
+        confidence: 0,
+        assistant_message: `No pude ejecutar el comando. Motivo: ${msg}`,
+        artifacts,
+        error: msg,
+      },
+      { status },
+    )
   }
 }

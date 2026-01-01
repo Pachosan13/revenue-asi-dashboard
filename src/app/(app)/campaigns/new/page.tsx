@@ -54,46 +54,28 @@ export default function NewCampaignPage() {
       return
     }
 
-    // ✅ si por alguna razón el entorno no tiene env vars, no explotes
-    if (!supabase) {
-      setError(
-        "Supabase no está configurado en este entorno (missing NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY).",
-      )
-      return
-    }
-
     setLoading(true)
     setError(null)
 
-    // ⚠️ IMPORTANTE:
-    // Para NO romper tu esquema actual, solo guardamos campos seguros.
-    const payload = {
-      name: name.trim(),
-      type,
-      status: "draft",
-      // Si luego creas columnas extra, puedes ir agregando:
-      // niche,
-      // geo,
-      // icp,
-      // description,
-      // daily_limit: dailyLimit,
-      // message_initial: firstMessage,
-    }
+    try {
+      const res = await fetch("/api/campaigns/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim(), type, status: "draft" }),
+      })
 
-    const { data, error } = await supabase
-      .from("campaigns")
-      .insert(payload)
-      .select("*")
-      .single()
+      const json = await res.json().catch(() => null)
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error ?? "Failed to create campaign")
+      }
 
-    if (error) {
-      console.error("Error creating campaign", error)
-      setError(error.message)
+      router.push(`/campaigns/${json.campaign.id}`)
+      return
+    } catch (e: any) {
+      setError(e?.message ?? "Failed to create campaign")
       setLoading(false)
       return
     }
-
-    router.push(`/campaigns/${data.id}`)
   }
 
   return (

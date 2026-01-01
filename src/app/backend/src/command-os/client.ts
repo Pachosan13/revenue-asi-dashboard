@@ -8,6 +8,10 @@ export type CommandOsIntent =
   | "system.metrics"
   | "system.kill_switch"
   | "enc24.autos_usados.start"
+  | "enc24.autos_usados.voice_start"
+  | "enc24.autos_usados.autopilot.start"
+  | "enc24.autos_usados.autopilot.stop"
+  | "enc24.autos_usados.autopilot.status"
   | "touch.simulate"
   | "touch.list"
   | "touch.inspect"
@@ -65,6 +69,10 @@ INTENTS SOPORTADOS EN ESTE BUILD
 - "system.metrics" - Métricas y KPIs del sistema
 - "system.kill_switch" - Ver/controlar kill switch global
 - "enc24.autos_usados.start" - Buscar autos usados en Panamá (stage1 collect + enqueue reveal)
+- "enc24.autos_usados.voice_start" - Buscar autos usados y preparar llamadas (collect + enqueue + promote + campaña voz + touch_runs)
+- "enc24.autos_usados.autopilot.start" - Encender autopilot (cada 5 min, 1–2 leads nuevos, 8am–7pm PTY)
+- "enc24.autos_usados.autopilot.stop" - Apagar autopilot
+- "enc24.autos_usados.autopilot.status" - Ver estado del autopilot
 - "touch.simulate" - Simular touches
 - "touch.list" - Listar touch_runs con filtros
 - "touch.inspect" - Ver detalle de un touch_run
@@ -100,7 +108,11 @@ CÓMO ELEGIR
 
 EJEMPLOS DE USO
 - "dame métricas del sistema" => system.metrics
-- "vamos a buscar carros usados en panamá" => enc24.autos_usados.start (country: "PA", limit: 50)
+- "vamos a buscar carros usados en panamá" => enc24.autos_usados.start (country: "PA", limit: 2, max_pages: 1)
+- "vamos a buscar carros usados en panamá y llamalos" => enc24.autos_usados.voice_start (country: "PA", limit: 2, promote_limit: 2, dispatch_now: false, dry_run: true)
+- "enciende el autopilot de encuentra24" => enc24.autos_usados.autopilot.start (interval_minutes: 5, max_new_per_tick: 2, start_hour: 8, end_hour: 19)
+- "apaga el autopilot de encuentra24" => enc24.autos_usados.autopilot.stop
+- "estado del autopilot de encuentra24" => enc24.autos_usados.autopilot.status
 - "muéstrame la campaña X" => campaign.inspect (campaign_name: "X")
 - "activa la campaña Y" => campaign.toggle (campaign_name: "Y", is_active: true)
 - "ejecuta el orchestrator de touch" => orchestrator.run (orchestrator: "touch")
@@ -116,9 +128,10 @@ let _openai: OpenAI | null = null
 function getOpenAI(): OpenAI {
   if (_openai) return _openai
 
-  const key = process.env.OPENAI_API_KEY
+  // Support both env names (some envs use OPEN_API_KEY by mistake)
+  const key = process.env.OPENAI_API_KEY ?? process.env.OPEN_API_KEY
   if (!key) {
-    throw new Error("Missing credentials. Please set OPENAI_API_KEY environment variable.")
+    throw new Error("Missing credentials. Please set OPENAI_API_KEY (or OPEN_API_KEY) environment variable.")
   }
 
   _openai = new OpenAI({ apiKey: key })
