@@ -17,6 +17,38 @@ function rand(min, max) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
 
+function normSpace(s) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+
+function isLikelyCommercialSellerName(name) {
+  const n = normSpace(name).toLowerCase();
+  if (!n) return false;
+
+  // Strong legal/entity signals
+  if (/\b(s\.a\.|sa\b|corp\b|inc\b|ltd\b|s\.r\.l\.|srl\b)\b/i.test(name)) return true;
+
+  // Common dealership / business tokens (Spanish + common brandings)
+  const tokens = [
+    "autos", "auto", "motors", "motor", "dealer", "agencia", "autolote", "showroom",
+    "financiamiento", "compramos", "vendemos", "ventas", "importadora", "consignación", "consignacion",
+    "rent a car", "rental", "flota", "stock", "super autos",
+  ];
+  for (const t of tokens) if (n.includes(t)) return true;
+
+  // Patterns like "SUPER AUTOS / SAID ..."
+  if (n.includes("/") && (n.includes("auto") || n.includes("autos") || n.includes("motor"))) return true;
+
+  // Very shouty long uppercase names often are businesses
+  const letters = String(name || "").replace(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/g, "");
+  if (letters.length >= 10) {
+    const upper = letters.replace(/[^A-ZÁÉÍÓÚÜÑ]/g, "").length;
+    if (upper / letters.length > 0.85 && normSpace(name).length >= 12) return true;
+  }
+
+  return false;
+}
+
 function extractListingId(listingUrl) {
   const m = String(listingUrl).match(/\/(\d{6,})\b/);
   return m ? m[1] : null;
@@ -106,6 +138,7 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
     dom_hits: [],
     shots: [],
     fill: {},
+    seller: {},
   };
 
   const FORM_PHONE8 = String(form.phone8 || "67777777").replace(/\D/g, "");
@@ -137,6 +170,10 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
   let context;
   let page;
   let usedPersistentContext = false;
+
+  // Seller meta (from the contact card header)
+  let seller_name = null;
+  let seller_is_business = false;
 
   // Candidates (strict)
   const phoneCandidates = new Map(); // e164 -> { where, url }
@@ -426,6 +463,206 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
     // sometimes header is inside another wrapper; fallback: right card
     const containerCount = await container.count().catch(() => 0);
     const card = containerCount ? container : page.locator("[class*='contact' i], [class*='seller' i], form").first();
+
+    // Extract seller name from the top of the same card (matches what you see in the UI: "Yara Pereyra", "SUPER AUTOS / SAID ...")
+    step("extract_seller_meta");
+    // Determine the "real" contact card root by anchoring on:
+    // - the "Enviar mensaje al vendedor" heading
+    // - action buttons (Contactar/Llamar/WhatsApp)
+    // - email input
+    // This avoids picking up page-level navigation text or dropdown option lists.
+    const sellerMeta2 = await page
+      .evaluate(() => {
+        const norm = (s) => String(s || "").replace(/\s+/g, " ").trim();
+        const txt = (el) => norm(el?.textContent || "");
+        const isVisible = (el) => {
+          try {
+            const cs = window.getComputedStyle(el);
+            if (!cs) return false;
+            if (cs.display === "none" || cs.visibility === "hidden") return false;
+            if (Number(cs.opacity || "1") <= 0) return false;
+            const r = el.getBoundingClientRect?.();
+            if (!r) return false;
+            if (r.width <= 0 || r.height <= 0) return false;
+            return true;
+          } catch {
+            return false;
+          }
+        };
+
+        const heading = Array.from(document.querySelectorAll("h1,h2,h3,h4,div,span,p"))
+          .find((el) => /enviar mensaje al vendedor/i.test(txt(el)));
+        if (!heading) return { seller_name: null, seller_is_business: false, source: "no_heading" };
+
+        // Find the best "contact card" element by walking up from the heading and picking the
+        // smallest ancestor that contains inputs + textarea + action buttons.
+        const hasFormInputs = (root) => (root?.querySelectorAll?.("input")?.length ?? 0) >= 1;
+        const hasTextarea = (root) => !!root?.querySelector?.("textarea");
+        const hasActions = (root) => {
+          const t = (root.textContent || "").toLowerCase();
+          return t.includes("contactar") || t.includes("whatsapp") || t.includes("llamar");
+        };
+        const isCard = (root) => hasFormInputs(root) && hasTextarea(root) && hasActions(root);
+
+        // Prefer finding the *actual* contact card on the right side (not the whole page layout):
+        // climb from the textarea (if present) and pick the smallest card-like container with a reasonable width.
+        const nearRoot = heading.closest("section,div,aside,article,form");
+        const textareaEl = nearRoot?.querySelector?.("textarea") || null;
+
+        let best = null;
+        let node = textareaEl || heading;
+        for (let i = 0; i < 14 && node; i++) {
+          node = node.parentElement;
+          if (!node) break;
+          const tag = (node.tagName || "").toLowerCase();
+          if (!["section", "div", "aside", "article", "form"].includes(tag)) continue;
+          if (!isCard(node)) continue;
+          const r = node.getBoundingClientRect?.();
+          if (!r || r.width <= 0 || r.height <= 0) continue;
+
+          // Heuristic bounds for the right-side card (avoid selecting the full page container)
+          if (r.width < 240 || r.width > 900) continue;
+          if (r.height < 260 || r.height > 1400) continue;
+
+          const area = r.width * r.height;
+          const prevArea = best?.area ?? Infinity;
+          if (area < prevArea) best = { el: node, rect: r, area };
+        }
+
+        const cardEl = best?.el || nearRoot;
+        const cardRect = (best?.rect || cardEl?.getBoundingClientRect?.() || null);
+        if (!cardEl || !cardRect) return { seller_name: null, seller_is_business: false, source: "no_card" };
+
+        // Heading rect can be wrong if there are multiple/hidden headings on the page.
+        // We compute it for debugging, but we do NOT use it to clamp the header band.
+        const headingRect = heading.getBoundingClientRect?.() ?? null;
+
+        const isPersonish = (s) => {
+          const t = norm(s);
+          if (!t || t.length < 3 || t.length > 60) return false;
+          if (/\d/.test(t)) return false;
+          if (/[|]/.test(t)) return false;
+          const low = t.toLowerCase();
+          const banned = [
+            "enviar mensaje al vendedor",
+            "completa tus datos",
+            "anterior",
+            "siguiente",
+            "marketplace",
+            "vehículos",
+            "vehiculos",
+            "publicar",
+            "dirección de e-mail",
+            "direccion de e-mail",
+            "nombre*",
+            "reportar abuso",
+            "comparte este anuncio",
+            "inicio",
+            "autos usados",
+            "vehículos",
+          ];
+          for (const b of banned) if (low === b || low.includes(b)) return false;
+          const parts = t.split(" ").filter(Boolean);
+          if (parts.length < 2 || parts.length > 5) return false;
+          if (!parts.every((p) => /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'.-]{2,}$/.test(p))) return false;
+          return true;
+        };
+
+        // Rectangle scan: look for visible text elements in the header band ABOVE the inputs/textarea card.
+        // Keep X bounds tight to the card so we never pick up global nav.
+        const topY = Math.max(0, cardRect.top - 340);
+        let bottomY = cardRect.top - 8;
+        // If for any reason the band collapses, keep a small header band.
+        if (bottomY - topY < 40) bottomY = cardRect.top + 40;
+        const leftX = cardRect.left - 2;
+        const rightX = cardRect.right + 2;
+
+        const candidates = [];
+        const anyCandidates = [];
+        const rawHits = [];
+        const els = Array.from(document.querySelectorAll("h1,h2,h3,h4,strong,b,a,span,div,p"));
+        for (const el of els) {
+          if (!el) continue;
+          if (el.closest("input,textarea,button,select,option")) continue;
+          if (el.closest("[role='listbox'],[role='option'],[aria-hidden='true'],[hidden]")) continue;
+          if (!isVisible(el)) continue;
+          const r = el.getBoundingClientRect?.();
+          if (!r) continue;
+          if (r.bottom <= topY || r.top >= bottomY) continue;
+          if (r.left < leftX || r.right > rightX) continue;
+          const t = txt(el);
+          if (!t || t.length < 3 || t.length > 80) continue;
+          rawHits.push({ t, top: r.top });
+
+          const low = t.toLowerCase();
+          const uiBanned =
+            /^reportar abuso$/i.test(t) ||
+            /^comparte este anuncio$/i.test(t) ||
+            /^enviar mensaje al vendedor$/i.test(t) ||
+            /^anterior$/i.test(t) ||
+            /^siguiente$/i.test(t) ||
+            /^\d{1,4}\/\d{1,5}$/.test(t) ||
+            low === "inicio";
+
+          if (!uiBanned) {
+            anyCandidates.push({ t, top: r.top });
+            if (isPersonish(t)) candidates.push({ t, top: r.top });
+          }
+        }
+
+        const imgs = Array.from(document.querySelectorAll("img[alt]"));
+        for (const img of imgs) {
+          try {
+            if (!isVisible(img)) continue;
+            const r = img.getBoundingClientRect?.();
+            if (!r) continue;
+            if (r.bottom <= topY || r.top >= bottomY) continue;
+            if (r.left < leftX || r.right > rightX) continue;
+            const alt = norm(img.getAttribute("alt") || "");
+            if (!alt || alt.length < 3 || alt.length > 80) continue;
+            rawHits.push({ t: alt, top: r.top });
+            anyCandidates.push({ t: alt, top: r.top });
+            if (isPersonish(alt)) candidates.push({ t: alt, top: r.top });
+          } catch {}
+        }
+
+        candidates.sort((a, b) => a.top - b.top);
+        anyCandidates.sort((a, b) => a.top - b.top);
+
+        // Prefer person-like names, fallback to any non-UI text in the band (business names).
+        const seller_name = candidates[0]?.t ?? anyCandidates[0]?.t ?? null;
+
+        const text = (cardEl.textContent || "").toLowerCase();
+        const domHintsBusiness =
+          text.includes("sucursal") ||
+          text.includes("empresa") ||
+          text.includes("agencia") ||
+          text.includes("dealer");
+
+        return {
+          seller_name,
+          seller_is_business: domHintsBusiness,
+          source: best ? "card_ancestor_min_area" : "card_closest",
+          debug: {
+            card_rect: { left: cardRect.left, right: cardRect.right, top: cardRect.top, bottom: cardRect.bottom },
+            band: { topY, bottomY, leftX, rightX, headingTop: headingRect?.top ?? null },
+            candidates_count: candidates.length,
+            candidates_top: candidates.slice(0, 6).map((c) => c.t),
+            any_candidates_count: anyCandidates.length,
+            any_candidates_top: anyCandidates.slice(0, 10).map((c) => c.t),
+            raw_count: rawHits.length,
+            raw_top: rawHits
+              .sort((a, b) => a.top - b.top)
+              .slice(0, 10)
+              .map((c) => c.t),
+          },
+        };
+      })
+      .catch(() => null);
+
+    seller_name = normSpace(sellerMeta2?.seller_name || "") || null;
+    seller_is_business = Boolean(sellerMeta2?.seller_is_business) || isLikelyCommercialSellerName(seller_name);
+    debug.seller = { seller_name, seller_is_business, source: sellerMeta2?.source || "unknown", ...(sellerMeta2?.debug || {}) };
 
     // Email input (required) — Encuentra24 sometimes uses type=text; don't assume type=email.
     // We scope to the contact card to avoid grabbing search inputs elsewhere.
@@ -834,6 +1071,8 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
         reason: "returned_phone_equals_form_phone",
         phone_e164,
         wa_link: null,
+        seller_name,
+        seller_is_business,
         debug,
       };
     }
@@ -847,6 +1086,8 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
         reason: "returned_phone_contains_listing_id",
         phone_e164: null,
         wa_link,
+        seller_name,
+        seller_is_business,
         debug,
       };
     }
@@ -858,6 +1099,8 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
       reason,
       phone_e164,
       wa_link,
+      seller_name,
+      seller_is_business,
       debug,
       elapsed_ms: Date.now() - t0,
     };
@@ -871,6 +1114,8 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
       reason: msg,
       phone_e164: null,
       wa_link: null,
+      seller_name,
+      seller_is_business,
       debug,
       elapsed_ms: Date.now() - t0,
     };

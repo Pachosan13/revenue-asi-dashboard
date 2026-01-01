@@ -119,8 +119,18 @@ async function applyResultToListing(db, listing_url, res) {
       stage = greatest(coalesce(stage,0), $3::int),
       method = nullif($4::text,''),
       reason = nullif($5::text,''),
-      phone_e164 = nullif($6::text,''),
-      wa_link = nullif($7::text,''),
+      -- Never erase previously captured contact data on a failed re-run.
+      phone_e164 = case
+        when $4::text = 'filtered_commercial_seller' then null
+        when nullif($6::text,'') is not null then nullif($6::text,'')
+        else phone_e164
+      end,
+      wa_link = case
+        when $4::text = 'filtered_commercial_seller' then null
+        when nullif($7::text,'') is not null then nullif($7::text,'')
+        else wa_link
+      end,
+      seller_name = case when nullif($9::text,'') is not null then nullif($9::text,'') else seller_name end,
       raw = coalesce(raw,'{}'::jsonb) || $8::jsonb,
       updated_at = now(),
       last_seen_at = now()
@@ -135,6 +145,7 @@ async function applyResultToListing(db, listing_url, res) {
     String(res.phone_e164 || ""),
     String(res.wa_link || ""),
     JSON.stringify(res.debug || res.raw || {}),
+    String(res.seller_name || ""),
   ]);
 }
 
@@ -195,17 +206,26 @@ async function processOne(db, t) {
 
     const isDummy = formE164 && r?.phone_e164 && String(r.phone_e164) === String(formE164);
 
-    const ok = Boolean(r?.ok) && !isDummy && Boolean(r?.phone_e164 || r?.wa_link);
+    const isCommercial = Boolean(r?.seller_is_business);
+    const ok = Boolean(r?.ok) && !isCommercial && !isDummy && Boolean(r?.phone_e164 || r?.wa_link);
     const softBlocked = String(r?.reason || "").includes("soft_block");
 
     const out = {
       ok,
       stage: 2,
-      method: isDummy ? "dummy_phone_detected" : String(r?.method || ""),
-      reason: isDummy ? "returned_phone_equals_form_phone" : String(r?.reason || ""),
+      method: isCommercial ? "filtered_commercial_seller" : (isDummy ? "dummy_phone_detected" : String(r?.method || "")),
+      reason: isCommercial ? "seller_name_commercial" : (isDummy ? "returned_phone_equals_form_phone" : String(r?.reason || "")),
       phone_e164: ok ? (r?.phone_e164 || null) : null,
       wa_link: ok ? (r?.wa_link || null) : null,
-      debug: r?.debug || {},
+      seller_name: r?.seller_name || null,
+      debug: {
+        ...(r?.debug || {}),
+        seller_name: r?.seller_name || null,
+        seller_is_business: Boolean(r?.seller_is_business),
+        filtered_commercial: isCommercial,
+        extracted_phone_e164: r?.phone_e164 || null,
+        extracted_wa_link: r?.wa_link || null,
+      },
       soft_block: softBlocked,
     };
 

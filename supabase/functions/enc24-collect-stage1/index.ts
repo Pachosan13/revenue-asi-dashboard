@@ -8,6 +8,9 @@ type Params = {
   limit?: number; // listings per run
   maxPages?: number; // pages to scan (cron-safe)
   minYear?: number; // default 2014
+  businessHoursOnly?: boolean; // default true
+  startHour?: number; // default 8 (Panama time)
+  endHour?: number; // default 19 (Panama time)
 };
 
 function extractYear(s = ""): number | null {
@@ -39,6 +42,16 @@ function buildUrl(page: number) {
   const base = "https://www.encuentra24.com/panama-es/autos-usados";
   if (!page || page <= 1) return base;
   return `${base}?page=${page}`;
+}
+
+function panamaHourNow(): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Panama",
+    hour: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const hh = parts.find((p) => p.type === "hour")?.value ?? "00";
+  return Number(hh);
 }
 
 async function fetchHtml(url: string) {
@@ -83,15 +96,41 @@ Deno.serve(async (req) => {
     const body = (await req.json().catch(() => ({}))) as Params;
     const account_id = typeof body.account_id === "string" && body.account_id.trim() ? body.account_id.trim() : null;
     const country = String(body.country || "PA").toUpperCase();
-    const limit = Math.max(1, Math.min(Number(body.limit ?? 50), 500));
+    // Default to "soft" collection: 1–2 new listings per run.
+    const limit = Math.max(1, Math.min(Number(body.limit ?? 2), 500));
     const maxPages = Math.max(1, Math.min(Number(body.maxPages ?? 1), 5));
     const minYear = Math.max(1990, Math.min(Number(body.minYear ?? 2014), 2035));
+    const businessHoursOnly = body.businessHoursOnly !== false; // default true
+    const startHour = Math.max(0, Math.min(Number(body.startHour ?? 8), 23));
+    const endHour = Math.max(0, Math.min(Number(body.endHour ?? 19), 23));
 
     if (country !== "PA") {
       return new Response(JSON.stringify({ ok: false, error: "Only country=PA is supported in this function" }), {
         status: 400,
         headers: { "Content-Type": "application/json" },
       });
+    }
+
+    if (businessHoursOnly) {
+      const hh = panamaHourNow();
+      // Run window: startHour <= hh < endHour
+      if (!(hh >= startHour && hh < endHour)) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            skipped: true,
+            reason: "outside_business_hours",
+            tz: "America/Panama",
+            hour: hh,
+            startHour,
+            endHour,
+            limit,
+            maxPages,
+            minYear,
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
     }
 
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")?.trim() || Deno.env.get("PROJECT_URL")?.trim();
@@ -132,32 +171,16 @@ Deno.serve(async (req) => {
         if (looksTaxi(it.listing_text)) { filtered_taxi++; continue; }
         if (commercialScore(it.listing_text) >= 3) { filtered_commercial++; continue; }
 
-        const row = {
-          account_id,
-          source: "encuentra24",
-          listing_url: it.listing_url,
-          ok: true,
-          stage: 0,
-          method: "stage1_collect",
-          reason: null,
-          phone_e164: null,
-          wa_link: null,
-          seller_name: null,
-          seller_profile_url: null,
-          seller_address: null,
-          raw: {
-            stage: "stage1",
-            listing_text: it.listing_text,
-            page: p,
-            collected_at: new Date().toISOString(),
-          },
-          last_seen_at: new Date().toISOString(),
-        };
-
+        const seenAt = new Date().toISOString();
         const { error } = await supabase
           .schema("lead_hunter")
-          .from("enc24_listings")
-          .upsert(row, { onConflict: "listing_url_hash" });
+          .rpc("upsert_enc24_listing_stage1", {
+            p_account_id: account_id,
+            p_listing_url: it.listing_url,
+            p_listing_text: it.listing_text,
+            p_page: p,
+            p_seen_at: seenAt,
+          });
 
         if (!error) upserted++;
       }
