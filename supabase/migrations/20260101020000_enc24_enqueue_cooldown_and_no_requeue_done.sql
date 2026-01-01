@@ -1,8 +1,8 @@
--- Tighten enqueue_enc24_reveal_tasks so it only queues:
--- - valid Encuentra24 listing URLs (no /test/*, must contain numeric listing id)
--- - likely "persona natural" (best-effort based on seller_name + raw flags)
+-- Make enc24 enqueue "soft":
+-- - Do not requeue DONE tasks
+-- - Only requeue FAILED tasks after a cooldown (prevents re-hitting the same listing every 5 minutes)
 --
--- NOTE: This does not change enc24_listings schema; it uses existing columns.
+-- This supports the desired behavior: poll every N minutes, take 1–2 newest, don't repeat.
 
 begin;
 
@@ -13,6 +13,8 @@ security definer
 as $function$
 declare
   v_ins int := 0;
+  v_requeued int := 0;
+  v_cooldown interval := interval '6 hours';
 begin
   with cand as (
     select l.listing_url
@@ -22,7 +24,6 @@ begin
       and lead_hunter.is_valid_enc24_listing_url(l.listing_url)
 
       -- Persona natural filter (best-effort):
-      -- 1) If raw contains any known "is business" flags, exclude when truthy.
       and not (
         (l.raw ? 'seller_is_business' and lower(coalesce(l.raw->>'seller_is_business','')) in ('true','t','1','yes','y','si','sí'))
         or (l.raw ? 'is_business' and lower(coalesce(l.raw->>'is_business','')) in ('true','t','1','yes','y','si','sí'))
@@ -30,8 +31,6 @@ begin
         or (l.raw ? 'business' and lower(coalesce(l.raw->>'business','')) in ('true','t','1','yes','y','si','sí'))
         or (l.raw ? 'sellerIsBusiness' and lower(coalesce(l.raw->>'sellerIsBusiness','')) in ('true','t','1','yes','y','si','sí'))
       )
-
-      -- 2) Heuristic: exclude obvious commercial sellers by name/text.
       and not (
         lower(coalesce(l.seller_name,'')) ~ '(motors|motor|dealer|agencia|concesionario|showroom|autolote|importadora|rent a car|rental|flota|stock|ventas|financiamiento|\ms\.a\.?\M|\mcorp\M|\minc\M|\mltd\M)'
         or lower(coalesce(l.raw::text,'')) ~ '(dealer|agencia|concesionario|autolote|showroom|empresa|membres[ií]a empresarial|soluci[oó]n de negocios)'
@@ -46,10 +45,20 @@ begin
     from cand c
     on conflict (listing_url) do nothing
     returning 1
+  ),
+  requeue as (
+    update lead_hunter.enc24_reveal_tasks t
+      set status = 'queued',
+          updated_at = now()
+    where t.listing_url in (select listing_url from cand)
+      and t.status = 'failed'
+      and coalesce(t.updated_at, t.created_at) < now() - v_cooldown
+    returning 1
   )
-  select count(*) into v_ins from ins;
+  select (select count(*) from ins), (select count(*) from requeue)
+    into v_ins, v_requeued;
 
-  return jsonb_build_object('ok', true, 'inserted', v_ins);
+  return jsonb_build_object('ok', true, 'inserted', v_ins, 'requeued', v_requeued, 'cooldown_hours', 6);
 end
 $function$;
 

@@ -362,10 +362,15 @@ enabled = true
 verify_jwt = false
 entrypoint = "./functions/campaign-engine/index.ts"
 
-# [functions.dispatch-touch-voice]
-# enabled = true
-# verify_jwt = false
-# entrypoint = "./functions/dispatch-touch-voice/index.ts"
+[functions.dispatch-touch-voice-v5]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/dispatch-touch-voice-v5/index.ts"
+
+[functions.touch-orchestrator-v7]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/touch-orchestrator-v7/index.ts"
 
 [functions.voice-webhook]
 enabled = true
