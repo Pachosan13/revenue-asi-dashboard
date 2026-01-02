@@ -3,6 +3,8 @@
 
 begin;
 
+-- In some environments lead_state may be an enum; drop+recreate and cast to text for compatibility.
+drop view if exists public.lead_enriched cascade;
 create or replace view public.lead_enriched as
 select
   l.id,
@@ -11,7 +13,7 @@ select
   l.company,
   l.email,
   l.phone,
-  coalesce(l.state, l.lead_state, l.status) as state,
+  coalesce(l.state::text, l.lead_state::text, l.status::text) as state,
   l.created_at,
   l.updated_at
 from public.leads l;

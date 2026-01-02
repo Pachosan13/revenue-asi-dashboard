@@ -3,6 +3,9 @@
 
 begin;
 
+-- Remote environments may have an older version with different column types.
+-- Drop+recreate to avoid CREATE OR REPLACE type-change errors.
+drop view if exists public.campaign_funnel_overview cascade;
 create or replace view public.campaign_funnel_overview as
 select
   c.id as campaign_id,

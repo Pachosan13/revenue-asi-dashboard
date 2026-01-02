@@ -76,6 +76,9 @@ create table if not exists public.calls (
 create index if not exists idx_calls_lead_id on public.calls(lead_id);
 create index if not exists idx_calls_created_at on public.calls(created_at desc);
 
+-- Views may already exist in remote environments with different column types.
+-- Postgres won't allow CREATE OR REPLACE to change column types, so drop+recreate.
+drop view if exists public.voice_insights_calls_v1 cascade;
 create or replace view public.voice_insights_calls_v1 as
 select
   c.id,
@@ -95,6 +98,9 @@ order by coalesce(c.ended_at, c.started_at, c.created_at) desc;
 -- -----------------------------------------------------------------------------
 
 -- latest touch run per lead (best-effort)
+-- Cloud note: inbox_events may already exist with a different column type (e.g. enum).
+-- Postgres won't allow CREATE OR REPLACE to change column types; drop & recreate.
+drop view if exists public.inbox_events cascade;
 create or replace view public.inbox_events as
 with last_tr as (
   select distinct on (tr.lead_id)
@@ -112,7 +118,8 @@ select
   coalesce(l.contact_name, l.company, l.email, l.phone, 'Lead') as lead_name,
   l.email as lead_email,
   l.phone as lead_phone,
-  coalesce(l.state, l.lead_state, l.status, 'new') as lead_state,
+  -- Cast to text to avoid enum/text COALESCE mismatches across environments.
+  coalesce(l.state::text, l.lead_state::text, l.status::text, 'new') as lead_state,
   lt.last_step_at,
   lt.campaign_id,
   c.name as campaign_name,
@@ -122,6 +129,7 @@ from public.leads l
 left join last_tr lt on lt.lead_id = l.id
 left join public.campaigns c on c.id = lt.campaign_id;
 
+drop view if exists public.multichannel_lead_signals cascade;
 create or replace view public.multichannel_lead_signals as
 select
   tr.lead_id,
@@ -136,6 +144,7 @@ select
 from public.touch_runs tr
 group by tr.lead_id;
 
+drop view if exists public.v_lead_with_enrichment_and_campaign_v1 cascade;
 create or replace view public.v_lead_with_enrichment_and_campaign_v1 as
 select
   ie.lead_id as id,
@@ -153,6 +162,7 @@ from public.inbox_events ie;
 -- -----------------------------------------------------------------------------
 -- Dashboard summary views (used by dashboard page)
 -- -----------------------------------------------------------------------------
+drop view if exists public.lead_state_summary cascade;
 create or replace view public.lead_state_summary as
 select
   ie.campaign_id,
@@ -162,6 +172,7 @@ select
 from public.inbox_events ie
 group by ie.campaign_id, ie.campaign_name, coalesce(ie.lead_state, 'unknown');
 
+drop view if exists public.lead_activity_summary cascade;
 create or replace view public.lead_activity_summary as
 select
   ie.lead_id,
@@ -176,6 +187,7 @@ select
   ie.last_step_at as last_touch_at
 from public.inbox_events ie;
 
+drop view if exists public.v_touch_funnel_by_campaign cascade;
 create or replace view public.v_touch_funnel_by_campaign as
 select
   tr.campaign_id,
