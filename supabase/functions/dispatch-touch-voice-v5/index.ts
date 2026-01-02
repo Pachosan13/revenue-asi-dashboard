@@ -87,7 +87,8 @@ serve(async (req) => {
 
   if (!runs?.length) {
     await logEvaluation(supabase, {
-      event_source: "dispatcher",
+      scope: "system",
+      actor: "agent",
       label: "voice_empty",
       kpis: { processed: 0, failed: 0 },
       notes: "No voice runs to dispatch",
@@ -124,6 +125,11 @@ serve(async (req) => {
 
   const smartRouterUrl = projectRef
     ? `https://${projectRef}.functions.supabase.co/dispatch-touch-smart-router`
+    : null
+
+  // Twilio StatusCallback handler (we reuse voice-webhook with a mode)
+  const voiceWebhookBaseUrl = projectRef
+    ? `https://${projectRef}.functions.supabase.co/voice-webhook`
     : null
 
   for (const run of runs) {
@@ -186,20 +192,43 @@ serve(async (req) => {
       const textBody: string =
         delivery.body ??
         "Esta es una llamada de prueba automática de Revenue ASI."
+      const voiceMode: string =
+        payload?.voice?.mode ??
+        payload?.voice_mode ??
+        "simple_say"
+
+      // Routing behavior:
+      // - default (backward compatible): advance to next step immediately after sending
+      // - optional: wait for call status callback to decide next step (voice -> whatsapp fallback, retries, etc)
+      const advanceOn: string =
+        payload?.routing?.advance_on ??
+        payload?.routing?.advanceOn ??
+        "sent"
+      const shouldAdvanceAfterSend = advanceOn !== "call_status"
 
       // 2.4 Marcar como processing (para telemetría)
-      await supabase
-        .from("touch_runs")
-        .update({
-          status: "processing",
+      {
+        // Some schemas don't allow status="processing" (check constraint).
+        // Use "executing" as the canonical status; fall back silently.
+        const baseUpdate: any = {
           executed_at: new Date().toISOString(),
           error: null,
           meta: {
             ...(payload.meta ?? {}),
             dispatcher_version: VERSION,
           },
-        })
-        .eq("id", run.id)
+        }
+
+        const { error: u1 } = await supabase
+          .from("touch_runs")
+          .update({ ...baseUpdate, status: "executing" })
+          .eq("id", run.id)
+
+        if (u1) {
+          // last resort: update without status
+          await supabase.from("touch_runs").update(baseUpdate).eq("id", run.id)
+        }
+      }
 
       let twilioCallSid: string | null = null
 
@@ -207,12 +236,44 @@ serve(async (req) => {
       if (!dryRun) {
         const callUrl = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`
 
-        // Usamos TwiML inline: <Play>audio</Play> o <Say>texto</Say>
-        let twiml: string
-        if (audioUrl) {
-          twiml = `<Response><Play>${audioUrl}</Play></Response>`
-        } else {
-          twiml = `<Response><Say>${textBody}</Say></Response>`
+        const useInteractiveWebhook = voiceMode === "interactive_v1" && !!voiceWebhookBaseUrl
+        const twimlUrl = useInteractiveWebhook
+          ? `${voiceWebhookBaseUrl}?mode=twiml&touch_run_id=${encodeURIComponent(run.id)}&state=start`
+          : null
+
+        // Default behavior: inline TwiML (<Play> or <Say>)
+        let twiml: string | null = null
+        if (!useInteractiveWebhook) {
+          if (audioUrl) twiml = `<Response><Play>${audioUrl}</Play></Response>`
+          else twiml = `<Response><Say>${textBody}</Say></Response>`
+        }
+
+        // Status callback so we can decide retries/fallback based on answered/no-answer/busy/etc.
+        // Twilio will include CallSid/CallStatus and will preserve our query params.
+        const statusCallback =
+          voiceWebhookBaseUrl
+            ? `${voiceWebhookBaseUrl}?mode=status&touch_run_id=${encodeURIComponent(run.id)}`
+            : null
+
+        const params = new URLSearchParams()
+        params.set("To", to)
+        params.set("From", VOICE_FROM)
+        if (twimlUrl) {
+          params.set("Url", twimlUrl)
+          params.set("Method", "POST")
+        }
+        if (twiml) {
+          params.set("Twiml", twiml)
+        }
+        if (statusCallback) {
+          params.set("StatusCallback", statusCallback)
+          params.set("StatusCallbackMethod", "POST")
+          // Twilio expects repeated StatusCallbackEvent params (not a space-separated string).
+          for (const ev of ["initiated", "ringing", "answered", "completed", "busy", "failed", "no-answer", "canceled"]) {
+            params.append("StatusCallbackEvent", ev)
+          }
+          // Use machine detection when we care about outcomes.
+          params.set("MachineDetection", "Enable")
         }
 
         const twilioResp = await fetch(callUrl, {
@@ -221,11 +282,7 @@ serve(async (req) => {
             Authorization: "Basic " + btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`),
             "Content-Type": "application/x-www-form-urlencoded",
           },
-          body: new URLSearchParams({
-            To: to,
-            From: VOICE_FROM,
-            Twiml: twiml,
-          }),
+          body: params,
         })
 
         const txt = await twilioResp.text()
@@ -242,14 +299,16 @@ serve(async (req) => {
         }
       }
 
-      // 2.6 Marcar como enviado
+      // 2.6 Marcar como enviado (solo si corresponde)
+      // - default: sent immediately (backward-compatible)
+      // - advance_on=call_status: keep executing; voice-webhook?mode=status will finalize + schedule next step
       const sentAtIso = new Date().toISOString()
 
       await supabase
         .from("touch_runs")
         .update({
-          status: "sent",
-          sent_at: sentAtIso,
+          status: shouldAdvanceAfterSend ? "sent" : "executing",
+          sent_at: shouldAdvanceAfterSend ? sentAtIso : null,
           error: null,
           payload: {
             ...(payload ?? {}),
@@ -266,15 +325,19 @@ serve(async (req) => {
       processed++
 
       await logEvaluation(supabase, {
-        lead_id: run.lead_id,
-        event_source: "dispatcher",
+        scope: "lead",
+        account_id: run.account_id,
+        entity_id: run.lead_id,
+        actor: "agent",
         label: "voice_sent",
         kpis: { processed, failed: errors.length },
         notes: `provider=${provider}, dryRun=${dryRun}`,
       })
 
-      // 2.7 🔗 LLAMAR AL SMART ROUTER (solo si NO es dryRun)
-      if (!dryRun && smartRouterUrl) {
+      // 2.7 🔗 SMART ROUTER
+      // - default: advance immediately after send
+      // - if advance_on=call_status: wait for voice-webhook status callback to advance
+      if (!dryRun && smartRouterUrl && shouldAdvanceAfterSend) {
         try {
           await fetch(smartRouterUrl, {
             method: "POST",
@@ -288,6 +351,7 @@ serve(async (req) => {
               step: run.step ?? 1,
               dry_run: false,
               source: "voice_dispatcher",
+              previous_touch_id: run.id,
             }),
           })
           // No nos importa el body aquí; el router se encarga de crear el siguiente touch si aplica
@@ -309,8 +373,10 @@ serve(async (req) => {
         .eq("id", run.id)
 
       await logEvaluation(supabase, {
-        lead_id: run.lead_id,
-        event_source: "dispatcher",
+        scope: "lead",
+        account_id: run.account_id,
+        entity_id: run.lead_id,
+        actor: "agent",
         label: "voice_failed",
         kpis: { processed, failed: errors.length },
         notes: msg,
@@ -322,7 +388,8 @@ serve(async (req) => {
   // 3) LOG RESUMEN
   //────────────────────────────────────────
   await logEvaluation(supabase, {
-    event_source: "dispatcher",
+    scope: "system",
+    actor: "agent",
     label: "voice_summary",
     kpis: { processed, failed: errors.length },
     notes: errors.length
