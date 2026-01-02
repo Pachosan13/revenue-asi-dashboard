@@ -47,7 +47,8 @@ serve(async (req) => {
   // ENV Twilio para VOICE
   const TWILIO_SID = Deno.env.get("TWILIO_ACCOUNT_SID")
   const TWILIO_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN")
-  const VOICE_FROM = Deno.env.get("TWILIO_VOICE_FROM") // ej: "+14155551234"
+  // Prefer TWILIO_VOICE_FROM; accept legacy TWILIO_FROM_NUMBER (already used in some envs).
+  const VOICE_FROM = Deno.env.get("TWILIO_VOICE_FROM") ?? Deno.env.get("TWILIO_FROM_NUMBER") // ej: "+14155551234"
 
   const QA_VOICE_SINK = Deno.env.get("QA_VOICE_SINK") ?? null
   const DRY_DEFAULT = Deno.env.get("DRY_RUN_VOICE") === "true"
