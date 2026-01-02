@@ -461,6 +461,7 @@ type KnownIntent =
   | "enc24.autos_usados.autopilot.start"
   | "enc24.autos_usados.autopilot.stop"
   | "enc24.autos_usados.autopilot.status"
+  | "enc24.autos_usados.metrics.leads_contacted_today"
   | "touch.simulate"
   | "touch.list"
   | "touch.inspect"
@@ -611,6 +612,25 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
     return { hh, mm }
   }
 
+  // Panamá no tiene DST: offset fijo UTC-5. Esto simplifica "hoy" con precisión.
+  const panamaTodayUtcRange = () => {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Panama",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date())
+    const yyyy = Number(parts.find((p) => p.type === "year")?.value ?? "1970")
+    const mm = Number(parts.find((p) => p.type === "month")?.value ?? "01")
+    const dd = Number(parts.find((p) => p.type === "day")?.value ?? "01")
+
+    // midnight PTY == 05:00:00Z
+    const start = new Date(Date.UTC(yyyy, mm - 1, dd, 5, 0, 0, 0))
+    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000)
+    const date = `${String(yyyy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`
+    return { startIso: start.toISOString(), endIso: end.toISOString(), date, tz: "America/Panama" as const }
+  }
+
   try {
     switch (intent) {
       case "enc24.autos_usados.autopilot.start": {
@@ -674,6 +694,97 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
         if (error) return { ok: false, intent, args, data: { error: "autopilot.status failed", details: error.message } }
         return { ok: true, intent, args: { account_id: accountId }, data: { settings: data ?? { account_id: accountId, enabled: false } } }
       }
+
+      case "enc24.autos_usados.metrics.leads_contacted_today": {
+        /**
+         * Definición (por ahora, sin Twilio):
+         * - "contactado hoy" = lead con `enriched.source = 'encuentra24'` que tenga >=1 touch_run creado hoy (PTY)
+         * - Incluye estados: queued/scheduled/executing/sent/failed. Excluye canceled.
+         */
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const { startIso, endIso, date, tz } = panamaTodayUtcRange()
+
+        // 1) Touches del día (por cuenta)
+        const { data: touches, error: tErr } = await supabase
+          .from("touch_runs")
+          .select("lead_id,status,created_at")
+          .eq("account_id", accountId)
+          .gte("created_at", startIso)
+          .lt("created_at", endIso)
+          .neq("status", "canceled")
+          .limit(5000)
+
+        if (tErr) {
+          return { ok: false, intent, args, data: { error: "metric query failed (touch_runs)", details: tErr.message } }
+        }
+
+        const touchRows = (touches ?? []).filter((r: any) => typeof r?.lead_id === "string" && r.lead_id.length > 0)
+        const leadIds = Array.from(new Set(touchRows.map((r: any) => r.lead_id)))
+
+        if (leadIds.length === 0) {
+          return {
+            ok: true,
+            intent,
+            args: { account_id: accountId },
+            data: {
+              date,
+              tz,
+              contacted_leads: 0,
+              touches_total: 0,
+              note: "No hay touch_runs hoy para esta cuenta.",
+            },
+          }
+        }
+
+        // 2) Leads fuente Encuentra24 (por lead_ids del día)
+        const { data: leads, error: lErr } = await supabase
+          .from("leads")
+          .select("id,enriched")
+          .eq("account_id", accountId)
+          .in("id", leadIds)
+
+        if (lErr) {
+          return { ok: false, intent, args, data: { error: "metric query failed (leads)", details: lErr.message } }
+        }
+
+        const encLeadIds = new Set<string>()
+        for (const r of leads ?? []) {
+          const src = String((r as any)?.enriched?.source ?? "").trim().toLowerCase()
+          if (src === "encuentra24") encLeadIds.add(String((r as any).id))
+        }
+
+        // 3) Distinct leads contactados + breakdown por status (touches, no leads)
+        const contactedDistinct = new Set<string>()
+        const touchesByStatus: Record<string, number> = {}
+        let touchesTotal = 0
+
+        for (const tr of touchRows) {
+          const leadId = String(tr.lead_id)
+          if (!encLeadIds.has(leadId)) continue
+          contactedDistinct.add(leadId)
+          const st = String(tr.status ?? "unknown")
+          touchesByStatus[st] = (touchesByStatus[st] ?? 0) + 1
+          touchesTotal += 1
+        }
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId },
+          data: {
+            date,
+            tz,
+            contacted_leads: contactedDistinct.size,
+            touches_total: touchesTotal,
+            touches_by_status: touchesByStatus,
+            definition:
+              "contactado_hoy = lead(enriched.source='encuentra24') con >=1 touch_run creado hoy (America/Panama), excluyendo status=canceled.",
+            window_utc: { start: startIso, end: endIso },
+          },
+        }
+      }
+
       case "enc24.autos_usados.start": {
         const accountId = requireAccountId(args, intent)
         const supabase = getSupabaseAdmin()
@@ -973,13 +1084,93 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
               payload: {
                 delivery: {
                   body:
-                    "Hola, ¿hablo con {contact_name}? Vi tu anuncio en Encuentra24. Te llamo rápido: trabajamos con dueños particulares para vender el carro más rápido. ¿Te interesa que te explique cómo funciona?",
+                    "Hola, ¿hablo con {contact_name}? Te llamo por el carro del anuncio en Encuentra24. Estoy ayudando a Darmesh, que está interesado. ¿Tienes 30 segundos?",
+                },
+                voice: {
+                  mode: "interactive_v1",
+                  buyer_name: "Darmesh",
+                },
+                routing: {
+                  advance_on: "call_status",
+                  fallback: {
+                    order: ["voice", "whatsapp", "sms", "email"],
+                    max_attempts: { voice: 3, whatsapp: 2, sms: 0, email: 0 },
+                    cooldown_minutes: { voice: 10, whatsapp: 120, sms: 120, email: 1440 },
+                  },
                 },
               },
             })
             if (insErr) return { ok: false, intent, args, data: { error: "campaign_steps insert failed", details: insErr.message } }
           }
         }
+
+        // step 2 voice (retry 1) + step 3 voice (retry 2) + step 4 whatsapp (fallback)
+        // We keep them idempotent and lightweight. Smart-router will create the next step only after the voice status callback.
+        const ensureStep = async (step: number, channel: "voice" | "whatsapp", delay_minutes: number, payload: any) => {
+          const { data: ex, error: exErr } = await supabase
+            .from("campaign_steps")
+            .select("id")
+            .eq("campaign_id", campaignId!)
+            .eq("step", step)
+            .eq("channel", channel)
+            .eq("account_id", accountId)
+            .maybeSingle()
+          if (exErr) return { ok: false as const, error: exErr.message }
+          if (ex?.id) return { ok: true as const, created: false as const }
+          const { error: insErr } = await supabase.from("campaign_steps").insert({
+            account_id: accountId,
+            campaign_id: campaignId!,
+            step,
+            channel,
+            delay_minutes,
+            is_active: true,
+            payload,
+          })
+          if (insErr) return { ok: false as const, error: insErr.message }
+          return { ok: true as const, created: true as const }
+        }
+
+        // Voice retries: shorter, respectful
+        const voiceRetryPayload = (n: number) => ({
+          delivery: {
+            body:
+              n === 1
+                ? "Hola, soy parte del equipo de Darmesh. Es rápido: ¿el carro del anuncio sigue disponible? Si te queda mejor, te escribo por WhatsApp."
+                : "Hola, última vez que intento. ¿El carro del anuncio sigue disponible? Si prefieres, te escribo por WhatsApp para coordinar.",
+          },
+          voice: {
+            mode: "interactive_v1",
+            buyer_name: "Darmesh",
+          },
+          routing: {
+            advance_on: "call_status",
+            fallback: {
+              order: ["voice", "whatsapp", "sms", "email"],
+              max_attempts: { voice: 3, whatsapp: 2, sms: 0, email: 0 },
+              cooldown_minutes: { voice: 10, whatsapp: 120, sms: 120, email: 1440 },
+            },
+          },
+        })
+
+        const waPayload = {
+          message:
+            "Hola, soy parte del equipo de Darmesh. Te escribo por el carro que publicaste en Encuentra24. ¿Sigue disponible? Si quieres, me dices el precio final y en qué zona se puede ver. Gracias.",
+          routing: {
+            advance_on: "sent",
+            fallback: {
+              order: ["whatsapp", "sms", "email"],
+              max_attempts: { whatsapp: 2, sms: 0, email: 0 },
+              cooldown_minutes: { whatsapp: 180, sms: 120, email: 1440 },
+            },
+          },
+        }
+
+        const s2 = await ensureStep(2, "voice", 10, voiceRetryPayload(1))
+        if (!s2.ok) return { ok: false, intent, args, data: { error: "campaign_steps step2 failed", details: s2.error } }
+        const s3 = await ensureStep(3, "voice", 60, voiceRetryPayload(2))
+        if (!s3.ok) return { ok: false, intent, args, data: { error: "campaign_steps step3 failed", details: s3.error } }
+        const s4 = await ensureStep(4, "whatsapp", 180, waPayload)
+        if (!s4.ok) return { ok: false, intent, args, data: { error: "campaign_steps step4 failed", details: s4.error } }
 
         // 5) Enroll promoted/existing leads by phone -> campaign_leads
         // Fetch leads by the phones we just saw (both new and existing), then upsert enrollments.

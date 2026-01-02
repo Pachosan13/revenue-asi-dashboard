@@ -72,6 +72,13 @@ function fallbackAssistantMessage(execution: any) {
     return `Estado del sistema:\n${lines.join("\n")}`
   }
 
+  if (intent === "enc24.autos_usados.metrics.leads_contacted_today") {
+    const date = safeStr(data?.date, "hoy")
+    const contacted = safeNum(data?.contacted_leads, 0)
+    const touches = safeNum(data?.touches_total, 0)
+    return `Encuentra24 — ${date}:\n- Leads contactados: ${contacted}\n- Touches creados: ${touches}`
+  }
+
   const explicit = safeStr(data?.message, "")
   if (explicit) return explicit
 

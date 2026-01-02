@@ -12,6 +12,7 @@ export type CommandOsIntent =
   | "enc24.autos_usados.autopilot.start"
   | "enc24.autos_usados.autopilot.stop"
   | "enc24.autos_usados.autopilot.status"
+  | "enc24.autos_usados.metrics.leads_contacted_today"
   | "touch.simulate"
   | "touch.list"
   | "touch.inspect"
@@ -73,6 +74,7 @@ INTENTS SOPORTADOS EN ESTE BUILD
 - "enc24.autos_usados.autopilot.start" - Encender autopilot (cada 5 min, 1–2 leads nuevos, 8am–7pm PTY)
 - "enc24.autos_usados.autopilot.stop" - Apagar autopilot
 - "enc24.autos_usados.autopilot.status" - Ver estado del autopilot
+- "enc24.autos_usados.metrics.leads_contacted_today" - ¿Cuántos leads de Encuentra24 han sido contactados hoy?
 - "touch.simulate" - Simular touches
 - "touch.list" - Listar touch_runs con filtros
 - "touch.inspect" - Ver detalle de un touch_run
@@ -113,6 +115,10 @@ EJEMPLOS DE USO
 - "enciende el autopilot de encuentra24" => enc24.autos_usados.autopilot.start (interval_minutes: 5, max_new_per_tick: 2, start_hour: 8, end_hour: 19)
 - "apaga el autopilot de encuentra24" => enc24.autos_usados.autopilot.stop
 - "estado del autopilot de encuentra24" => enc24.autos_usados.autopilot.status
+- "prende encuentra24" => enc24.autos_usados.autopilot.start
+- "apaga encuentra24" => enc24.autos_usados.autopilot.stop
+- "status encuentra24" => enc24.autos_usados.autopilot.status
+- "¿cuántos leads ha contactado hoy de encuentra24?" => enc24.autos_usados.metrics.leads_contacted_today
 - "muéstrame la campaña X" => campaign.inspect (campaign_name: "X")
 - "activa la campaña Y" => campaign.toggle (campaign_name: "Y", is_active: true)
 - "ejecuta el orchestrator de touch" => orchestrator.run (orchestrator: "touch")
@@ -138,10 +144,123 @@ function getOpenAI(): OpenAI {
   return _openai
 }
 
+function norm(value: string): string {
+  return (value ?? "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+}
+
+/**
+ * Parser determinístico para comandos ultra-frecuentes.
+ * Objetivo: que "prende/apaga/status encuentra24" funcione incluso si el LLM falla.
+ */
+function tryRuleBasedCommandOs(input: { message: string; context?: any }): CommandOsResponse | null {
+  const raw = input.message ?? ""
+  const m = norm(raw)
+
+  // must mention enc24/encuentra24 for these shortcuts
+  const mentionsEnc24 =
+    m.includes("encuentra24") ||
+    m.includes("enc 24") ||
+    m.includes("enc24") ||
+    m.includes("enc-24")
+
+  if (!mentionsEnc24) return null
+
+  const isStart =
+    m === "prende encuentra24" ||
+    m === "prende enc24" ||
+    m === "prende enc 24" ||
+    m.startsWith("prende encuentra24 ") ||
+    m.startsWith("enciende encuentra24") ||
+    m.includes("autopilot") && (m.includes("prende") || m.includes("enciende") || m.includes("activar") || m.includes("activa"))
+
+  const isStop =
+    m === "apaga encuentra24" ||
+    m === "apaga enc24" ||
+    m === "apaga enc 24" ||
+    m.startsWith("apaga encuentra24 ") ||
+    m.startsWith("apaga el encuentra24") ||
+    m.includes("autopilot") && (m.includes("apaga") || m.includes("desactivar") || m.includes("desactiva"))
+
+  const isStatus =
+    m === "status encuentra24" ||
+    m === "estado encuentra24" ||
+    m === "status enc24" ||
+    m === "estado enc24" ||
+    m.includes("status") ||
+    (m.includes("estado") && m.includes("encuentra24")) ||
+    (m.includes("como va") && m.includes("encuentra24"))
+
+  // metric
+  const isMetric =
+    (m.includes("cuantos") || m.includes("cuantas") || m.includes("count") || m.includes("numero")) &&
+    m.includes("lead") &&
+    (m.includes("hoy") || m.includes("today")) &&
+    (m.includes("contact") || m.includes("llam") || m.includes("touch"))
+
+  if (isMetric) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "enc24.autos_usados.metrics.leads_contacted_today",
+      args: {},
+      explanation: "rule_based_match: enc24 leads_contacted_today",
+      confidence: 1,
+    }
+  }
+
+  if (isStart && !isStop) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "enc24.autos_usados.autopilot.start",
+      args: {},
+      explanation: "rule_based_match: enc24 autopilot start",
+      confidence: 1,
+    }
+  }
+
+  if (isStop) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "enc24.autos_usados.autopilot.stop",
+      args: {},
+      explanation: "rule_based_match: enc24 autopilot stop",
+      confidence: 1,
+    }
+  }
+
+  if (isStatus) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "enc24.autos_usados.autopilot.status",
+      args: {},
+      explanation: "rule_based_match: enc24 autopilot status",
+      confidence: 1,
+    }
+  }
+
+  return null
+}
+
 export async function callCommandOs(input: {
   message: string
   context?: any
 }): Promise<CommandOsResponse> {
+  const ruleBased = tryRuleBasedCommandOs(input)
+  if (ruleBased) {
+    // auto-inject account_id desde context si existe
+    const ctxAccountId =
+      typeof input?.context?.account_id === "string" ? input.context.account_id.trim() : ""
+    if (ctxAccountId) {
+      ruleBased.args = ruleBased.args ?? {}
+      if (!ruleBased.args.account_id) ruleBased.args.account_id = ctxAccountId
+    }
+    return ruleBased
+  }
+
   const openai = getOpenAI()
 
   const completion = await openai.chat.completions.create({
