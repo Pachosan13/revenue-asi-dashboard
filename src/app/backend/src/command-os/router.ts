@@ -462,6 +462,7 @@ type KnownIntent =
   | "enc24.autos_usados.autopilot.stop"
   | "enc24.autos_usados.autopilot.status"
   | "enc24.autos_usados.metrics.leads_contacted_today"
+  | "enc24.autos_usados.leads.list_today"
   | "touch.simulate"
   | "touch.list"
   | "touch.inspect"
@@ -781,6 +782,64 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
             definition:
               "contactado_hoy = lead(enriched.source='encuentra24') con >=1 touch_run creado hoy (America/Panama), excluyendo status=canceled.",
             window_utc: { start: startIso, end: endIso },
+          },
+        }
+      }
+
+      case "enc24.autos_usados.leads.list_today": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const { startIso, endIso, date, tz } = panamaTodayUtcRange()
+
+        const limit = Math.min(Math.max(Number(args.limit ?? 10), 1), 50)
+
+        const { data, error, count } = await supabase
+          .from("leads")
+          .select("id,created_at,phone,contact_name,enriched", { count: "exact" })
+          .eq("account_id", accountId)
+          .eq("enriched->>source", "encuentra24")
+          .gte("created_at", startIso)
+          .lt("created_at", endIso)
+          .order("created_at", { ascending: false })
+          .limit(limit)
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: "enc24 leads.list_today failed", details: error.message } }
+        }
+
+        const leads = (data ?? []).map((r: any) => {
+          const enc24 = r?.enriched?.enc24 ?? {}
+          const stage1 = enc24?.raw?.stage1 ?? {}
+          const make = String(stage1?.make ?? "").trim()
+          const model = String(stage1?.model ?? "").trim()
+          const year = Number(stage1?.year)
+          const price = Number(stage1?.price)
+          const city = String(stage1?.city ?? "").trim()
+          const car = [make, model, Number.isFinite(year) ? String(year) : ""].filter(Boolean).join(" ")
+          const priceTxt = Number.isFinite(price) && price > 0 ? `$${price}` : ""
+
+          return {
+            id: String(r.id),
+            created_at: r.created_at,
+            phone: r.phone ?? null,
+            contact_name: r.contact_name ?? null,
+            listing_url: enc24?.listing_url ?? null,
+            car: car || null,
+            price: priceTxt || null,
+            city: city || null,
+          }
+        })
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId, limit },
+          data: {
+            date,
+            tz,
+            window_utc: { start: startIso, end: endIso },
+            total: typeof count === "number" ? count : leads.length,
+            leads,
           },
         }
       }

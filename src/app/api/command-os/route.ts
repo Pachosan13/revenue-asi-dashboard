@@ -79,6 +79,24 @@ function fallbackAssistantMessage(execution: any) {
     return `Encuentra24 — ${date}:\n- Leads contactados: ${contacted}\n- Touches creados: ${touches}`
   }
 
+  if (intent === "enc24.autos_usados.leads.list_today") {
+    const date = safeStr(data?.date, "hoy")
+    const rows = Array.isArray(data?.leads) ? data.leads : []
+    const total = safeNum(data?.total, rows.length)
+    if (!rows.length) return `Encuentra24 — ${date}: no encontré leads creados hoy.`
+    const lines = rows.slice(0, 15).map((l: any, i: number) => {
+      const name = safeStr(l?.contact_name, "Sin nombre")
+      const phone = safeStr(l?.phone, "—")
+      const car = safeStr(l?.car, "")
+      const price = safeStr(l?.price, "")
+      const city = safeStr(l?.city, "")
+      const url = safeStr(l?.listing_url, "")
+      const bits = [car, price, city].filter(Boolean).join(" • ")
+      return `${i + 1}) ${name} • ${phone}${bits ? ` • ${bits}` : ""}${url ? `\n   ${url}` : ""}`
+    })
+    return `Leads de Encuentra24 — ${date} (total ${total}):\n${lines.join("\n")}`
+  }
+
   const explicit = safeStr(data?.message, "")
   if (explicit) return explicit
 
@@ -107,6 +125,7 @@ async function llmAssistantMessage(input: {
           "NO inventes nada. Si falta data, dilo y pide el dato mínimo necesario.",
           "Formato: texto corto + bullets cuando aplique. Máximo 12 líneas.",
           "Si intent = lead.list.recents: lista los top 10 con estado/bucket y score si existe.",
+          "Si intent = enc24.autos_usados.leads.list_today: lista los top leads del día con nombre/teléfono + auto (make/model/year/price) + url.",
           "Si intent = lead.inspect/latest: resume lead (nombre, email, phone, estado, recomendado).",
           "Si intent = system.status: lista checks principales con OK/WARN/FAIL.",
           "Si hay error: explica causa + siguiente acción concreta.",

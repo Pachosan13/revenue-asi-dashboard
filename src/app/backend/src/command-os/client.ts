@@ -13,6 +13,7 @@ export type CommandOsIntent =
   | "enc24.autos_usados.autopilot.stop"
   | "enc24.autos_usados.autopilot.status"
   | "enc24.autos_usados.metrics.leads_contacted_today"
+  | "enc24.autos_usados.leads.list_today"
   | "touch.simulate"
   | "touch.list"
   | "touch.inspect"
@@ -75,6 +76,7 @@ INTENTS SOPORTADOS EN ESTE BUILD
 - "enc24.autos_usados.autopilot.stop" - Apagar autopilot
 - "enc24.autos_usados.autopilot.status" - Ver estado del autopilot
 - "enc24.autos_usados.metrics.leads_contacted_today" - ¿Cuántos leads de Encuentra24 han sido contactados hoy?
+- "enc24.autos_usados.leads.list_today" - Listar leads creados hoy (America/Panama) desde Encuentra24.
 - "touch.simulate" - Simular touches
 - "touch.list" - Listar touch_runs con filtros
 - "touch.inspect" - Ver detalle de un touch_run
@@ -119,6 +121,7 @@ EJEMPLOS DE USO
 - "apaga encuentra24" => enc24.autos_usados.autopilot.stop
 - "status encuentra24" => enc24.autos_usados.autopilot.status
 - "¿cuántos leads ha contactado hoy de encuentra24?" => enc24.autos_usados.metrics.leads_contacted_today
+- "dame los leads de hoy de encuentra24" => enc24.autos_usados.leads.list_today
 - "muéstrame la campaña X" => campaign.inspect (campaign_name: "X")
 - "activa la campaña Y" => campaign.toggle (campaign_name: "Y", is_active: true)
 - "ejecuta el orchestrator de touch" => orchestrator.run (orchestrator: "touch")
@@ -208,6 +211,27 @@ function tryRuleBasedCommandOs(input: { message: string; context?: any }): Comma
       intent: "enc24.autos_usados.metrics.leads_contacted_today",
       args: {},
       explanation: "rule_based_match: enc24 leads_contacted_today",
+      confidence: 1,
+    }
+  }
+
+  const wantsList =
+    (m.includes("dame") || m.includes("lista") || m.includes("listame") || m.includes("muestrame") || m.includes("muéstrame") || m.includes("enumera") || m.includes("ensename") || m.includes("enséñame")) &&
+    m.includes("lead") &&
+    (m.includes("hoy") || m.includes("today")) &&
+    !m.includes("contact") &&
+    !m.includes("touch") &&
+    !m.includes("llam")
+
+  if (wantsList) {
+    const nMatch = m.match(/\b(\d{1,3})\b/)
+    const n = nMatch ? Number(nMatch[1]) : NaN
+    const limit = Number.isFinite(n) ? Math.max(1, Math.min(n, 50)) : 10
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "enc24.autos_usados.leads.list_today",
+      args: { limit },
+      explanation: "rule_based_match: enc24 list leads today",
       confidence: 1,
     }
   }
