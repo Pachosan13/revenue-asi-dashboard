@@ -5,6 +5,14 @@ import { execFile } from "node:child_process";
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function nowIso() { return new Date().toISOString(); }
 
+function envBool(name, def = false) {
+  const v = String(process.env[name] ?? "").trim().toLowerCase();
+  if (!v) return def;
+  if (["1", "true", "yes", "y", "si", "sí", "on"].includes(v)) return true;
+  if (["0", "false", "no", "n", "off"].includes(v)) return false;
+  return def;
+}
+
 function panamaHourNow() {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Panama",
@@ -20,6 +28,48 @@ function execNode(script, env) {
       resolve({ ok: !err, err: err ? String(err.message || err) : null, stdout: String(stdout || ""), stderr: String(stderr || "") });
     });
   });
+}
+
+async function promoteEnc24ToPublicLeads(db, accountId, limit) {
+  // Idempotent upsert: public.leads has unique (account_id, phone)
+  // We keep it minimal and store source-specific payload under enriched.enc24.
+  const q = `
+    insert into public.leads (account_id, phone, contact_name, status, enriched, updated_at)
+    select
+      l.account_id,
+      l.phone_e164 as phone,
+      nullif(l.seller_name,'') as contact_name,
+      'new' as status,
+      jsonb_build_object(
+        'source', 'encuentra24',
+        'enc24', jsonb_build_object(
+          'listing_url', l.listing_url,
+          'listing_url_hash', l.listing_url_hash,
+          'stage', l.stage,
+          'seller_name', l.seller_name,
+          'wa_link', l.wa_link,
+          'reason', l.reason,
+          'raw', l.raw
+        )
+      ) as enriched,
+      now() as updated_at
+    from lead_hunter.enc24_listings l
+    where l.account_id = $1::uuid
+      and l.ok = true
+      and nullif(l.phone_e164,'') is not null
+    order by l.updated_at desc nulls last
+    limit $2::int
+    -- Match the partial unique index public.leads_account_phone_uq
+    on conflict (account_id, phone) where phone is not null and length(phone) > 0
+    do update set
+      updated_at = now(),
+      contact_name = coalesce(nullif(excluded.contact_name,''), public.leads.contact_name),
+      status = coalesce(nullif(public.leads.status,''), excluded.status),
+      enriched = coalesce(public.leads.enriched,'{}'::jsonb) || excluded.enriched
+    returning id;
+  `;
+  const { rowCount } = await db.query(q, [accountId, limit]);
+  return Number(rowCount || 0);
 }
 
 async function tickOnce(db, accountId, settings) {
@@ -88,7 +138,28 @@ async function tickOnce(db, accountId, settings) {
     });
   }
 
-  return { collect: collectJson, reveal_ok: r.ok, reveal_err: r.err, ghl_ok: ghl?.ok ?? null, ghl_err: ghl?.err ?? null };
+  // 5) Promote to public.leads so Command OS / UI can "see" leads (optional but defaults ON).
+  const PROMOTE_ENABLED = envBool("ENC24_PROMOTE_PUBLIC_LEADS", true);
+  let promoted = null;
+  let promote_err = null;
+  if (PROMOTE_ENABLED) {
+    try {
+      promoted = await promoteEnc24ToPublicLeads(db, accountId, limit);
+    } catch (e) {
+      promoted = 0;
+      promote_err = String(e?.message || e);
+    }
+  }
+
+  return {
+    collect: collectJson,
+    reveal_ok: r.ok,
+    reveal_err: r.err,
+    ghl_ok: ghl?.ok ?? null,
+    ghl_err: ghl?.err ?? null,
+    promoted_public_leads: promoted,
+    promoted_public_leads_err: promote_err,
+  };
 }
 
 async function main() {
