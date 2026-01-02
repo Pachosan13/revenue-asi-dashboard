@@ -13,6 +13,28 @@ type Params = {
   endHour?: number; // default 19 (Panama time)
 };
 
+function safeJsonParse(s: string): any | null {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+function parseGa4Addata(html: string): Record<string, any> {
+  // matches: ga4addata[31437579] = {...}</script>
+  const re = /ga4addata\[(\d+)\]\s*=\s*(\{[\s\S]*?\})<\/script>/g;
+  const out: Record<string, any> = {};
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const id = String(m[1]);
+    const json = m[2];
+    const parsed = safeJsonParse(json);
+    if (parsed) out[id] = parsed;
+  }
+  return out;
+}
+
 function extractYear(s = ""): number | null {
   const m = String(s).match(/\b(19\d{2}|20\d{2})\b/);
   return m ? Number(m[1]) : null;
@@ -84,6 +106,42 @@ function extractListingLinks(html: string) {
   return [...links.entries()].map(([listing_url, listing_text]) => ({ listing_url, listing_text }));
 }
 
+function extractListingTileDetails(html: string): Record<string, any> {
+  // Extract extra fields (best-effort) without making more HTTP requests.
+  // We rely on:
+  // - data-adid / data-price attributes on the tile
+  // - ga4addata[...] blobs embedded in the HTML
+  const $ = cheerio.load(html);
+  const ga4 = parseGa4Addata(html);
+
+  const out: Record<string, any> = {};
+
+  $(".d3-ad-tile").each((_, el) => {
+    const tile = $(el);
+    const fav = tile.find("a.tool-favorite[data-adid]").first();
+    const adid = String(fav.attr("data-adid") || "").trim();
+    if (!adid) return;
+
+    const priceStr = String(fav.attr("data-price") || "").replace(/[^\d]/g, "");
+    const price = priceStr ? Number(priceStr) : null;
+
+    const g = ga4[adid] || {};
+    out[adid] = {
+      // These keys are intentionally simple; the dispatcher maps them to the GHL payload.
+      make: g?.f_make ?? null,
+      model: g?.f_model ?? null,
+      fuel: g?.f_fuel ?? null,
+      trans: g?.f_trans ?? null,
+      city: g?.location ?? null,
+      feature: g?.feature ?? null,
+      category: g?.category ?? null,
+      price,
+    };
+  });
+
+  return out;
+}
+
 Deno.serve(async (req) => {
   try {
     if (req.method !== "POST") {
@@ -145,6 +203,21 @@ Deno.serve(async (req) => {
 
     const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
+    async function upsertStage1Safe(args: Record<string, unknown>) {
+      // Backward compatible: if DB hasn't applied the new function signature yet,
+      // retry without p_stage1_extra.
+      const { error } = await supabase.schema("lead_hunter").rpc("upsert_enc24_listing_stage1", args as any);
+      if (!error) return { ok: true as const };
+
+      // Retry without extra (old signature)
+      const retryArgs = { ...args } as Record<string, unknown>;
+      delete retryArgs.p_stage1_extra;
+      const { error: e2 } = await supabase.schema("lead_hunter").rpc("upsert_enc24_listing_stage1", retryArgs as any);
+      if (!e2) return { ok: true as const, fallback: true as const };
+
+      return { ok: false as const, error: error.message, error2: e2.message };
+    }
+
     let total_seen = 0;
     let upserted = 0;
     let filtered_old = 0;
@@ -158,6 +231,7 @@ Deno.serve(async (req) => {
       const { status, html } = await fetchHtml(url);
       if (status !== 200) break;
 
+      const tileDetailsById = extractListingTileDetails(html);
       const links = extractListingLinks(html);
       for (const it of links) {
         if (seen.size >= limit) break;
@@ -171,18 +245,26 @@ Deno.serve(async (req) => {
         if (looksTaxi(it.listing_text)) { filtered_taxi++; continue; }
         if (commercialScore(it.listing_text) >= 3) { filtered_commercial++; continue; }
 
-        const seenAt = new Date().toISOString();
-        const { error } = await supabase
-          .schema("lead_hunter")
-          .rpc("upsert_enc24_listing_stage1", {
-            p_account_id: account_id,
-            p_listing_url: it.listing_url,
-            p_listing_text: it.listing_text,
-            p_page: p,
-            p_seen_at: seenAt,
-          });
+        const listingIdMatch = String(it.listing_url).match(/\/(\d{6,})\b/);
+        const listingId = listingIdMatch ? String(listingIdMatch[1]) : null;
+        const extra = listingId ? (tileDetailsById[listingId] ?? null) : null;
+        const stage1_extra = {
+          external_id: listingId,
+          year,
+          ...(extra ?? {}),
+        };
 
-        if (!error) upserted++;
+        const seenAt = new Date().toISOString();
+        const r = await upsertStage1Safe({
+          p_account_id: account_id,
+          p_listing_url: it.listing_url,
+          p_listing_text: it.listing_text,
+          p_page: p,
+          p_seen_at: seenAt,
+          p_stage1_extra: stage1_extra,
+        });
+
+        if (r.ok) upserted++;
       }
     }
 

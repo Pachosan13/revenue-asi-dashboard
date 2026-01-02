@@ -70,7 +70,24 @@ async function tickOnce(db, accountId, settings) {
     EMPTY_SLEEP_MS: "5000",
   });
 
-  return { collect: collectJson, reveal_ok: r.ok, reveal_err: r.err };
+  // 4) Optional: dispatch revealed leads to GHL webhook (idempotent, separate queue)
+  const GHL_URL = String(process.env.ENC24_GHL_WEBHOOK_URL || "").trim();
+  const GHL_ENABLED = String(process.env.ENC24_GHL_ENABLED || "").trim() !== "0";
+  let ghl = null;
+  if (GHL_ENABLED && GHL_URL) {
+    ghl = await execNode("worker/run-enc24-ghl-dispatch.mjs", {
+      DATABASE_URL: process.env.DATABASE_URL,
+      ACCOUNT_ID: String(accountId),
+      ENC24_GHL_WEBHOOK_URL: GHL_URL,
+      ENC24_GHL_ENABLED: process.env.ENC24_GHL_ENABLED || "1",
+      LIMIT: String(limit),          // send up to N per tick
+      ENQUEUE_LIMIT: String(limit),  // enqueue up to N per tick
+      LOOP: "0",
+      SLEEP_MS: "1000",
+    });
+  }
+
+  return { collect: collectJson, reveal_ok: r.ok, reveal_err: r.err, ghl_ok: ghl?.ok ?? null, ghl_err: ghl?.err ?? null };
 }
 
 async function main() {
