@@ -61,7 +61,8 @@ async function tickOnce(db, accountId, settings) {
     WORKER_ID: process.env.WORKER_ID || "enc24-autopilot",
     LIMIT: String(limit),
     LOOP: "0",
-    HEADLESS: "0",
+    // Default to headless so it doesn't interrupt local work; override with HEADLESS=0 if needed.
+    HEADLESS: typeof process.env.HEADLESS === "string" ? process.env.HEADLESS : "1",
     SAVE_SHOTS: "0",
     ENC24_CDP: process.env.ENC24_CDP || "1",
     ENC24_CDP_URL: process.env.ENC24_CDP_URL || "http://127.0.0.1:9222",
