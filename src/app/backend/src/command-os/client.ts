@@ -5,7 +5,18 @@ export const COMMAND_OS_VERSION = "v1"
 
 export type CommandOsIntent =
   | "system.status"
+  | "system.metrics"
+  | "system.kill_switch"
+  | "enc24.autos_usados.start"
+  | "enc24.autos_usados.voice_start"
+  | "enc24.autos_usados.autopilot.start"
+  | "enc24.autos_usados.autopilot.stop"
+  | "enc24.autos_usados.autopilot.status"
+  | "enc24.autos_usados.metrics.leads_contacted_today"
+  | "enc24.autos_usados.leads.list_today"
   | "touch.simulate"
+  | "touch.list"
+  | "touch.inspect"
   | "lead.inspect"
   | "lead.inspect.latest"
   | "lead.list.recents"
@@ -14,6 +25,13 @@ export type CommandOsIntent =
   | "campaign.list"
   | "campaign.inspect"
   | "campaign.create"
+  | "campaign.toggle"
+  | "campaign.metrics"
+  | "orchestrator.run"
+  | "dispatcher.run"
+  | "enrichment.run"
+  | "appointment.list"
+  | "appointment.inspect"
 
 export interface CommandOsResponse {
   version: string
@@ -49,16 +67,34 @@ Responde SOLO con un JSON válido (sin texto fuera):
 }
 
 INTENTS SOPORTADOS EN ESTE BUILD
-- "system.status"
-- "touch.simulate"
-- "lead.inspect"
-- "lead.inspect.latest"
-- "lead.list.recents"
-- "lead.enroll"
-- "lead.update"
-- "campaign.list"
-- "campaign.inspect"
-- "campaign.create"
+- "system.status" - Estado general del sistema
+- "system.metrics" - Métricas y KPIs del sistema
+- "system.kill_switch" - Ver/controlar kill switch global
+- "enc24.autos_usados.start" - Buscar autos usados en Panamá (stage1 collect + enqueue reveal)
+- "enc24.autos_usados.voice_start" - Buscar autos usados y preparar llamadas (collect + enqueue + promote + campaña voz + touch_runs)
+- "enc24.autos_usados.autopilot.start" - Encender autopilot (cada 5 min, 1–2 leads nuevos, 8am–7pm PTY)
+- "enc24.autos_usados.autopilot.stop" - Apagar autopilot
+- "enc24.autos_usados.autopilot.status" - Ver estado del autopilot
+- "enc24.autos_usados.metrics.leads_contacted_today" - ¿Cuántos leads de Encuentra24 han sido contactados hoy?
+- "enc24.autos_usados.leads.list_today" - Listar leads creados hoy (America/Panama) desde Encuentra24.
+- "touch.simulate" - Simular touches
+- "touch.list" - Listar touch_runs con filtros
+- "touch.inspect" - Ver detalle de un touch_run
+- "lead.inspect" - Inspeccionar lead por id/email/phone/nombre
+- "lead.inspect.latest" - Ver el último lead creado
+- "lead.list.recents" - Listar leads recientes
+- "lead.enroll" - Enrolar leads en campañas
+- "lead.update" - Actualizar campos de un lead
+- "campaign.list" - Listar campañas
+- "campaign.inspect" - Ver detalle de campaña
+- "campaign.create" - Crear nueva campaña
+- "campaign.toggle" - Activar/desactivar campaña
+- "campaign.metrics" - Métricas de una campaña
+- "orchestrator.run" - Ejecutar orchestrator manualmente
+- "dispatcher.run" - Ejecutar dispatcher manualmente
+- "enrichment.run" - Ejecutar enrichment manualmente
+- "appointment.list" - Listar appointments
+- "appointment.inspect" - Ver detalle de appointment
 
 REGLA CRÍTICA: "último lead"
 - Si el usuario dice: "último lead", "más reciente" + "inspeccionar/ver"
@@ -69,9 +105,28 @@ REGLAS DE SEGURIDAD
 - No inventes campos. Usa solo lo que el usuario te dio + context.
 
 CÓMO ELEGIR
-- Ver info => lead.inspect, lead.inspect.latest, lead.list.recents, campaign.inspect, campaign.list, system.status
-- Cambiar => lead.update, lead.enroll
-- Simular => touch.simulate
+- Ver info => lead.inspect, lead.inspect.latest, lead.list.recents, campaign.inspect, campaign.list, campaign.metrics, system.status, system.metrics, touch.list, touch.inspect, appointment.list, appointment.inspect
+- Cambiar => lead.update, lead.enroll, campaign.toggle, system.kill_switch
+- Simular/Ejecutar => touch.simulate, orchestrator.run, dispatcher.run, enrichment.run
+- Control => campaign.toggle, system.kill_switch
+
+EJEMPLOS DE USO
+- "dame métricas del sistema" => system.metrics
+- "vamos a buscar carros usados en panamá" => enc24.autos_usados.start (country: "PA", limit: 2, max_pages: 1)
+- "vamos a buscar carros usados en panamá y llamalos" => enc24.autos_usados.voice_start (country: "PA", limit: 2, promote_limit: 2, dispatch_now: false, dry_run: true)
+- "enciende el autopilot de encuentra24" => enc24.autos_usados.autopilot.start (interval_minutes: 5, max_new_per_tick: 2, start_hour: 8, end_hour: 19)
+- "apaga el autopilot de encuentra24" => enc24.autos_usados.autopilot.stop
+- "estado del autopilot de encuentra24" => enc24.autos_usados.autopilot.status
+- "prende encuentra24" => enc24.autos_usados.autopilot.start
+- "apaga encuentra24" => enc24.autos_usados.autopilot.stop
+- "status encuentra24" => enc24.autos_usados.autopilot.status
+- "¿cuántos leads ha contactado hoy de encuentra24?" => enc24.autos_usados.metrics.leads_contacted_today
+- "dame los leads de hoy de encuentra24" => enc24.autos_usados.leads.list_today
+- "muéstrame la campaña X" => campaign.inspect (campaign_name: "X")
+- "activa la campaña Y" => campaign.toggle (campaign_name: "Y", is_active: true)
+- "ejecuta el orchestrator de touch" => orchestrator.run (orchestrator: "touch")
+- "lista los últimos 20 touches" => touch.list (limit: 20)
+- "muéstrame appointments de hoy" => appointment.list (status: "scheduled")
 
 FIN >>>
 ` as const
@@ -82,19 +137,154 @@ let _openai: OpenAI | null = null
 function getOpenAI(): OpenAI {
   if (_openai) return _openai
 
-  const key = process.env.OPENAI_API_KEY
+  // Support both env names (some envs use OPEN_API_KEY by mistake)
+  const key = process.env.OPENAI_API_KEY ?? process.env.OPEN_API_KEY
   if (!key) {
-    throw new Error("Missing credentials. Please set OPENAI_API_KEY environment variable.")
+    throw new Error("Missing credentials. Please set OPENAI_API_KEY (or OPEN_API_KEY) environment variable.")
   }
 
   _openai = new OpenAI({ apiKey: key })
   return _openai
 }
 
+function norm(value: string): string {
+  return (value ?? "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+}
+
+/**
+ * Parser determinístico para comandos ultra-frecuentes.
+ * Objetivo: que "prende/apaga/status encuentra24" funcione incluso si el LLM falla.
+ */
+function tryRuleBasedCommandOs(input: { message: string; context?: any }): CommandOsResponse | null {
+  const raw = input.message ?? ""
+  const m = norm(raw)
+
+  // must mention enc24/encuentra24 for these shortcuts
+  const mentionsEnc24 =
+    m.includes("encuentra24") ||
+    m.includes("enc 24") ||
+    m.includes("enc24") ||
+    m.includes("enc-24")
+
+  if (!mentionsEnc24) return null
+
+  const isStart =
+    m === "prende encuentra24" ||
+    m === "prende enc24" ||
+    m === "prende enc 24" ||
+    m.startsWith("prende encuentra24 ") ||
+    m.startsWith("enciende encuentra24") ||
+    m.includes("autopilot") && (m.includes("prende") || m.includes("enciende") || m.includes("activar") || m.includes("activa"))
+
+  const isStop =
+    m === "apaga encuentra24" ||
+    m === "apaga enc24" ||
+    m === "apaga enc 24" ||
+    m.startsWith("apaga encuentra24 ") ||
+    m.startsWith("apaga el encuentra24") ||
+    m.includes("autopilot") && (m.includes("apaga") || m.includes("desactivar") || m.includes("desactiva"))
+
+  const isStatus =
+    m === "status encuentra24" ||
+    m === "estado encuentra24" ||
+    m === "status enc24" ||
+    m === "estado enc24" ||
+    m.includes("status") ||
+    (m.includes("estado") && m.includes("encuentra24")) ||
+    (m.includes("como va") && m.includes("encuentra24"))
+
+  // metric
+  const isMetric =
+    (m.includes("cuantos") || m.includes("cuantas") || m.includes("count") || m.includes("numero")) &&
+    m.includes("lead") &&
+    (m.includes("hoy") || m.includes("today")) &&
+    (m.includes("contact") || m.includes("llam") || m.includes("touch"))
+
+  if (isMetric) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "enc24.autos_usados.metrics.leads_contacted_today",
+      args: {},
+      explanation: "rule_based_match: enc24 leads_contacted_today",
+      confidence: 1,
+    }
+  }
+
+  const wantsList =
+    (m.includes("dame") || m.includes("lista") || m.includes("listame") || m.includes("muestrame") || m.includes("muéstrame") || m.includes("enumera") || m.includes("ensename") || m.includes("enséñame")) &&
+    m.includes("lead") &&
+    (m.includes("hoy") || m.includes("today")) &&
+    !m.includes("contact") &&
+    !m.includes("touch") &&
+    !m.includes("llam")
+
+  if (wantsList) {
+    const nMatch = m.match(/\b(\d{1,3})\b/)
+    const n = nMatch ? Number(nMatch[1]) : NaN
+    const limit = Number.isFinite(n) ? Math.max(1, Math.min(n, 50)) : 10
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "enc24.autos_usados.leads.list_today",
+      args: { limit },
+      explanation: "rule_based_match: enc24 list leads today",
+      confidence: 1,
+    }
+  }
+
+  if (isStart && !isStop) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "enc24.autos_usados.autopilot.start",
+      args: {},
+      explanation: "rule_based_match: enc24 autopilot start",
+      confidence: 1,
+    }
+  }
+
+  if (isStop) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "enc24.autos_usados.autopilot.stop",
+      args: {},
+      explanation: "rule_based_match: enc24 autopilot stop",
+      confidence: 1,
+    }
+  }
+
+  if (isStatus) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "enc24.autos_usados.autopilot.status",
+      args: {},
+      explanation: "rule_based_match: enc24 autopilot status",
+      confidence: 1,
+    }
+  }
+
+  return null
+}
+
 export async function callCommandOs(input: {
   message: string
   context?: any
 }): Promise<CommandOsResponse> {
+  const ruleBased = tryRuleBasedCommandOs(input)
+  if (ruleBased) {
+    // auto-inject account_id desde context si existe
+    const ctxAccountId =
+      typeof input?.context?.account_id === "string" ? input.context.account_id.trim() : ""
+    if (ctxAccountId) {
+      ruleBased.args = ruleBased.args ?? {}
+      if (!ruleBased.args.account_id) ruleBased.args.account_id = ctxAccountId
+    }
+    return ruleBased
+  }
+
   const openai = getOpenAI()
 
   const completion = await openai.chat.completions.create({

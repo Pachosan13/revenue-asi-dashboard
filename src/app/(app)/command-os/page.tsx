@@ -380,23 +380,31 @@ export default function CommandOsPage() {
         {/* Quick actions */}
         <div className="mb-4 flex flex-wrap gap-2">
           <Chip label="Status" onClick={() => handleSend("dame el status del sistema")} />
+          <Chip label="Métricas" onClick={() => handleSend("muéstrame las métricas del sistema")} />
           <Chip label="Leads recientes" onClick={() => handleSend("lista los últimos 10 leads")} />
           <Chip
             label="Inspecciona último lead"
             onClick={() => handleSend("inspecciona el último lead")}
           />
           <Chip label="Campaigns" onClick={() => handleSend("lista campañas recientes")} />
-          <Chip label="Touch simulate" onClick={() => handleSend("simula 10 touches")} />
+          <Chip label="Touch runs" onClick={() => handleSend("muéstrame los últimos 20 touch runs")} />
+          <Chip label="Appointments" onClick={() => handleSend("lista los appointments de hoy")} />
+          <Chip label="Ejecutar orchestrator" onClick={() => handleSend("ejecuta el orchestrator de touch")} />
         </div>
 
         {chat.length === 0 ? (
           <div className="rounded-2xl border border-slate-200 bg-white p-6">
             <div className="text-sm font-semibold">Arranca con algo simple</div>
             <div className="mt-2 text-sm text-slate-600 space-y-1">
-              <div>• “dame el status del sistema”</div>
-              <div>• “lista los últimos 10 leads”</div>
-              <div>• “inspecciona el lead con email ...”</div>
-              <div>• “enrola el lead con email ... en campaña ... y confirma”</div>
+              <div>• "dame el status del sistema"</div>
+              <div>• "muéstrame las métricas del sistema"</div>
+              <div>• "lista los últimos 10 leads"</div>
+              <div>• "inspecciona el lead con email ..."</div>
+              <div>• "muéstrame los touch runs en estado queued"</div>
+              <div>• "activa la campaña X"</div>
+              <div>• "ejecuta el orchestrator de touch"</div>
+              <div>• "lista los appointments de hoy"</div>
+              <div>• "enrola el lead con email ... en campaña ... y confirma"</div>
             </div>
           </div>
         ) : (

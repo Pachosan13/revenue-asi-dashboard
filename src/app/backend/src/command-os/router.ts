@@ -454,7 +454,18 @@ async function createCampaignStub(args: { name: string; channel?: string; object
 
 type KnownIntent =
   | "system.status"
+  | "system.metrics"
+  | "system.kill_switch"
+  | "enc24.autos_usados.start"
+  | "enc24.autos_usados.voice_start"
+  | "enc24.autos_usados.autopilot.start"
+  | "enc24.autos_usados.autopilot.stop"
+  | "enc24.autos_usados.autopilot.status"
+  | "enc24.autos_usados.metrics.leads_contacted_today"
+  | "enc24.autos_usados.leads.list_today"
   | "touch.simulate"
+  | "touch.list"
+  | "touch.inspect"
   | "lead.inspect"
   | "lead.inspect.latest"
   | "lead.enroll"
@@ -463,6 +474,13 @@ type KnownIntent =
   | "campaign.list"
   | "campaign.inspect"
   | "campaign.create"
+  | "campaign.toggle"
+  | "campaign.metrics"
+  | "orchestrator.run"
+  | "dispatcher.run"
+  | "enrichment.run"
+  | "appointment.list"
+  | "appointment.inspect"
 
 interface LeadInspectArgs {
   account_id?: string
@@ -583,8 +601,731 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
   const intent = cmd.intent as KnownIntent
   const args = (cmd.args ?? {}) as Record<string, any>
 
+  const panamaNow = () => {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Panama",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date())
+    const hh = Number(parts.find((p) => p.type === "hour")?.value ?? "0")
+    const mm = Number(parts.find((p) => p.type === "minute")?.value ?? "0")
+    return { hh, mm }
+  }
+
+  // Panamá no tiene DST: offset fijo UTC-5. Esto simplifica "hoy" con precisión.
+  const panamaTodayUtcRange = () => {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Panama",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date())
+    const yyyy = Number(parts.find((p) => p.type === "year")?.value ?? "1970")
+    const mm = Number(parts.find((p) => p.type === "month")?.value ?? "01")
+    const dd = Number(parts.find((p) => p.type === "day")?.value ?? "01")
+
+    // midnight PTY == 05:00:00Z
+    const start = new Date(Date.UTC(yyyy, mm - 1, dd, 5, 0, 0, 0))
+    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000)
+    const date = `${String(yyyy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`
+    return { startIso: start.toISOString(), endIso: end.toISOString(), date, tz: "America/Panama" as const }
+  }
+
   try {
     switch (intent) {
+      case "enc24.autos_usados.autopilot.start": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const country = typeof args.country === "string" && args.country.trim() ? args.country.trim().toUpperCase() : "PA"
+        const intervalMinutes = Math.min(Math.max(Number(args.interval_minutes ?? 5), 1), 60)
+        const maxNew = Math.min(Math.max(Number(args.max_new_per_tick ?? 2), 1), 5)
+        const startHour = Math.min(Math.max(Number(args.start_hour ?? 8), 0), 23)
+        const endHour = Math.min(Math.max(Number(args.end_hour ?? 19), 0), 23)
+
+        const { error } = await supabase
+          .schema("lead_hunter")
+          .from("enc24_autopilot_settings")
+          .upsert(
+            {
+              account_id: accountId,
+              enabled: true,
+              country,
+              interval_minutes: intervalMinutes,
+              max_new_per_tick: maxNew,
+              start_hour: startHour,
+              end_hour: endHour,
+              updated_at: new Date().toISOString(),
+            } as any,
+            { onConflict: "account_id" },
+          )
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: "autopilot.start failed", details: error.message } }
+        }
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId, country, intervalMinutes, maxNew, startHour, endHour },
+          data: { enabled: true, note: "Autopilot enabled. Run the daemon worker to execute ticks." },
+        }
+      }
+
+      case "enc24.autos_usados.autopilot.stop": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const { error } = await supabase
+          .schema("lead_hunter")
+          .from("enc24_autopilot_settings")
+          .upsert({ account_id: accountId, enabled: false, updated_at: new Date().toISOString() } as any, { onConflict: "account_id" })
+        if (error) return { ok: false, intent, args, data: { error: "autopilot.stop failed", details: error.message } }
+        return { ok: true, intent, args: { account_id: accountId }, data: { enabled: false } }
+      }
+
+      case "enc24.autos_usados.autopilot.status": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const { data, error } = await supabase
+          .schema("lead_hunter")
+          .from("enc24_autopilot_settings")
+          .select("*")
+          .eq("account_id", accountId)
+          .maybeSingle()
+        if (error) return { ok: false, intent, args, data: { error: "autopilot.status failed", details: error.message } }
+        return { ok: true, intent, args: { account_id: accountId }, data: { settings: data ?? { account_id: accountId, enabled: false } } }
+      }
+
+      case "enc24.autos_usados.metrics.leads_contacted_today": {
+        /**
+         * Definición (por ahora, sin Twilio):
+         * - "contactado hoy" = lead con `enriched.source = 'encuentra24'` que tenga >=1 touch_run creado hoy (PTY)
+         * - Incluye estados: queued/scheduled/executing/sent/failed. Excluye canceled.
+         */
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const { startIso, endIso, date, tz } = panamaTodayUtcRange()
+
+        // 1) Touches del día (por cuenta)
+        const { data: touches, error: tErr } = await supabase
+          .from("touch_runs")
+          .select("lead_id,status,created_at")
+          .eq("account_id", accountId)
+          .gte("created_at", startIso)
+          .lt("created_at", endIso)
+          .neq("status", "canceled")
+          .limit(5000)
+
+        if (tErr) {
+          return { ok: false, intent, args, data: { error: "metric query failed (touch_runs)", details: tErr.message } }
+        }
+
+        const touchRows = (touches ?? []).filter((r: any) => typeof r?.lead_id === "string" && r.lead_id.length > 0)
+        const leadIds = Array.from(new Set(touchRows.map((r: any) => r.lead_id)))
+
+        if (leadIds.length === 0) {
+          return {
+            ok: true,
+            intent,
+            args: { account_id: accountId },
+            data: {
+              date,
+              tz,
+              contacted_leads: 0,
+              touches_total: 0,
+              note: "No hay touch_runs hoy para esta cuenta.",
+            },
+          }
+        }
+
+        // 2) Leads fuente Encuentra24 (por lead_ids del día)
+        const { data: leads, error: lErr } = await supabase
+          .from("leads")
+          .select("id,enriched")
+          .eq("account_id", accountId)
+          .in("id", leadIds)
+
+        if (lErr) {
+          return { ok: false, intent, args, data: { error: "metric query failed (leads)", details: lErr.message } }
+        }
+
+        const encLeadIds = new Set<string>()
+        for (const r of leads ?? []) {
+          const src = String((r as any)?.enriched?.source ?? "").trim().toLowerCase()
+          if (src === "encuentra24") encLeadIds.add(String((r as any).id))
+        }
+
+        // 3) Distinct leads contactados + breakdown por status (touches, no leads)
+        const contactedDistinct = new Set<string>()
+        const touchesByStatus: Record<string, number> = {}
+        let touchesTotal = 0
+
+        for (const tr of touchRows) {
+          const leadId = String(tr.lead_id)
+          if (!encLeadIds.has(leadId)) continue
+          contactedDistinct.add(leadId)
+          const st = String(tr.status ?? "unknown")
+          touchesByStatus[st] = (touchesByStatus[st] ?? 0) + 1
+          touchesTotal += 1
+        }
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId },
+          data: {
+            date,
+            tz,
+            contacted_leads: contactedDistinct.size,
+            touches_total: touchesTotal,
+            touches_by_status: touchesByStatus,
+            definition:
+              "contactado_hoy = lead(enriched.source='encuentra24') con >=1 touch_run creado hoy (America/Panama), excluyendo status=canceled.",
+            window_utc: { start: startIso, end: endIso },
+          },
+        }
+      }
+
+      case "enc24.autos_usados.leads.list_today": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const { startIso, endIso, date, tz } = panamaTodayUtcRange()
+
+        const limit = Math.min(Math.max(Number(args.limit ?? 10), 1), 50)
+
+        const { data, error, count } = await supabase
+          .from("leads")
+          .select("id,created_at,phone,contact_name,enriched", { count: "exact" })
+          .eq("account_id", accountId)
+          .eq("enriched->>source", "encuentra24")
+          .gte("created_at", startIso)
+          .lt("created_at", endIso)
+          .order("created_at", { ascending: false })
+          .limit(limit)
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: "enc24 leads.list_today failed", details: error.message } }
+        }
+
+        const leads = (data ?? []).map((r: any) => {
+          const enc24 = r?.enriched?.enc24 ?? {}
+          const stage1 = enc24?.raw?.stage1 ?? {}
+          const make = String(stage1?.make ?? "").trim()
+          const model = String(stage1?.model ?? "").trim()
+          const year = Number(stage1?.year)
+          const price = Number(stage1?.price)
+          const city = String(stage1?.city ?? "").trim()
+          const car = [make, model, Number.isFinite(year) ? String(year) : ""].filter(Boolean).join(" ")
+          const priceTxt = Number.isFinite(price) && price > 0 ? `$${price}` : ""
+
+          return {
+            id: String(r.id),
+            created_at: r.created_at,
+            phone: r.phone ?? null,
+            contact_name: r.contact_name ?? null,
+            listing_url: enc24?.listing_url ?? null,
+            car: car || null,
+            price: priceTxt || null,
+            city: city || null,
+          }
+        })
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId, limit },
+          data: {
+            date,
+            tz,
+            window_utc: { start: startIso, end: endIso },
+            total: typeof count === "number" ? count : leads.length,
+            leads,
+          },
+        }
+      }
+
+      case "enc24.autos_usados.start": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+
+        const country = typeof args.country === "string" && args.country.trim() ? args.country.trim().toUpperCase() : "PA"
+        // Soft defaults: collect only 1–2 new listings per run to reduce anti-bot triggers.
+        const limit = Math.min(Math.max(Number(args.limit ?? 2), 1), 500)
+        const maxPages = Math.min(Math.max(Number(args.max_pages ?? args.maxPages ?? 1), 1), 5)
+        const minYear = Math.min(Math.max(Number(args.min_year ?? args.minYear ?? 2014), 1990), 2035)
+        const enqueueLimit = Math.min(Math.max(Number(args.enqueue_limit ?? limit), 1), 5000)
+        const businessHoursOnly = args.business_hours_only !== false
+        const startHour = Math.min(Math.max(Number(args.start_hour ?? 8), 0), 23)
+        const endHour = Math.min(Math.max(Number(args.end_hour ?? 19), 0), 23)
+
+        if (country !== "PA") {
+          return {
+            ok: false,
+            intent,
+            args: { ...args, country },
+            data: { error: "Por ahora solo soportamos Panamá (country=PA) para Encuentra24 autos usados." },
+          }
+        }
+
+        if (businessHoursOnly) {
+          const { hh } = panamaNow()
+          if (!(hh >= startHour && hh < endHour)) {
+            return {
+              ok: true,
+              intent,
+              args: { account_id: accountId, country, limit, maxPages, minYear, enqueueLimit, businessHoursOnly, startHour, endHour },
+              data: { skipped: true, reason: "outside_business_hours", tz: "America/Panama", hour: hh },
+            }
+          }
+        }
+
+        // 1) Collect Stage1 listings into lead_hunter.enc24_listings (Edge Function)
+        const url = process.env.SUPABASE_URL
+        const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+        if (!url || !key) {
+          return { ok: false, intent, args, data: { error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" } }
+        }
+
+        const collectRes = await fetch(`${url}/functions/v1/enc24-collect-stage1`, {
+          method: "POST",
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            account_id: accountId,
+            country,
+            limit,
+            maxPages,
+            minYear,
+            businessHoursOnly,
+            startHour,
+            endHour,
+          }),
+        })
+
+        const collectText = await collectRes.text().catch(() => "")
+        let collectJson: any = null
+        try { collectJson = collectText ? JSON.parse(collectText) : null } catch { collectJson = { raw: collectText } }
+
+        if (!collectRes.ok || !collectJson?.ok) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: {
+              error: "enc24-collect-stage1 failed",
+              status: collectRes.status,
+              result: collectJson,
+            },
+          }
+        }
+
+        // 2) Enqueue reveal tasks from enc24_listings (DB RPC)
+        const { data: enq, error: enqErr } = await supabase
+          .schema("lead_hunter")
+          .rpc("enqueue_enc24_reveal_tasks", { p_limit: enqueueLimit })
+
+        if (enqErr) {
+          return { ok: false, intent, args, data: { error: "enqueue_enc24_reveal_tasks failed", details: enqErr.message } }
+        }
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId, country, limit, maxPages, minYear, enqueueLimit, businessHoursOnly, startHour, endHour },
+          data: {
+            collected: collectJson,
+            enqueued: enq,
+            note:
+              "La cola quedó preparada. Para producción necesitas el reveal worker corriendo (CDP Chrome real) para consumir lead_hunter.enc24_reveal_tasks.",
+          },
+        }
+      }
+
+      case "enc24.autos_usados.voice_start": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+
+        const country = typeof args.country === "string" && args.country.trim() ? args.country.trim().toUpperCase() : "PA"
+        const limit = Math.min(Math.max(Number(args.limit ?? 2), 1), 500)
+        const maxPages = Math.min(Math.max(Number(args.max_pages ?? args.maxPages ?? 1), 1), 5)
+        const minYear = Math.min(Math.max(Number(args.min_year ?? args.minYear ?? 2014), 1990), 2035)
+        const enqueueLimit = Math.min(Math.max(Number(args.enqueue_limit ?? limit), 1), 5000)
+        const promoteLimit = Math.min(Math.max(Number(args.promote_limit ?? limit), 1), 500)
+        const dispatchNow = Boolean(args.dispatch_now ?? false)
+        const dryRun = Boolean(args.dry_run ?? true)
+        const businessHoursOnly = args.business_hours_only !== false
+        const startHour = Math.min(Math.max(Number(args.start_hour ?? 8), 0), 23)
+        const endHour = Math.min(Math.max(Number(args.end_hour ?? 19), 0), 23)
+
+        if (country !== "PA") {
+          return {
+            ok: false,
+            intent,
+            args: { ...args, country },
+            data: { error: "Por ahora solo soportamos Panamá (country=PA) para Encuentra24 autos usados." },
+          }
+        }
+
+        if (businessHoursOnly) {
+          const { hh } = panamaNow()
+          if (!(hh >= startHour && hh < endHour)) {
+            return {
+              ok: true,
+              intent,
+              args: { account_id: accountId, country, limit, maxPages, minYear, enqueueLimit, promoteLimit, dispatchNow, dryRun, businessHoursOnly, startHour, endHour },
+              data: { skipped: true, reason: "outside_business_hours", tz: "America/Panama", hour: hh },
+            }
+          }
+        }
+
+        const url = process.env.SUPABASE_URL
+        const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+        if (!url || !key) {
+          return { ok: false, intent, args, data: { error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" } }
+        }
+
+        // 1) Collect stage1
+        const collectRes = await fetch(`${url}/functions/v1/enc24-collect-stage1`, {
+          method: "POST",
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            account_id: accountId,
+            country,
+            limit,
+            maxPages,
+            minYear,
+            businessHoursOnly,
+            startHour,
+            endHour,
+          }),
+        })
+
+        const collectText = await collectRes.text().catch(() => "")
+        let collectJson: any = null
+        try {
+          collectJson = collectText ? JSON.parse(collectText) : null
+        } catch {
+          collectJson = { raw: collectText }
+        }
+
+        if (!collectRes.ok || !collectJson?.ok) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: { error: "enc24-collect-stage1 failed", status: collectRes.status, result: collectJson },
+          }
+        }
+
+        // 2) Enqueue reveal tasks
+        const { data: enq, error: enqErr } = await supabase
+          .schema("lead_hunter")
+          .rpc("enqueue_enc24_reveal_tasks", { p_limit: enqueueLimit })
+
+        if (enqErr) {
+          return { ok: false, intent, args, data: { error: "enqueue_enc24_reveal_tasks failed", details: enqErr.message } }
+        }
+
+        // 3) Promote revealed phones -> public.leads (idempotent by account+phone)
+        const { data: encRows, error: encErr } = await supabase
+          .schema("lead_hunter")
+          .from("enc24_listings")
+          .select("id, account_id, listing_url, seller_name, phone_e164, raw, first_seen_at, last_seen_at")
+          .eq("account_id", accountId)
+          .not("phone_e164", "is", null)
+          .order("last_seen_at", { ascending: false })
+          .limit(promoteLimit)
+
+        if (encErr) {
+          return { ok: false, intent, args, data: { error: "read enc24_listings failed", details: encErr.message } }
+        }
+
+        const phones = Array.from(new Set((encRows ?? []).map((r: any) => String(r.phone_e164 ?? "").trim()).filter(Boolean)))
+        let existingPhones = new Set<string>()
+        if (phones.length) {
+          const { data: existing, error: exErr } = await supabase
+            .from("leads")
+            .select("phone")
+            .eq("account_id", accountId)
+            .in("phone", phones)
+          if (!exErr && existing) existingPhones = new Set(existing.map((r: any) => String(r.phone ?? "").trim()).filter(Boolean))
+        }
+
+        const toInsert = (encRows ?? [])
+          .filter((r: any) => {
+            const p = String(r.phone_e164 ?? "").trim()
+            return p && !existingPhones.has(p)
+          })
+          .map((r: any) => ({
+            account_id: accountId,
+            phone: String(r.phone_e164).trim(),
+            contact_name: r.seller_name ? String(r.seller_name).trim() : null,
+            company: null,
+            lead_state: "new",
+            status: "new",
+            enriched: {
+              source: "encuentra24",
+              listing_url: r.listing_url,
+              listing_id: r.id,
+              title: r?.raw?.listing_text ?? null,
+            },
+          }))
+
+        let promoted = 0
+        if (toInsert.length) {
+          const { error: insErr } = await supabase.from("leads").insert(toInsert)
+          if (insErr) {
+            return { ok: false, intent, args, data: { error: "promote to public.leads failed", details: insErr.message } }
+          }
+          promoted = toInsert.length
+        }
+
+        // 4) Ensure a VOICE campaign exists + step1
+        const campaignKey = "enc24-autos-usados-pa-voice-v1"
+        let campaignId: string | null = null
+        {
+          const { data: c, error: cErr } = await supabase
+            .from("campaigns")
+            .select("id")
+            .eq("account_id", accountId)
+            .eq("campaign_key", campaignKey)
+            .maybeSingle()
+
+          if (cErr) return { ok: false, intent, args, data: { error: "campaign lookup failed", details: cErr.message } }
+
+          if (c?.id) {
+            campaignId = c.id as string
+          } else {
+            const { data: created, error: crErr } = await supabase
+              .from("campaigns")
+              .insert({
+                account_id: accountId,
+                campaign_key: campaignKey,
+                name: "Enc24 Autos Usados PA — Voice",
+                type: "outbound",
+                status: "active",
+              })
+              .select("id")
+              .single()
+            if (crErr) return { ok: false, intent, args, data: { error: "campaign create failed", details: crErr.message } }
+            campaignId = created.id as string
+          }
+        }
+
+        // step 1 voice (idempotent)
+        {
+          const { data: st, error: stErr } = await supabase
+            .from("campaign_steps")
+            .select("id")
+            .eq("campaign_id", campaignId!)
+            .eq("step", 1)
+            .eq("channel", "voice")
+            .eq("account_id", accountId)
+            .maybeSingle()
+
+          if (stErr) return { ok: false, intent, args, data: { error: "campaign_steps lookup failed", details: stErr.message } }
+
+          if (!st?.id) {
+            const { error: insErr } = await supabase.from("campaign_steps").insert({
+              account_id: accountId,
+              campaign_id: campaignId!,
+              step: 1,
+              channel: "voice",
+              delay_minutes: 0,
+              is_active: true,
+              payload: {
+                delivery: {
+                  body:
+                    "Hola, ¿hablo con {contact_name}? Te llamo por el carro del anuncio en Encuentra24. Estoy ayudando a Darmesh, que está interesado. ¿Tienes 30 segundos?",
+                },
+                voice: {
+                  mode: "interactive_v1",
+                  buyer_name: "Darmesh",
+                },
+                routing: {
+                  advance_on: "call_status",
+                  fallback: {
+                    order: ["voice", "whatsapp", "sms", "email"],
+                    max_attempts: { voice: 3, whatsapp: 2, sms: 0, email: 0 },
+                    cooldown_minutes: { voice: 10, whatsapp: 120, sms: 120, email: 1440 },
+                  },
+                },
+              },
+            })
+            if (insErr) return { ok: false, intent, args, data: { error: "campaign_steps insert failed", details: insErr.message } }
+          }
+        }
+
+        // step 2 voice (retry 1) + step 3 voice (retry 2) + step 4 whatsapp (fallback)
+        // We keep them idempotent and lightweight. Smart-router will create the next step only after the voice status callback.
+        const ensureStep = async (step: number, channel: "voice" | "whatsapp", delay_minutes: number, payload: any) => {
+          const { data: ex, error: exErr } = await supabase
+            .from("campaign_steps")
+            .select("id")
+            .eq("campaign_id", campaignId!)
+            .eq("step", step)
+            .eq("channel", channel)
+            .eq("account_id", accountId)
+            .maybeSingle()
+          if (exErr) return { ok: false as const, error: exErr.message }
+          if (ex?.id) return { ok: true as const, created: false as const }
+          const { error: insErr } = await supabase.from("campaign_steps").insert({
+            account_id: accountId,
+            campaign_id: campaignId!,
+            step,
+            channel,
+            delay_minutes,
+            is_active: true,
+            payload,
+          })
+          if (insErr) return { ok: false as const, error: insErr.message }
+          return { ok: true as const, created: true as const }
+        }
+
+        // Voice retries: shorter, respectful
+        const voiceRetryPayload = (n: number) => ({
+          delivery: {
+            body:
+              n === 1
+                ? "Hola, soy parte del equipo de Darmesh. Es rápido: ¿el carro del anuncio sigue disponible? Si te queda mejor, te escribo por WhatsApp."
+                : "Hola, última vez que intento. ¿El carro del anuncio sigue disponible? Si prefieres, te escribo por WhatsApp para coordinar.",
+          },
+          voice: {
+            mode: "interactive_v1",
+            buyer_name: "Darmesh",
+          },
+          routing: {
+            advance_on: "call_status",
+            fallback: {
+              order: ["voice", "whatsapp", "sms", "email"],
+              max_attempts: { voice: 3, whatsapp: 2, sms: 0, email: 0 },
+              cooldown_minutes: { voice: 10, whatsapp: 120, sms: 120, email: 1440 },
+            },
+          },
+        })
+
+        const waPayload = {
+          message:
+            "Hola, soy parte del equipo de Darmesh. Te escribo por el carro que publicaste en Encuentra24. ¿Sigue disponible? Si quieres, me dices el precio final y en qué zona se puede ver. Gracias.",
+          routing: {
+            advance_on: "sent",
+            fallback: {
+              order: ["whatsapp", "sms", "email"],
+              max_attempts: { whatsapp: 2, sms: 0, email: 0 },
+              cooldown_minutes: { whatsapp: 180, sms: 120, email: 1440 },
+            },
+          },
+        }
+
+        const s2 = await ensureStep(2, "voice", 10, voiceRetryPayload(1))
+        if (!s2.ok) return { ok: false, intent, args, data: { error: "campaign_steps step2 failed", details: s2.error } }
+        const s3 = await ensureStep(3, "voice", 60, voiceRetryPayload(2))
+        if (!s3.ok) return { ok: false, intent, args, data: { error: "campaign_steps step3 failed", details: s3.error } }
+        const s4 = await ensureStep(4, "whatsapp", 180, waPayload)
+        if (!s4.ok) return { ok: false, intent, args, data: { error: "campaign_steps step4 failed", details: s4.error } }
+
+        // 5) Enroll promoted/existing leads by phone -> campaign_leads
+        // Fetch leads by the phones we just saw (both new and existing), then upsert enrollments.
+        const phonesToEnroll = phones.slice(0, promoteLimit)
+        let enrolled = 0
+        if (phonesToEnroll.length) {
+          const { data: leads, error: lErr } = await supabase
+            .from("leads")
+            .select("id, phone")
+            .eq("account_id", accountId)
+            .in("phone", phonesToEnroll)
+
+          if (lErr) return { ok: false, intent, args, data: { error: "lead lookup for enroll failed", details: lErr.message } }
+
+          const rows = (leads ?? []).map((l: any) => ({
+            account_id: accountId,
+            campaign_id: campaignId!,
+            lead_id: l.id,
+            status: "active",
+            next_action_at: new Date().toISOString(),
+          }))
+
+          if (rows.length) {
+            const { error: eErr } = await supabase
+              .from("campaign_leads")
+              .upsert(rows, { onConflict: "account_id,campaign_id,lead_id", ignoreDuplicates: true })
+            if (eErr) return { ok: false, intent, args, data: { error: "campaign_leads upsert failed", details: eErr.message } }
+            enrolled = rows.length
+          }
+        }
+
+        // 6) Orchestrate -> touch_runs (uses service role auth fallback in the function)
+        const orchRes = await fetch(`${url}/functions/v1/touch-orchestrator-v7`, {
+          method: "POST",
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ account_id: accountId, limit: 200, dry_run: dryRun }),
+        })
+        const orchText = await orchRes.text().catch(() => "")
+        let orchJson: any = null
+        try { orchJson = orchText ? JSON.parse(orchText) : null } catch { orchJson = { raw: orchText } }
+
+        if (!orchRes.ok || orchJson?.ok !== true) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: { error: "touch-orchestrator-v7 failed", status: orchRes.status, result: orchJson },
+          }
+        }
+
+        // 7) Optionally dispatch voice
+        let dispatchJson: any = null
+        if (dispatchNow) {
+          const dRes = await fetch(`${url}/functions/v1/dispatch-touch-voice-v5`, {
+            method: "POST",
+            headers: {
+              apikey: key,
+              Authorization: `Bearer ${key}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ account_id: accountId, limit: 50, dry_run: dryRun }),
+          })
+          const dText = await dRes.text().catch(() => "")
+          try { dispatchJson = dText ? JSON.parse(dText) : null } catch { dispatchJson = { raw: dText } }
+          if (!dRes.ok || dispatchJson?.ok !== true) {
+            return {
+              ok: false,
+              intent,
+              args,
+              data: { error: "dispatch-touch-voice-v5 failed", status: dRes.status, result: dispatchJson },
+            }
+          }
+        }
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId, country, limit, maxPages, minYear, enqueueLimit, promoteLimit, dispatchNow, dryRun },
+          data: {
+            collected: collectJson,
+            enqueued: enq,
+            promoted,
+            enrolled,
+            campaign_id: campaignId,
+            orchestrator: orchJson,
+            dispatcher: dispatchJson,
+            note:
+              "Si dry_run=true no se insertan touch_runs reales / no se dispara Twilio. Para producción: corre el reveal worker y pon dispatch_now=true + configura Twilio env.",
+          },
+        }
+      }
+
       case "system.status": {
         const checks = [
           {
@@ -970,6 +1711,351 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
         })
 
         return { ok: true, intent, args, data: result }
+      }
+
+      case "campaign.toggle": {
+        const accountId = requireAccountId(args, intent)
+        const campaignId = args.campaign_id as string | undefined
+        const campaignName = args.campaign_name as string | undefined
+        const isActive = args.is_active as boolean | undefined
+
+        if (!campaignId && !campaignName) {
+          return { ok: false, intent, args, data: { error: "campaign.toggle requiere campaign_id o campaign_name" } }
+        }
+
+        if (typeof isActive !== "boolean") {
+          return { ok: false, intent, args, data: { error: "campaign.toggle requiere is_active: boolean" } }
+        }
+
+        let finalCampaignId = campaignId
+        if (!finalCampaignId && campaignName) {
+          const campaign = await resolveCampaignByName(accountId, campaignName)
+          finalCampaignId = campaign.id as string
+        }
+
+        const supabase = getSupabaseAdmin()
+        const { data, error } = await supabase
+          .from("campaigns")
+          .update({ is_active: isActive })
+          .eq("id", finalCampaignId)
+          .eq("account_id", accountId)
+          .select()
+          .single()
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: error.message } }
+        }
+
+        return { ok: true, intent, args, data: { message: `Campaña ${isActive ? "activada" : "desactivada"}`, campaign: data } }
+      }
+
+      case "campaign.metrics": {
+        const accountId = requireAccountId(args, intent)
+        const campaignId = args.campaign_id as string | undefined
+        const campaignName = args.campaign_name as string | undefined
+
+        if (!campaignId && !campaignName) {
+          return { ok: false, intent, args, data: { error: "campaign.metrics requiere campaign_id o campaign_name" } }
+        }
+
+        let finalCampaignId = campaignId
+        if (!finalCampaignId && campaignName) {
+          const campaign = await resolveCampaignByName(accountId, campaignName)
+          finalCampaignId = campaign.id as string
+        }
+
+        const supabase = getSupabaseAdmin()
+        const { data, error } = await supabase
+          .from("campaign_funnel_overview")
+          .select("*")
+          .eq("campaign_id", finalCampaignId)
+          .maybeSingle()
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: error.message } }
+        }
+
+        return { ok: true, intent, args, data: { metrics: data } }
+      }
+
+      case "system.metrics": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+
+        const [dashboardData, funnelData] = await Promise.all([
+          supabase.from("lead_state_summary").select("*").eq("account_id", accountId),
+          supabase.from("v_touch_funnel_campaign_summary").select("*").eq("account_id", accountId),
+        ])
+
+        return {
+          ok: true,
+          intent,
+          args,
+          data: {
+            lead_states: dashboardData.data ?? [],
+            campaign_funnels: funnelData.data ?? [],
+          },
+        }
+      }
+
+      case "system.kill_switch": {
+        const supabase = getSupabaseAdmin()
+        const action = args.action as "get" | "set" | undefined
+        const value = args.value as boolean | undefined
+
+        if (action === "set") {
+          if (typeof value !== "boolean") {
+            return { ok: false, intent, args, data: { error: "system.kill_switch set requiere value: boolean" } }
+          }
+
+          const { error } = await supabase
+            .from("system_controls")
+            .upsert({ key: "global_kill_switch", value }, { onConflict: "key" })
+
+          if (error) {
+            return { ok: false, intent, args, data: { error: error.message } }
+          }
+
+          return { ok: true, intent, args, data: { message: `Kill switch ${value ? "activado" : "desactivado"}`, value } }
+        }
+
+        // get (default)
+        const { data, error } = await supabase
+          .from("system_controls")
+          .select("value")
+          .eq("key", "global_kill_switch")
+          .maybeSingle()
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: error.message } }
+        }
+
+        return { ok: true, intent, args, data: { value: Boolean(data?.value ?? false) } }
+      }
+
+      case "touch.list": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const limit = Math.min(Math.max(Number(args.limit ?? 50), 1), 200)
+        const status = args.status as string | undefined
+        const channel = args.channel as string | undefined
+
+        let query = supabase
+          .from("touch_runs")
+          .select("*")
+          .eq("account_id", accountId)
+          .order("created_at", { ascending: false })
+          .limit(limit)
+
+        if (status) query = query.eq("status", status)
+        if (channel) query = query.eq("channel", channel)
+
+        const { data, error } = await query
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: error.message } }
+        }
+
+        return { ok: true, intent, args, data: { touch_runs: data ?? [] } }
+      }
+
+      case "touch.inspect": {
+        const accountId = requireAccountId(args, intent)
+        const touchId = args.touch_id as string | undefined
+
+        if (!touchId) {
+          return { ok: false, intent, args, data: { error: "touch.inspect requiere touch_id" } }
+        }
+
+        const supabase = getSupabaseAdmin()
+        const { data, error } = await supabase
+          .from("touch_runs")
+          .select("*")
+          .eq("id", touchId)
+          .eq("account_id", accountId)
+          .maybeSingle()
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: error.message } }
+        }
+
+        if (!data) {
+          return { ok: false, intent, args, data: { error: "Touch run no encontrado" } }
+        }
+
+        return { ok: true, intent, args, data: { touch_run: data } }
+      }
+
+      case "orchestrator.run": {
+        const orchestrator = args.orchestrator as "touch" | "reactivation" | undefined
+        const campaignId = args.campaign_id as string | undefined
+
+        if (!orchestrator) {
+          return { ok: false, intent, args, data: { error: "orchestrator.run requiere orchestrator: 'touch' | 'reactivation'" } }
+        }
+
+        const supabaseUrl = process.env.SUPABASE_URL
+        const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+        if (!supabaseUrl || !supabaseKey) {
+          return { ok: false, intent, args, data: { error: "Missing SUPABASE_URL or SERVICE_ROLE_KEY" } }
+        }
+
+        const functionName =
+          orchestrator === "touch" ? "touch-orchestrator-v9" : orchestrator === "reactivation" ? "reactivation-orchestrator-v1" : null
+
+        if (!functionName) {
+          return { ok: false, intent, args, data: { error: "Orchestrator no válido" } }
+        }
+
+        const url = `${supabaseUrl}/functions/v1/${functionName}`
+        const body: any = { limit: args.limit ?? 20, dry_run: args.dry_run ?? false }
+        if (campaignId) body.campaign_id = campaignId
+
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${supabaseKey}`,
+              apikey: supabaseKey,
+            },
+            body: JSON.stringify(body),
+          })
+
+          const result = await res.json()
+          return { ok: res.ok, intent, args, data: { result, orchestrator, function_name: functionName } }
+        } catch (e: any) {
+          return { ok: false, intent, args, data: { error: e?.message ?? "Error ejecutando orchestrator" } }
+        }
+      }
+
+      case "dispatcher.run": {
+        const dispatcher = args.dispatcher as "touch" | "email" | "whatsapp" | undefined
+
+        if (!dispatcher) {
+          return { ok: false, intent, args, data: { error: "dispatcher.run requiere dispatcher: 'touch' | 'email' | 'whatsapp'" } }
+        }
+
+        const supabaseUrl = process.env.SUPABASE_URL
+        const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+        if (!supabaseUrl || !supabaseKey) {
+          return { ok: false, intent, args, data: { error: "Missing SUPABASE_URL or SERVICE_ROLE_KEY" } }
+        }
+
+        const functionName =
+          dispatcher === "touch"
+            ? "dispatch-touch"
+            : dispatcher === "email"
+              ? "dispatch-touch-email"
+              : dispatcher === "whatsapp"
+                ? "dispatch-touch-whatsapp-v2"
+                : null
+
+        if (!functionName) {
+          return { ok: false, intent, args, data: { error: "Dispatcher no válido" } }
+        }
+
+        const url = `${supabaseUrl}/functions/v1/${functionName}`
+        const body: any = { limit: args.limit ?? 50, dry_run: args.dry_run ?? false }
+
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${supabaseKey}`,
+              apikey: supabaseKey,
+            },
+            body: JSON.stringify(body),
+          })
+
+          const result = await res.json()
+          return { ok: res.ok, intent, args, data: { result, dispatcher, function_name: functionName } }
+        } catch (e: any) {
+          return { ok: false, intent, args, data: { error: e?.message ?? "Error ejecutando dispatcher" } }
+        }
+      }
+
+      case "enrichment.run": {
+        const supabaseUrl = process.env.SUPABASE_URL
+        const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+        if (!supabaseUrl || !supabaseKey) {
+          return { ok: false, intent, args, data: { error: "Missing SUPABASE_URL or SERVICE_ROLE_KEY" } }
+        }
+
+        const url = `${supabaseUrl}/functions/v1/run-enrichment`
+        const body: any = { limit: args.limit ?? 50 }
+
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${supabaseKey}`,
+              apikey: supabaseKey,
+            },
+            body: JSON.stringify(body),
+          })
+
+          const result = await res.json()
+          return { ok: res.ok, intent, args, data: { result } }
+        } catch (e: any) {
+          return { ok: false, intent, args, data: { error: e?.message ?? "Error ejecutando enrichment" } }
+        }
+      }
+
+      case "appointment.list": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+        const limit = Math.min(Math.max(Number(args.limit ?? 50), 1), 200)
+        const status = args.status as string | undefined
+
+        let query = supabase
+          .from("appointments")
+          .select("*")
+          .eq("account_id", accountId)
+          .order("starts_at", { ascending: false })
+          .limit(limit)
+
+        if (status) query = query.eq("status", status)
+
+        const { data, error } = await query
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: error.message } }
+        }
+
+        return { ok: true, intent, args, data: { appointments: data ?? [] } }
+      }
+
+      case "appointment.inspect": {
+        const accountId = requireAccountId(args, intent)
+        const appointmentId = args.appointment_id as string | undefined
+
+        if (!appointmentId) {
+          return { ok: false, intent, args, data: { error: "appointment.inspect requiere appointment_id" } }
+        }
+
+        const supabase = getSupabaseAdmin()
+        const { data, error } = await supabase
+          .from("appointments")
+          .select("*")
+          .eq("id", appointmentId)
+          .eq("account_id", accountId)
+          .maybeSingle()
+
+        if (error) {
+          return { ok: false, intent, args, data: { error: error.message } }
+        }
+
+        if (!data) {
+          return { ok: false, intent, args, data: { error: "Appointment no encontrado" } }
+        }
+
+        return { ok: true, intent, args, data: { appointment: data } }
       }
 
       default: {

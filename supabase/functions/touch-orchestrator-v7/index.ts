@@ -81,16 +81,6 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, version: VERSION, error: "POST only" }, 405);
 
-  const REVENUE_SECRET = Deno.env.get("REVENUE_SECRET");
-  if (!REVENUE_SECRET) {
-    return json({ ok: false, version: VERSION, error: "REVENUE_SECRET not configured" }, 500);
-  }
-
-  const incomingSecret = req.headers.get("x-revenue-secret");
-  if (incomingSecret !== REVENUE_SECRET) {
-    return json({ ok: false, version: VERSION, error: "unauthorized" }, 401);
-  }
-
   const SB_URL = Deno.env.get("SUPABASE_URL");
   const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!SB_URL || !SB_KEY) {
@@ -103,6 +93,21 @@ serve(async (req) => {
       },
       500,
     );
+  }
+
+  // Auth:
+  // - Preferred: x-revenue-secret == REVENUE_SECRET
+  // - Local/dev fallback: allow service-role authenticated calls (Authorization/apikey == SB_KEY)
+  const REVENUE_SECRET = Deno.env.get("REVENUE_SECRET");
+  const incomingSecret = req.headers.get("x-revenue-secret");
+  const authHeader = req.headers.get("authorization") ?? "";
+  const apiKeyHeader = req.headers.get("apikey") ?? "";
+  const bearerToken = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7) : authHeader;
+  const isServiceRoleAuthed = bearerToken === SB_KEY || apiKeyHeader === SB_KEY;
+  const isRevenueSecretAuthed = !!REVENUE_SECRET && incomingSecret === REVENUE_SECRET;
+
+  if (!isRevenueSecretAuthed && !isServiceRoleAuthed) {
+    return json({ ok: false, version: VERSION, error: "unauthorized" }, 401);
   }
 
   const supabase = createClient(SB_URL, SB_KEY, { auth: { persistSession: false } });

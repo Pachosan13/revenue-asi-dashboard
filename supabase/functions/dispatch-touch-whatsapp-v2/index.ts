@@ -102,7 +102,8 @@ serve(async (req) => {
 
   if (!runs?.length) {
     await logEvaluation(supabase, {
-      event_source: "dispatcher",
+      scope: "system",
+      actor: "agent",
       label: "whatsapp_empty",
       kpis: { processed: 0, failed: 0 },
       notes: "No WhatsApp runs to dispatch",
@@ -186,14 +187,19 @@ serve(async (req) => {
         "Hola!"
 
       // 2.3 (opcional) marcar como processing
-      await supabase
-        .from("touch_runs")
-        .update({
-          status: "processing",
+      {
+        const baseUpdate: any = {
           executed_at: new Date().toISOString(),
           error: null,
-        })
-        .eq("id", run.id)
+        }
+        const { error: u1 } = await supabase
+          .from("touch_runs")
+          .update({ ...baseUpdate, status: "executing" })
+          .eq("id", run.id)
+        if (u1) {
+          await supabase.from("touch_runs").update(baseUpdate).eq("id", run.id)
+        }
+      }
 
       // 2.4 Enviar por Twilio (a menos que dryRun)
       if (!dryRun) {
@@ -242,8 +248,10 @@ serve(async (req) => {
       processed++
 
       await logEvaluation(supabase, {
-        lead_id: run.lead_id,
-        event_source: "dispatcher",
+        scope: "lead",
+        account_id: run.account_id,
+        entity_id: run.lead_id,
+        actor: "agent",
         label: "whatsapp_sent",
         kpis: { processed, failed: errors.length },
         notes: `provider=${provider}, dryRun=${dryRun}`,
@@ -284,8 +292,10 @@ serve(async (req) => {
         .eq("id", run.id)
 
       await logEvaluation(supabase, {
-        lead_id: run.lead_id,
-        event_source: "dispatcher",
+        scope: "lead",
+        account_id: run.account_id,
+        entity_id: run.lead_id,
+        actor: "agent",
         label: "whatsapp_failed",
         kpis: { processed, failed: errors.length },
         notes: msg,
@@ -297,7 +307,8 @@ serve(async (req) => {
   // 3) LOG RESUMEN
   //────────────────────────────────────────
   await logEvaluation(supabase, {
-    event_source: "dispatcher",
+    scope: "system",
+    actor: "agent",
     label: "whatsapp_summary",
     kpis: { processed, failed: errors.length },
     notes: errors.length
