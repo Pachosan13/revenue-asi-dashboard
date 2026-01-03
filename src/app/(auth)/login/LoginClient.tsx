@@ -95,6 +95,23 @@ export default function LoginClient() {
         <p className="mt-6 text-center text-xs text-white/40">
           Seguridad, trazabilidad y control total de tu outreach
         </p>
+
+        {/* Quick reset (helps when switching environments/accounts) */}
+        <div className="mt-4 text-center">
+          <button
+            type="button"
+            className="text-xs text-white/60 hover:text-white underline"
+            onClick={async () => {
+              try {
+                await fetch("/api/auth/logout", { method: "POST" })
+              } finally {
+                router.replace("/login")
+              }
+            }}
+          >
+            Cerrar sesión
+          </button>
+        </div>
       </div>
     </div>
   )
