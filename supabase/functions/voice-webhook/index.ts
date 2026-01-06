@@ -134,7 +134,8 @@ async function patchVoiceMeta(supabase: any, touchRunId: string, patch: Record<s
       version: VERSION,
     },
   }
-  await supabase.from("touch_runs").update({ meta: next }).eq("id", touchRunId)
+  // heartbeat: ensure updated_at moves so DB reapers don't kill active runs
+  await supabase.from("touch_runs").update({ meta: next, updated_at: new Date().toISOString() }).eq("id", touchRunId)
 }
 
 function toTerminalOutcome(args: { callStatus: string | null; answeredBy: string | null; callDuration: number | null }) {
@@ -703,7 +704,8 @@ serve(async (req) => {
     }
 
     if (!terminal) {
-      await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch }).eq("id", run.id)
+      // heartbeat: ensure updated_at moves so DB reapers don't kill active runs
+      await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch, updated_at: new Date().toISOString() }).eq("id", run.id)
       return json({ ok: true, terminal: false, outcome, version: VERSION })
     }
 
@@ -871,7 +873,8 @@ serve(async (req) => {
       console.log("TELNYX_ANSWERED", { call_control_id: ccid, touch_run_id: run.id, lead_id: run.lead_id })
 
       // update meta (fast)
-      await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch }).eq("id", run.id)
+      // heartbeat: ensure updated_at moves so DB reapers don't kill active runs
+      await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch, updated_at: new Date().toISOString() }).eq("id", run.id)
 
       // Realtime streaming calls: NEVER start playback here.
       // (1) check run payload voice mode, (2) check client_state voice_mode
@@ -972,7 +975,8 @@ serve(async (req) => {
             playback_retry_last: retryPlaybackMeta,
           },
         }
-        await supabase.from("touch_runs").update({ meta: nextMeta }).eq("id", run.id)
+        // heartbeat: ensure updated_at moves so DB reapers don't kill active runs
+        await supabase.from("touch_runs").update({ meta: nextMeta, updated_at: new Date().toISOString() }).eq("id", run.id)
       } catch {}
 
       return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
@@ -980,7 +984,8 @@ serve(async (req) => {
 
     // Initiated: keep storing meta (no blocking commands here).
     if (eventType === "call.initiated") {
-      await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch }).eq("id", run.id)
+      // heartbeat: ensure updated_at moves so DB reapers don't kill active runs
+      await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch, updated_at: new Date().toISOString() }).eq("id", run.id)
       return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
     }
 
@@ -1073,7 +1078,8 @@ serve(async (req) => {
     }
 
     // Non-terminal: store meta + keep executing
-    await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch }).eq("id", run.id)
+    // heartbeat: ensure updated_at moves so DB reapers don't kill active runs
+    await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch, updated_at: new Date().toISOString() }).eq("id", run.id)
     return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
   }
 
