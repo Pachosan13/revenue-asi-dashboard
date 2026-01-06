@@ -59,6 +59,9 @@ serve(async (req) => {
     body = {}
   }
 
+  const touchRunIds = Array.isArray(body.touch_run_ids)
+    ? body.touch_run_ids.filter((x: any) => typeof x === "string")
+    : null
   const limit = Number(body.limit ?? 50)
   const dryRun = Boolean(body.dry_run ?? DRY_DEFAULT)
 
@@ -80,24 +83,40 @@ serve(async (req) => {
   //────────────────────────────────────────
   // 1) TRAER TOUCH RUNS WHATSAPP
   //────────────────────────────────────────
-  const { data: runs, error: rErr } = await supabase
-    .from("touch_runs")
-    .select("id, lead_id, account_id, payload, scheduled_at, step, status")
-    .eq("channel", "whatsapp")
-    .in("status", ["queued", "scheduled"])
-    .order("scheduled_at", { ascending: true })
-    .limit(limit)
-
-  if (rErr) {
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        stage: "select_runs",
-        error: rErr.message,
-        version: VERSION,
-      }),
-      { status: 500, headers: corsHeaders },
-    )
+  let runs: any[] = []
+  if (touchRunIds && touchRunIds.length) {
+    const { data, error } = await supabase
+      .from("touch_runs")
+      .select("id, lead_id, account_id, payload, scheduled_at, step, status, channel")
+      .in("id", touchRunIds)
+      .order("scheduled_at", { ascending: true })
+    if (error) {
+      return new Response(
+        JSON.stringify({ ok: false, stage: "select_runs_by_ids", error: error.message, version: VERSION }),
+        { status: 500, headers: corsHeaders },
+      )
+    }
+    runs = (data ?? []).filter((r: any) => String(r.channel || "").toLowerCase() === "whatsapp")
+  } else {
+    const { data, error } = await supabase
+      .from("touch_runs")
+      .select("id, lead_id, account_id, payload, scheduled_at, step, status, channel")
+      .eq("channel", "whatsapp")
+      .in("status", ["queued", "scheduled"])
+      .order("scheduled_at", { ascending: true })
+      .limit(limit)
+    if (error) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          stage: "select_runs",
+          error: error.message,
+          version: VERSION,
+        }),
+        { status: 500, headers: corsHeaders },
+      )
+    }
+    runs = data ?? []
   }
 
   if (!runs?.length) {
@@ -126,6 +145,8 @@ serve(async (req) => {
   //────────────────────────────────────────
   let processed = 0
   const errors: any[] = []
+  const processed_ids: string[] = []
+  const failed_ids: string[] = []
 
   for (const run of runs) {
     try {
@@ -246,6 +267,7 @@ serve(async (req) => {
         .eq("id", run.id)
 
       processed++
+      processed_ids.push(run.id)
 
       await logEvaluation(supabase, {
         scope: "lead",
@@ -282,6 +304,7 @@ serve(async (req) => {
     } catch (e: any) {
       const msg = e?.message ?? String(e)
       errors.push({ id: run.id, lead_id: run.lead_id, error: msg })
+      failed_ids.push(run.id)
 
       await supabase
         .from("touch_runs")
@@ -318,10 +341,12 @@ serve(async (req) => {
 
   return new Response(
     JSON.stringify({
-      ok: true,
+      ok: errors.length === 0,
       version: VERSION,
       processed,
       failed: errors.length,
+      processed_ids,
+      failed_ids,
       errors,
       dryRun,
     }),

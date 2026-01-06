@@ -56,21 +56,26 @@ serve(async (req) => {
   const BATCH = Math.min(Math.max(Number(body?.batch ?? 25), 1), 200)
   const CONCURRENCY = Math.min(Math.max(Number(body?.concurrency ?? 5), 1), 25)
 
-  // 1️⃣ CLAIM SEGURO (RPC con FOR UPDATE SKIP LOCKED)
-  const { data: runs, error: claimErr } = await supabase.rpc("claim_touch_runs", {
-    p_limit: BATCH,
-  })
+  let finalized = new Set<string>()
+  const claimed: TouchRun[] = []
+  try {
+    // 1️⃣ CLAIM SEGURO (RPC con FOR UPDATE SKIP LOCKED)
+    const { data: runs, error: claimErr } = await supabase.rpc("claim_touch_runs", {
+      p_limit: BATCH,
+    })
 
-  if (claimErr) {
-    return Response.json(
-      { ok: false, stage: "claim_touch_runs", error: claimErr.message },
-      { status: 500 }
-    )
-  }
+    if (claimErr) {
+      return Response.json(
+        { ok: false, stage: "claim_touch_runs", error: claimErr.message },
+        { status: 500 }
+      )
+    }
 
-  if (!runs || runs.length === 0) {
-    return Response.json({ ok: true, claimed: 0, processed: 0, dry_run: DRY_RUN })
-  }
+    if (!runs || runs.length === 0) {
+      return Response.json({ ok: true, claimed: 0, processed: 0, dry_run: DRY_RUN })
+    }
+
+    claimed.push(...((runs ?? []) as TouchRun[]))
 
   async function mark(id: string, patch: Record<string, any>) {
     const { error } = await supabase.from("touch_runs").update(patch).eq("id", id)
@@ -89,10 +94,10 @@ serve(async (req) => {
     if (error) throw new Error(`dispatch_events_insert_failed:${run.id}:${error.message}`)
   }
 
-  // emit claim event per run
-  for (const run of runs as TouchRun[]) {
-    await emitEvent(run, "claim", { at: nowIso(), status: run.status, executed_at: run.executed_at ?? null })
-  }
+    // emit claim event per run
+    for (const run of claimed) {
+      await emitEvent(run, "claim", { at: nowIso(), status: run.status, executed_at: run.executed_at ?? null })
+    }
 
   type DispatcherResult = {
     ok: boolean
@@ -169,7 +174,7 @@ serve(async (req) => {
   let processedTotal = 0
   let failedTotal = 0
 
-  for (const [channel, group] of byChannel.entries()) {
+    for (const [channel, group] of byChannel.entries()) {
     const fn = channelFn(channel)
     const r = await invokeBatch(fn, group)
     allResults.push({ channel, fn, ...r })
@@ -177,13 +182,14 @@ serve(async (req) => {
     const processedSet = new Set(r.processed_ids ?? [])
 
     // finalize per run
-    for (const run of group) {
+      for (const run of group) {
       const isProcessed = processedSet.has(run.id)
       if (isProcessed) {
         processedTotal++
         await emitEvent(run, "finalize_ok", { at: nowIso(), fn })
         // Do not overwrite status; dispatcher owns status transitions.
         await mark(run.id, { execution_ms: null, error: null, updated_at: nowIso() })
+          finalized.add(run.id)
         continue
       }
 
@@ -211,15 +217,36 @@ serve(async (req) => {
           updated_at: nowIso(),
         })
       }
+        finalized.add(run.id)
     }
   }
 
   return Response.json({
     ok: true,
     dry_run: DRY_RUN,
-    claimed: (runs as any[]).length,
+      claimed: claimed.length,
     processed: processedTotal,
     failed: failedTotal,
     results: allResults,
   })
+  } catch (e: any) {
+    // Safety net: never leave claimed runs stuck in executing if engine throws.
+    const msg = String(e?.message ?? e)
+    const now = nowIso()
+    for (const run of claimed) {
+      if (finalized.has(run.id)) continue
+      try {
+        await supabase
+          .from("touch_runs")
+          .update({
+            status: "queued",
+            error: `dispatch_engine_fatal:${msg}`.slice(0, 200),
+            scheduled_at: new Date(Date.now() + 60_000).toISOString(),
+            updated_at: now,
+          })
+          .eq("id", run.id)
+      } catch {}
+    }
+    return Response.json({ ok: false, stage: "dispatch_engine_fatal", error: msg }, { status: 500 })
+  }
 })

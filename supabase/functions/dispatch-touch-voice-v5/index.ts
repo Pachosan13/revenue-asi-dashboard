@@ -458,7 +458,7 @@ serve(async (req) => {
           from_phone: "+0000000000",
           to_phone: to,
           status: "scheduled",
-          meta: { dry_run: true },
+          meta: { dry_run: true, dry_run_simulated: true },
         })
         await emitDispatchEvent(supabase, run, { provider: "dry_run", event: "provider_request", payload: { dry_run: true } })
         await emitDispatchEvent(supabase, run, { provider: "dry_run", event: "provider_response", payload: { ok: true, dry_run: true } })
@@ -466,10 +466,15 @@ serve(async (req) => {
         await supabase
           .from("touch_runs")
           .update({
-            status: "sent",
-            sent_at: new Date().toISOString(),
+            status: "simulated",
+            sent_at: null,
             error: null,
             updated_at: new Date().toISOString(),
+            meta: {
+              ...(run.meta ?? {}),
+              dry_run_simulated: true,
+              dispatcher_version: VERSION,
+            },
           })
           .eq("id", run.id)
 

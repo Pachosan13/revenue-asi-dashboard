@@ -62,6 +62,9 @@ serve(async (req) => {
   const limit = Number(body.limit ?? 50)
   const dryRun = Boolean(body.dry_run ?? DRY_DEFAULT)
   const touchRunId = (body.touch_run_id ?? null) as string | null
+  const touchRunIds = Array.isArray(body.touch_run_ids)
+    ? body.touch_run_ids.filter((x: any) => typeof x === "string")
+    : null
 
   // smart-router URL (solo si estás en hosted; en local puede quedar null)
   const projectRef = (() => {
@@ -84,7 +87,25 @@ serve(async (req) => {
   //────────────────────────────────────────
   let runs: any[] = []
 
-  if (touchRunId) {
+  if (touchRunIds && touchRunIds.length) {
+    const { data, error } = await supabase
+      .from("touch_runs")
+      .select("id, lead_id, account_id, payload, meta, scheduled_at, step, status, channel")
+      .in("id", touchRunIds)
+      .order("scheduled_at", { ascending: true })
+    if (error) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          stage: "select_runs_by_ids",
+          error: error.message,
+          version: VERSION,
+        }),
+        { status: 500, headers: corsHeaders },
+      )
+    }
+    runs = (data ?? []).filter((r: any) => String(r.channel || "").toLowerCase() === "sms")
+  } else if (touchRunId) {
     const { data, error } = await supabase
       .from("touch_runs")
       .select("id, lead_id, account_id, payload, meta, scheduled_at, step, status")
@@ -153,6 +174,8 @@ serve(async (req) => {
   //────────────────────────────────────────
   let processed = 0
   const errors: any[] = []
+  const processed_ids: string[] = []
+  const failed_ids: string[] = []
 
   for (const run of runs) {
     const runId = run.id as string
@@ -307,6 +330,7 @@ serve(async (req) => {
       }
 
       processed++
+      processed_ids.push(runId)
 
       await logEvaluation(supabase, {
         lead_id: leadId,
@@ -335,16 +359,19 @@ serve(async (req) => {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       errors.push({ id: run.id, lead_id: run.lead_id, error: msg })
+      failed_ids.push(runId)
       await markFailed(msg)
     }
   }
 
   return new Response(
     JSON.stringify({
-      ok: true,
+      ok: errors.length === 0,
       version: VERSION,
       processed,
       failed: errors.length,
+      processed_ids,
+      failed_ids,
       errors,
       dryRun,
     }),

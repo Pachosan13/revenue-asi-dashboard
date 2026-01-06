@@ -2,7 +2,7 @@
 --
 -- End-to-end deterministic check:
 -- 1) Pick an active voice step (campaign_id/account_id/step) from public.campaign_steps
--- 2) Pick a lead with phone from public.lead_enriched for same account
+-- 2) Pick a lead with phone from public.leads for same account (NO views)
 -- 3) Insert a queued voice touch_run
 -- 4) Invoke dispatch-engine (HTTP) via pg_net
 -- 5) Assert voice_calls row exists and dispatch_events count >= 3
@@ -22,6 +22,7 @@
 \set revenue_secret '__X_REVENUE_SECRET__'
 
 create extension if not exists pg_net;
+create extension if not exists pgcrypto;
 
 -- 1) Pick a voice campaign step
 with step_pick as (
@@ -33,11 +34,11 @@ with step_pick as (
   limit 1
 ),
 lead_pick as (
-  select le.id as lead_id
-  from public.lead_enriched le
-  join step_pick s on s.account_id = le.account_id
-  where le.phone is not null and length(le.phone) > 0
-  order by le.updated_at desc nulls last
+  select l.id as lead_id
+  from public.leads l
+  join step_pick s on s.account_id = l.account_id
+  where l.phone is not null and length(l.phone) > 0
+  order by l.updated_at desc nulls last
   limit 1
 ),
 ins as (
@@ -51,7 +52,7 @@ ins as (
     s.campaign_id,
     gen_random_uuid(),
     l.lead_id,
-    s.step,
+    greatest(s.step, 1000000), -- force a high unique step to avoid active-dedupe collisions
     'voice',
     coalesce(s.payload, '{}'::jsonb),
     now(),
