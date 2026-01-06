@@ -14,12 +14,7 @@
 
 -- === CONFIG (FILL THESE) ===
 -- Replace with your project ref (e.g. cdrrlkxgurckuyceiguo)
--- Replace with your anon key
--- Replace with your x-revenue-secret (if your gateway requires it; can be empty string if not)
--- NOTE: dispatch-engine currently uses service role internally; this HTTP call only needs to pass function auth.
 \set project_ref '__PROJECT_REF__'
-\set anon_key '__ANON_KEY__'
-\set revenue_secret '__X_REVENUE_SECRET__'
 
 create extension if not exists pg_net;
 create extension if not exists pgcrypto;
@@ -66,10 +61,7 @@ call_engine as (
   select net.http_post(
     url := format('https://%s.supabase.co/functions/v1/dispatch-engine', :'project_ref'),
     headers := jsonb_build_object(
-      'Content-Type', 'application/json',
-      'apikey', :'anon_key',
-      'Authorization', format('Bearer %s', :'anon_key'),
-      'x-revenue-secret', :'revenue_secret'
+      'Content-Type', 'application/json'
     ),
     body := jsonb_build_object('dry_run', true, 'batch', 1, 'concurrency', 1)
   ) as res
