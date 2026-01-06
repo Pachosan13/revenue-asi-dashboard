@@ -1196,7 +1196,7 @@ async function runOpenAiVoiceTest(args) {
   const session_id = requestedSessionId || crypto.randomUUID();
   const pcm16le_16k = args?.pcm16le_16k;
   if (!OPENAI_API_KEY) return { ok: false, error: "missing_openai_api_key", session_id };
-  if (!Buffer.isBuffer(pcm16le_16k) || !pcm16le_16k.length) return { ok: false, error: "missing_pcm16le_16k", session_id };
+  if (!Buffer.isBuffer(pcm16le_16k)) return { ok: false, error: "missing_pcm16le_16k", session_id };
 
   const existing = testSessions.get(session_id) || null;
   if (existing) {
@@ -1248,6 +1248,41 @@ async function runOpenAiVoiceTest(args) {
     st.source = String(args?.source ?? persisted.source ?? "encuentra24");
     st.stage = String(persisted.stage || "availability");
   } catch {}
+
+  // VOICE_TEST_MODE: allow text-only tests
+  // If no audio was provided, we still execute the test pipeline using mock.userText (strict gating).
+  if (!pcm16le_16k.length) {
+    // Kickoff: greet once only (availability comes after the first "user turn")
+    if (!st.emittedAvailability) {
+      st.emittedAvailability = true;
+      st.stage = "greet";
+      persisted.emittedAvailability = true;
+      persisted.stage = st.stage;
+      persisted.source = st.source;
+      persisted.qual = st.qual;
+      persisted.testMock = st.testMock;
+      await emitPromptForStage(st, "greet");
+    }
+
+    const mockUserText = typeof st?.testMock?.userText === "string" ? String(st.testMock.userText).trim() : "";
+    if (!mockUserText) {
+      jlog({ event: "TEST_NO_USER_TEXT", session_id, stage: st.stage });
+      return { ok: true, session_id, mode: "text_only_blocked" };
+    }
+    jlog({
+      event: "TEST_USER_TEXT",
+      session_id,
+      stage: st.stage,
+      user_text_len: mockUserText.length,
+      preview: mockUserText.slice(0, 80),
+    });
+    await advanceStageAndEmit(st, mockUserText);
+    persisted.stage = st.stage;
+    persisted.source = st.source;
+    persisted.qual = st.qual;
+    persisted.testMock = st.testMock;
+    return { ok: true, session_id, mode: "text_only_ok" };
+  }
 
   async function emitOnce(stage) {
     if (st.emittedThisTurn) return;
@@ -1473,6 +1508,22 @@ const server = http.createServer((req, res) => {
         sess.source = body.source.trim();
         jlog({ event: "TEST_SOURCE", session_id, source: sess.source });
       }
+
+      // Instrumentation: request-level log (A)
+      {
+        const hasMock = Boolean(mock && typeof mock === "object");
+        const mockKeys = hasMock ? Object.keys(mock).slice(0, 25) : [];
+        const userText = typeof mock?.userText === "string" ? String(mock.userText) : "";
+        const trimmed = userText.trim();
+        jlog({
+          event: "TEST_REQ_IN",
+          session_id,
+          has_mock: hasMock,
+          mock_keys: mockKeys,
+          has_userText: Boolean(trimmed),
+          userText_preview_len: trimmed ? trimmed.slice(0, 80).length : 0,
+        });
+      }
       if (sess.busy === true) {
         jlog({ event: "TEST_SESSION_BUSY", session_id });
         res.writeHead(409, { "Content-Type": "application/json" });
@@ -1484,7 +1535,8 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({ ok: true, session_id }));
 
       // run async; logs are the output
-      runOpenAiVoiceTest({
+      jlog({ event: "TEST_CALL_RUN", session_id }); // (B)
+      const p = runOpenAiVoiceTest({
         session_id,
         pcm16le_16k: pcm16le,
         silence_ms: body?.silence_ms ?? 500,
@@ -1495,7 +1547,10 @@ const server = http.createServer((req, res) => {
           urgent: mock?.urgent ?? null,
           userText: (typeof mock?.userText === "string" ? mock.userText : null),
         },
-      }).catch((e) => {
+      });
+      jlog({ event: "TEST_RUN_RETURN", session_id }); // (C)
+      p.catch((e) => {
+        // (D)
         jlog({ event: "TEST_RUN_ERR", session_id, err: String(e?.message || e) });
       }).finally(() => {
         const s2 = testSessions.get(session_id);
