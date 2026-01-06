@@ -1078,9 +1078,21 @@ function openaiConnect(session) {
 
       const userText = String(session._lastUserText || "").trim();
       session._lastUserText = "";
-        // TELNYX mode uses the same template-only progression and HOT decision as VOICE_TEST_MODE.
-        // One template per user turn: only advance/emit if we saw speech_started.
-        advanceStageAndEmit(session, userText).catch(() => {});
+      // Strict gating: NEVER advance stages without non-empty userText from this turn.
+      if (!userText) {
+        jlog({ event: "TELNYX_NO_USER_TEXT", session_id: session.session_id, stage: session.stage });
+        return;
+      }
+      jlog({
+        event: "TELNYX_USER_TEXT",
+        session_id: session.session_id,
+        stage: session.stage,
+        user_text_len: userText.length,
+        preview: userText.slice(0, 80),
+      });
+
+      // TELNYX mode uses the same template-only progression and HOT decision as VOICE_TEST_MODE.
+      advanceStageAndEmit(session, userText).catch(() => {});
       return;
     }
 
@@ -1230,6 +1242,8 @@ async function runOpenAiVoiceTest(args) {
     st.testMock = {
       available: (args?.mock?.available ?? persisted?.testMock?.available ?? null),
       urgent: (args?.mock?.urgent ?? persisted?.testMock?.urgent ?? null),
+      // Strict gating: stage advance in TEST MODE requires explicit mock userText per request
+      userText: (typeof args?.mock?.userText === "string" ? args.mock.userText : null),
     };
     st.source = String(args?.source ?? persisted.source ?? "encuentra24");
     st.stage = String(persisted.stage || "availability");
@@ -1337,7 +1351,13 @@ async function runOpenAiVoiceTest(args) {
 
         if (st.emittedThisTurn) return;
         st.emittedThisTurn = true;
-        advanceStageAndEmit(st, "").then(() => {
+        const mockUserText = typeof st?.testMock?.userText === "string" ? String(st.testMock.userText).trim() : "";
+        if (!mockUserText) {
+          jlog({ event: "TEST_NO_USER_TEXT", session_id, stage: st.stage });
+          return;
+        }
+        // Only advance when explicit userText exists (no VAD-only advancement).
+        advanceStageAndEmit(st, mockUserText).then(() => {
           persisted.stage = st.stage;
           persisted.source = st.source;
           persisted.qual = st.qual;
@@ -1469,6 +1489,7 @@ const server = http.createServer((req, res) => {
         mock: {
           available: mock?.available ?? null,
           urgent: mock?.urgent ?? null,
+          userText: (typeof mock?.userText === "string" ? mock.userText : null),
         },
       }).catch((e) => {
         jlog({ event: "TEST_RUN_ERR", session_id, err: String(e?.message || e) });
