@@ -27,18 +27,15 @@ async function emitDispatchEvent(
   run: any,
   args: { provider?: string | null; event: string; payload: any },
 ) {
-  try {
-    await supabase.from("dispatch_events").insert({
-      touch_run_id: run.id,
-      account_id: run.account_id,
-      channel: "voice",
-      provider: args.provider ?? null,
-      event: args.event,
-      payload: args.payload ?? {},
-    })
-  } catch {
-    // best-effort: never break dispatch because of telemetry
-  }
+  const { error } = await supabase.from("dispatch_events").insert({
+    touch_run_id: run.id,
+    account_id: run.account_id,
+    channel: "voice",
+    provider: args.provider ?? null,
+    event: args.event,
+    payload: args.payload ?? {},
+  })
+  if (error) throw new Error(`dispatch_events_insert_failed:${run.id}:${error.message}`)
 }
 
 async function upsertVoiceCall(
@@ -56,30 +53,27 @@ async function upsertVoiceCall(
   },
 ) {
   const nowIso = new Date().toISOString()
-  try {
-    await supabase.from("voice_calls").upsert(
-      {
-        id: run.id, // stable id to avoid rewriting ids on repeated upserts
-        lead_id: run.lead_id,
-        touch_run_id: run.id,
-        channel: "voice",
-        provider: patch.provider ?? null,
-        provider_call_id: patch.provider_call_id ?? null,
-        provider_job_id: patch.provider_job_id ?? null,
-        from_phone: patch.from_phone,
-        to_phone: patch.to_phone,
-        status: patch.status,
-        scheduled_at: nowIso,
-        last_error: patch.last_error ?? null,
-        meta: patch.meta ?? {},
-        created_at: nowIso,
-        updated_at: nowIso,
-      },
-      { onConflict: "touch_run_id" },
-    )
-  } catch {
-    // best-effort
-  }
+  const { error } = await supabase.from("voice_calls").upsert(
+    {
+      id: run.id, // stable id to avoid rewriting ids on repeated upserts
+      lead_id: run.lead_id,
+      touch_run_id: run.id,
+      channel: "voice",
+      provider: patch.provider ?? null,
+      provider_call_id: patch.provider_call_id ?? null,
+      provider_job_id: patch.provider_job_id ?? null,
+      from_phone: patch.from_phone,
+      to_phone: patch.to_phone,
+      status: patch.status,
+      scheduled_at: nowIso,
+      last_error: patch.last_error ?? null,
+      meta: patch.meta ?? {},
+      created_at: nowIso,
+      updated_at: nowIso,
+    },
+    { onConflict: "touch_run_id" },
+  )
+  if (error) throw new Error(`voice_calls_upsert_failed:${run.id}:${error.message}`)
 }
 
 serve(async (req) => {
@@ -125,30 +119,54 @@ serve(async (req) => {
     body = {}
   }
 
+  const touchRunIds = Array.isArray(body.touch_run_ids)
+    ? body.touch_run_ids.filter((x: any) => typeof x === "string")
+    : null
   const limit = Number(body.limit ?? 50)
   const dryRun = Boolean(body.dry_run ?? DRY_DEFAULT)
 
   //────────────────────────────────────────
   // 1) TRAER TOUCH RUNS VOICE
   //────────────────────────────────────────
-  const { data: runs, error: rErr } = await supabase
+  let runs: any[] = []
+  if (touchRunIds && touchRunIds.length) {
+    const { data, error } = await supabase
+      .from("touch_runs")
+      .select("id, lead_id, account_id, payload, scheduled_at, step, status, channel")
+      .in("id", touchRunIds)
+      .order("scheduled_at", { ascending: true })
+    if (error) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          stage: "select_runs_by_ids",
+          error: error.message,
+          version: VERSION,
+        }),
+        { status: 500, headers: corsHeaders },
+      )
+    }
+    runs = data ?? []
+  } else {
+    const { data, error } = await supabase
     .from("touch_runs")
-    .select("id, lead_id, account_id, payload, scheduled_at, step, status")
+      .select("id, lead_id, account_id, payload, scheduled_at, step, status, channel")
     .eq("channel", "voice")
     .in("status", ["queued", "scheduled"])
     .order("scheduled_at", { ascending: true })
     .limit(limit)
-
-  if (rErr) {
+    if (error) {
     return new Response(
       JSON.stringify({
         ok: false,
         stage: "select_runs",
-        error: rErr.message,
+          error: error.message,
         version: VERSION,
       }),
       { status: 500, headers: corsHeaders },
     )
+    }
+    runs = data ?? []
   }
 
   if (!runs?.length) {
@@ -177,6 +195,8 @@ serve(async (req) => {
   //────────────────────────────────────────
   let processed = 0
   const errors: any[] = []
+  const processed_ids: string[] = []
+  const failed_ids: string[] = []
 
   // Para llamar al smart router después de enviar
   const projectRef = (() => {
@@ -322,6 +342,9 @@ serve(async (req) => {
 
   for (const run of runs) {
     try {
+      if (String(run.channel || "").toLowerCase() !== "voice") {
+        throw new Error("wrong_channel_for_voice_dispatcher")
+      }
       if (!run.account_id) {
         throw new Error("missing_account_id_on_run")
       }
@@ -427,6 +450,33 @@ serve(async (req) => {
       let telnyxRaw: any = null
       let telnyxErr: string | null = null
       let telnyxSpeakRes: any = null
+
+      // dry_run: deterministic trace (no provider call)
+      if (dryRun) {
+        await upsertVoiceCall(supabase, run, {
+          provider: "dry_run",
+          from_phone: "+0000000000",
+          to_phone: to,
+          status: "scheduled",
+          meta: { dry_run: true },
+        })
+        await emitDispatchEvent(supabase, run, { provider: "dry_run", event: "provider_request", payload: { dry_run: true } })
+        await emitDispatchEvent(supabase, run, { provider: "dry_run", event: "provider_response", payload: { ok: true, dry_run: true } })
+
+        await supabase
+          .from("touch_runs")
+          .update({
+            status: "sent",
+            sent_at: new Date().toISOString(),
+            error: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", run.id)
+
+        processed++
+        processed_ids.push(run.id)
+        continue
+      }
 
       // 2.5 Enviar por Telnyx (PRIMARY) o Twilio (fallback)
       if (!dryRun && isTelnyx) {
@@ -624,12 +674,18 @@ serve(async (req) => {
       // - advance_on=call_status: keep executing; voice-webhook?mode=status will finalize + schedule next step
       const sentAtIso = new Date().toISOString()
 
+      // Guardrail: NEVER mark sent/executing unless provider was actually initiated.
+      if (!telnyxCallControlId && !twilioCallSid) {
+        throw new Error("provider_not_initiated")
+      }
+
       await supabase
         .from("touch_runs")
         .update({
           status: shouldAdvanceAfterSend ? "sent" : "executing",
           sent_at: shouldAdvanceAfterSend ? sentAtIso : null,
           error: null,
+          updated_at: new Date().toISOString(),
           payload: {
             ...(payload ?? {}),
             to,
@@ -648,6 +704,7 @@ serve(async (req) => {
         .eq("id", run.id)
 
       processed++
+      processed_ids.push(run.id)
 
       await logEvaluation(supabase, {
         scope: "lead",
@@ -688,12 +745,14 @@ serve(async (req) => {
     } catch (e: any) {
       const msg = e?.message ?? String(e)
       errors.push({ id: run.id, lead_id: run.lead_id, error: msg })
+      failed_ids.push(run.id)
 
       await supabase
         .from("touch_runs")
         .update({
           status: "failed",
           error: msg,
+          updated_at: new Date().toISOString(),
         })
         .eq("id", run.id)
 
@@ -724,12 +783,14 @@ serve(async (req) => {
 
   return new Response(
     JSON.stringify({
-      ok: true,
+      ok: errors.length === 0,
       version: VERSION,
       processed,
-      failed: errors.length,
+      failed: failed_ids.length,
       errors,
       dryRun,
+      processed_ids,
+      failed_ids,
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
   )

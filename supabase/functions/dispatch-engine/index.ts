@@ -13,6 +13,7 @@ type TouchRun = {
   meta: any
   retry_count: number | null
   max_retries: number | null
+  executed_at: string | null
 }
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!
@@ -73,10 +74,10 @@ serve(async (req) => {
 
   async function mark(id: string, patch: Record<string, any>) {
     const { error } = await supabase.from("touch_runs").update(patch).eq("id", id)
-    if (error) console.error("mark failed", id, error.message)
+    if (error) throw new Error(`mark_failed:${id}:${error.message}`)
   }
 
-  async function emitEvent(run: TouchRun, event: "sent" | "failed", payload: any) {
+  async function emitEvent(run: TouchRun, event: string, payload: any) {
     const { error } = await supabase.from("dispatch_events").insert({
       touch_run_id: run.id,
       account_id: run.account_id,
@@ -85,98 +86,140 @@ serve(async (req) => {
       event,
       payload,
     })
-    if (error) console.error("dispatch_events insert failed", error.message)
+    if (error) throw new Error(`dispatch_events_insert_failed:${run.id}:${error.message}`)
   }
 
-  async function invoke(run: TouchRun) {
-    const started = Date.now()
-    const fn = channelFn(run.channel)
+  // emit claim event per run
+  for (const run of runs as TouchRun[]) {
+    await emitEvent(run, "claim", { at: nowIso(), status: run.status, executed_at: run.executed_at ?? null })
+  }
 
-    const payload = {
-      touch_run_id: run.id,
-      lead_id: run.lead_id,
-      account_id: run.account_id,
-      step: run.step ?? 1,
-      channel: run.channel,
-      dry_run: DRY_RUN,
+  type DispatcherResult = {
+    ok: boolean
+    processed: number
+    failed: number
+    processed_ids: string[]
+    failed_ids: string[]
+    errors?: any[]
+  }
+
+  async function invokeBatch(fn: string, batchRuns: TouchRun[]) {
+    const started = Date.now()
+    for (const run of batchRuns) {
+      await emitEvent(run, "invoke_start", { at: nowIso(), fn, dry_run: DRY_RUN })
     }
 
-    const res = await supabase.functions.invoke(fn, { body: payload })
+    const body = {
+      touch_run_ids: batchRuns.map((r) => r.id),
+      dry_run: DRY_RUN,
+      batch: BATCH,
+      concurrency: CONCURRENCY,
+    }
+
+    const res = await supabase.functions.invoke(fn, { body })
     const ms = Date.now() - started
 
-    // ❌ FAIL
+    // invoke_end per run (store truncated payload)
+    for (const run of batchRuns) {
+      await emitEvent(run, "invoke_end", {
+        at: nowIso(),
+        fn,
+        ms,
+        ok: !res.error,
+        error: res.error?.message ?? null,
+        result: res.error ? null : (res.data ?? null),
+      })
+    }
+
     if (res.error) {
+      return {
+        ok: false,
+        processed: 0,
+        failed: batchRuns.length,
+        processed_ids: [],
+        failed_ids: batchRuns.map((r) => r.id),
+        errors: [{ error: res.error.message }],
+      } satisfies DispatcherResult
+    }
+
+    const data = (res.data ?? {}) as Partial<DispatcherResult>
+    const processed_ids = Array.isArray(data.processed_ids) ? data.processed_ids : []
+    const failed_ids = Array.isArray(data.failed_ids) ? data.failed_ids : []
+    const ok = Boolean(data.ok)
+
+    return {
+      ok,
+      processed: Number(data.processed ?? processed_ids.length ?? 0),
+      failed: Number(data.failed ?? failed_ids.length ?? 0),
+      processed_ids,
+      failed_ids,
+      errors: Array.isArray(data.errors) ? data.errors : [],
+    } satisfies DispatcherResult
+  }
+
+  // 2️⃣ DISPATCH POR CANAL (batch, source-of-truth en dispatcher)
+  const byChannel = new Map<string, TouchRun[]>()
+  for (const run of runs as TouchRun[]) {
+    const arr = byChannel.get(run.channel) ?? []
+    arr.push(run)
+    byChannel.set(run.channel, arr)
+  }
+
+  const allResults: any[] = []
+  let processedTotal = 0
+  let failedTotal = 0
+
+  for (const [channel, group] of byChannel.entries()) {
+    const fn = channelFn(channel)
+    const r = await invokeBatch(fn, group)
+    allResults.push({ channel, fn, ...r })
+
+    const processedSet = new Set(r.processed_ids ?? [])
+
+    // finalize per run
+    for (const run of group) {
+      const isProcessed = processedSet.has(run.id)
+      if (isProcessed) {
+        processedTotal++
+        await emitEvent(run, "finalize_ok", { at: nowIso(), fn })
+        // Do not overwrite status; dispatcher owns status transitions.
+        await mark(run.id, { execution_ms: null, error: null, updated_at: nowIso() })
+        continue
+      }
+
+      failedTotal++
       const nextRetry = (run.retry_count ?? 0) + 1
       const max = run.max_retries ?? 3
+      const baseErr = (r.errors && r.errors.length ? JSON.stringify(r.errors).slice(0, 800) : null) ?? null
+      const errMsg = r.processed_ids?.length === 0 ? "dispatcher_processed_0" : (baseErr ? `dispatcher_failed:${baseErr}` : "dispatcher_failed")
 
-      await emitEvent(run, "failed", {
-        error: res.error.message,
-        execution_ms: ms,
-        retry: nextRetry,
-        dry_run: DRY_RUN,
-      })
+      await emitEvent(run, "finalize_fail", { at: nowIso(), fn, error: errMsg, retry: nextRetry, max })
 
       if (nextRetry <= max) {
         await mark(run.id, {
           status: "queued",
           retry_count: nextRetry,
           scheduled_at: new Date(Date.now() + 60_000).toISOString(),
-          execution_ms: ms,
-          error: res.error.message,
+          error: errMsg,
+          updated_at: nowIso(),
         })
       } else {
         await mark(run.id, {
           status: "failed",
           retry_count: nextRetry,
-          execution_ms: ms,
-          error: res.error.message,
+          error: errMsg,
+          updated_at: nowIso(),
         })
       }
-
-      return { ok: false, id: run.id, fn, error: res.error.message }
     }
-
-    // ✅ SUCCESS
-    await mark(run.id, {
-      status: DRY_RUN ? "simulated" : "sent",
-      sent_at: DRY_RUN ? null : nowIso(),
-      execution_ms: ms,
-      error: null,
-    })
-
-    await emitEvent(run, "sent", {
-      execution_ms: ms,
-      dry_run: DRY_RUN,
-      function_result: res.data ?? null,
-    })
-
-    return { ok: true, id: run.id, fn }
   }
-
-  // 2️⃣ POOL DE EJECUCIÓN
-  let i = 0
-  const results: any[] = []
-
-  const workers = Array.from({
-    length: Math.min(CONCURRENCY, runs.length),
-  }).map(async () => {
-    while (i < runs.length) {
-      const run = runs[i++]
-      results.push(await invoke(run))
-    }
-  })
-
-  await Promise.all(workers)
-
-  const processed = results.filter((r) => r.ok).length
-  const failed = results.filter((r) => !r.ok).length
 
   return Response.json({
     ok: true,
     dry_run: DRY_RUN,
-    claimed: runs.length,
-    processed,
-    failed,
-    results,
+    claimed: (runs as any[]).length,
+    processed: processedTotal,
+    failed: failedTotal,
+    results: allResults,
   })
 })
