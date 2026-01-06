@@ -219,13 +219,316 @@ serve(async (req) => {
 
   const SB_URL = Deno.env.get("SUPABASE_URL")
   const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
+  const TELNYX_API_KEY = Deno.env.get("TELNYX_API_KEY") ?? Deno.env.get("Telnyx_Api") ?? null
   const supabase = SB_URL && SB_KEY ? createClient(SB_URL, SB_KEY, { auth: { persistSession: false } }) : null
 
   const url = new URL(req.url)
   const audioUrl = url.searchParams.get("audio_url")
-  const mode = url.searchParams.get("mode") // twiml | status | null
+  const mode = url.searchParams.get("mode") // twiml | status | telnyx_status | tts_smoke | null
   const touchRunId = url.searchParams.get("touch_run_id")
   const state = url.searchParams.get("state") ?? "start"
+
+  function safeBase64Json(s: string | null): any | null {
+    if (!s) return null
+    try {
+      const raw = atob(s)
+      return JSON.parse(raw)
+    } catch {
+      try {
+        return JSON.parse(s)
+      } catch {
+        return null
+      }
+    }
+  }
+
+  function isMissingMedia(bodyText: string, status: number | null) {
+    const s = String(bodyText || "").toLowerCase()
+    if (status === 404) return true
+    // Telnyx commonly returns 422 with "Invalid media name" when media is not present.
+    if (s.includes("invalid media name")) return true
+    if (s.includes("\"code\": \"90039\"") || (s.includes("code") && s.includes("90039"))) return true
+    return (
+      s.includes("media") &&
+      (s.includes("not found") || s.includes("does not exist") || s.includes("unknown") || s.includes("missing"))
+    )
+  }
+
+  async function openaiIntroTtsMp3Bytes(args: { text: string }) {
+    const OPENAI_KEY = Deno.env.get("OPENAI_API_KEY") ?? null
+    if (!OPENAI_KEY) return { ok: false, bytes: null as Uint8Array | null, error: "missing_openai_api_key" }
+
+    const controller = new AbortController()
+    const t = setTimeout(() => controller.abort(), 2000) // keep it fast
+
+    try {
+      const res = await fetch("https://api.openai.com/v1/audio/speech", {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${OPENAI_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini-tts",
+          voice: "alloy",
+          input: String(args.text || ""),
+          format: "mp3",
+        }),
+      })
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "")
+        return { ok: false, bytes: null, error: txt || `openai_http_${res.status}` }
+      }
+
+      const buf = await res.arrayBuffer()
+      const bytes = new Uint8Array(buf)
+      if (!bytes.length) return { ok: false, bytes: null, error: "empty_audio" }
+      return { ok: true, bytes, error: null }
+      } catch (e) {
+      const msg = String((e as any)?.message ?? e)
+      if (msg.toLowerCase().includes("aborted")) return { ok: false, bytes: null, error: "openai_timeout" }
+      return { ok: false, bytes: null, error: msg }
+    } finally {
+      clearTimeout(t)
+    }
+  }
+
+  // ---- TTS smoke test (NO Telnyx call) ----
+  if (mode === "tts_smoke") {
+    const t0 = Date.now()
+    console.log("TTS_SMOKE_START")
+
+    const key = Deno.env.get("OPENAI_API_KEY") ?? ""
+    const keyPrefix = key ? key.slice(0, 7) : null
+
+    const tts = await openaiIntroTtsMp3Bytes({ text: "Hola—prueba." })
+    const ms = Date.now() - t0
+
+    console.log("TTS_SMOKE_DONE", {
+      ok: tts.ok,
+      bytes: tts.bytes?.length ?? null,
+      ms,
+      err: String(tts.error ?? "").slice(0, 120),
+      key_present: Boolean(key),
+      key_prefix: keyPrefix,
+    })
+
+    return json(
+      {
+        ok: tts.ok,
+        bytes: tts.bytes?.length ?? null,
+        error: tts.ok ? null : String(tts.error ?? "tts_failed"),
+        key_present: Boolean(key),
+        key_prefix: keyPrefix,
+        ms,
+      },
+      tts.ok ? 200 : 500,
+    )
+  }
+  // ---- end smoke test ----
+
+  async function telnyxSpeak(args: { call_control_id: string; text: string }) {
+    if (!TELNYX_API_KEY) return { ok: false, status: null, body: "missing_telnyx_api_key" }
+    const ccid = String(args.call_control_id || "").trim()
+    if (!ccid) return { ok: false, status: null, body: "missing_call_control_id" }
+
+    // Telnyx payload formats vary across docs/versions. We attempt the simplest first,
+    // then fall back to the structured payload.
+    const url = `https://api.telnyx.com/v2/calls/${encodeURIComponent(ccid)}/actions/speak`
+    const headers = {
+      Authorization: `Bearer ${TELNYX_API_KEY}`,
+      "Content-Type": "application/json",
+    }
+
+    const attempt = async (bodyObj: any) => {
+      const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(bodyObj) })
+      const txt = await res.text().catch(() => "")
+      return { ok: res.ok, status: res.status, body: txt }
+    }
+
+    // Attempt A: common call-control shape (voice is required in some accounts)
+    const a = await attempt({ payload: String(args.text || ""), voice: "female", language: "es-PA" })
+    if (a.ok) return a
+
+    // Attempt B: payload as a plain string
+    const b1 = await attempt({ payload: String(args.text || "") })
+    if (b1.ok) return b1
+
+    // Attempt C: structured payload (tts settings)
+    const b = await attempt({
+      payload: {
+        language: "es-PA",
+        voice: "female",
+        text: String(args.text || ""),
+      },
+    })
+    return b
+  }
+
+  async function telnyxAnswer(args: { call_control_id: string }) {
+    if (!TELNYX_API_KEY) return { ok: false, status: null, body: "missing_telnyx_api_key" }
+    const ccid = String(args.call_control_id || "").trim()
+    if (!ccid) return { ok: false, status: null, body: "missing_call_control_id" }
+    const res = await fetch(`https://api.telnyx.com/v2/calls/${encodeURIComponent(ccid)}/actions/answer`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TELNYX_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    })
+    const txt = await res.text().catch(() => "")
+    return { ok: res.ok, status: res.status, body: txt }
+  }
+
+  async function telnyxPlaybackStart(args: { call_control_id: string; audio_url: string }) {
+    if (!TELNYX_API_KEY) return { ok: false, status: null, body: "missing_telnyx_api_key" }
+    const ccid = String(args.call_control_id || "").trim()
+    const audioUrl = String(args.audio_url || "").trim()
+    if (!ccid) return { ok: false, status: null, body: "missing_call_control_id" }
+    if (!audioUrl) return { ok: false, status: null, body: "missing_audio_url" }
+
+    const res = await fetch(`https://api.telnyx.com/v2/calls/${encodeURIComponent(ccid)}/actions/playback_start`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TELNYX_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ audio_url: audioUrl }),
+    })
+    const txt = await res.text().catch(() => "")
+    return { ok: res.ok, status: res.status, body: txt }
+  }
+
+  async function telnyxPlaybackStartByMediaName(args: { call_control_id: string; media_name: string; command_id: string }) {
+    if (!TELNYX_API_KEY) return { ok: false, status: null, body: "missing_telnyx_api_key" }
+    const ccid = String(args.call_control_id || "").trim()
+    const mediaName = String(args.media_name || "").trim()
+    if (!ccid) return { ok: false, status: null, body: "missing_call_control_id" }
+    if (!mediaName) return { ok: false, status: null, body: "missing_media_name" }
+
+    const res = await fetch(`https://api.telnyx.com/v2/calls/${encodeURIComponent(ccid)}/actions/playback_start`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TELNYX_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        media_name: mediaName,
+        target_legs: "self",
+        overlay: false,
+        cache_audio: true,
+        command_id: args.command_id,
+      }),
+    })
+    const txt = await res.text().catch(() => "")
+    return { ok: res.ok, status: res.status, body: txt }
+  }
+
+  async function telnyxUploadMedia(args: { media_name: string; ttl_secs: number; mp3_bytes: Uint8Array }) {
+    if (!TELNYX_API_KEY) return { ok: false, status: null, body: "missing_telnyx_api_key" }
+    const mediaName = String(args.media_name || "").trim()
+    if (!mediaName) return { ok: false, status: null, body: "missing_media_name" }
+
+    const form = new FormData()
+    form.set("media_name", mediaName)
+    // Telnyx validates ttl_secs strictly (< 630720000 in our observed error).
+    const ttl = Math.max(60, Math.min(Number(args.ttl_secs || 0), 630719999))
+    form.set("ttl_secs", String(ttl))
+    const blob = new Blob([args.mp3_bytes], { type: "audio/mpeg" })
+    // Telnyx expects "media" (or media_url), not "file".
+    form.set("media", blob, `${mediaName}.mp3`)
+
+    const res = await fetch("https://api.telnyx.com/v2/media", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TELNYX_API_KEY}` },
+      body: form,
+    })
+    const txt = await res.text().catch(() => "")
+    return { ok: res.ok, status: res.status, body: txt }
+  }
+
+  function prettySource(s: string) {
+    const v = String(s || "").trim().toLowerCase()
+    if (!v) return "internet"
+    if (v.includes("encuentra24") || v === "enc24") return "Encuentra24"
+    return s
+  }
+
+  async function resolveLeadSource(args: { supabase: any; lead_id: string }) {
+    const { supabase, lead_id } = args
+    try {
+      const { data: l } = await supabase.from("leads").select("source, enriched").eq("id", lead_id).maybeSingle()
+      const src = String((l as any)?.source ?? "").trim()
+      if (src) return src
+      const enc = (l as any)?.enriched?.enc24 ? "encuentra24" : ""
+      return enc || ""
+    } catch {
+      return ""
+    }
+  }
+
+  function buildGreetingText(args: { sourceLabel: string }) {
+    const source = args.sourceLabel || "internet"
+    return (
+      "Hola, ¿hablo con el dueño del carro? " +
+      `Te llamo porque vi el anuncio que acabas de subir hace unos minutos en ${source}. ` +
+      "¿Todavía está disponible y listo para mostrarse? " +
+      "Si sí, ¿hoy a qué hora te va bien y en qué zona estás? " +
+      "Perfecto. Con eso te paso de inmediato con Darmesh para coordinar y ver si lo cerramos hoy."
+    )
+  }
+
+  async function renderVoiceUrl(args: { lead_id: string; text: string }) {
+    const leadId = String(args.lead_id || "").trim()
+    const text = String(args.text || "").trim()
+    if (!SB_URL || !SB_KEY) return { ok: false, publicUrl: null, error: "missing_supabase_env" }
+    if (!leadId || !text) return { ok: false, publicUrl: null, error: "missing_lead_id_or_text" }
+
+    const projectRef = (() => {
+      try {
+        const u = new URL(SB_URL)
+        return u.hostname.split(".")[0]
+      } catch {
+        return null
+      }
+    })()
+    if (!projectRef) return { ok: false, publicUrl: null, error: "missing_project_ref" }
+
+    const endpoint = `https://${projectRef}.functions.supabase.co/render-voice`
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SB_KEY,
+        Authorization: `Bearer ${SB_KEY}`,
+      },
+      body: JSON.stringify({
+        lead_id: leadId,
+        text,
+        // defaults in render-voice: model=gpt-4o-mini-tts, voice=alloy, bucket=voice
+        timeout_ms: 8000,
+      }),
+    })
+    const txt = await res.text().catch(() => "")
+    let j: any = null
+    try {
+      j = txt ? JSON.parse(txt) : null
+    } catch {
+      j = { raw: txt }
+    }
+    const publicUrl = (j as any)?.publicUrl ?? null
+    if (!res.ok || !publicUrl) {
+      return {
+        ok: false,
+        publicUrl: publicUrl ?? null,
+        error: j?.error?.message ?? j?.error ?? txt ?? `http_${res.status}`,
+      }
+    }
+    return { ok: true, publicUrl, error: null }
+  }
 
   // ---- Playback ----
   if (audioUrl) {
@@ -244,23 +547,18 @@ serve(async (req) => {
     const formData = req.method === "POST" ? await req.formData().catch(() => null) : null
     const { digits, speech, confidence } = digitsOrSpeech(formData)
 
-    const { data: tr } = await supabase
-      .from("touch_runs")
-      .select("id, lead_id, payload")
-      .eq("id", touchRunId)
-      .maybeSingle()
+    const { data: tr } = await supabase.from("touch_runs").select("id, lead_id, payload").eq("id", touchRunId).maybeSingle()
 
     if (!tr?.id) {
-      return xmlResponse(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">Gracias. Te escribo por WhatsApp para coordinar.</Say><Hangup/></Response>`)
+      return xmlResponse(
+        `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">Gracias. Te escribo por WhatsApp para coordinar.</Say><Hangup/></Response>`,
+      )
     }
 
     const payload: any = tr.payload ?? {}
     const buyer = String(payload?.voice?.buyer_name ?? "Darmesh").trim() || "Darmesh"
     const listing = payload?.voice?.listing ?? {}
-    const carLabel =
-      String(listing?.car_label ?? "").trim() ||
-      String(listing?.model ?? "").trim() ||
-      "carro"
+    const carLabel = String(listing?.car_label ?? "").trim() || String(listing?.model ?? "").trim() || "carro"
 
     const base = `${SB_URL}/functions/v1/voice-webhook?mode=twiml&touch_run_id=${encodeURIComponent(tr.id)}`
     const action = (st: string) => `${base}&state=${encodeURIComponent(st)}`
@@ -278,16 +576,29 @@ serve(async (req) => {
       await patchVoiceMeta(supabase, touchRunId, { intro: { digits, speech, confidence, classification: cls } }).catch(() => {})
 
       if (cls === "busy") {
-        return xmlResponse(buildGather({ actionUrl: action("available_busy"), say: "Tranquilo, lo hago rápido. ¿Todavía está disponible? Marca 1 sí, 2 no.", numDigits: 1, timeoutSec: 5 }))
+        return xmlResponse(
+          buildGather({
+            actionUrl: action("available_busy"),
+            say: "Tranquilo, lo hago rápido. ¿Todavía está disponible? Marca 1 sí, 2 no.",
+            numDigits: 1,
+            timeoutSec: 5,
+          }),
+        )
       }
       if (cls === "no" || cls === "wrong") {
-        return xmlResponse(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">Perfecto, disculpa la molestia. Gracias.</Say><Hangup/></Response>`)
+        return xmlResponse(
+          `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">Perfecto, disculpa la molestia. Gracias.</Say><Hangup/></Response>`,
+        )
       }
       if (cls === "sold") {
-        return xmlResponse(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">Perfecto, gracias por avisar. Que tengas buena tarde.</Say><Hangup/></Response>`)
+        return xmlResponse(
+          `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">Perfecto, gracias por avisar. Que tengas buena tarde.</Say><Hangup/></Response>`,
+        )
       }
       if (cls === "dealer") {
-        return xmlResponse(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">Gracias. En este momento buscamos trato directo con dueño. Que tengas buena tarde.</Say><Hangup/></Response>`)
+        return xmlResponse(
+          `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">Gracias. En este momento buscamos trato directo con dueño. Que tengas buena tarde.</Say><Hangup/></Response>`,
+        )
       }
       return xmlResponse(buildGather({ actionUrl: action("available"), say: "Perfecto. ¿Todavía está disponible? Marca 1 sí, 2 no.", numDigits: 1, timeoutSec: 5 }))
     }
@@ -296,7 +607,9 @@ serve(async (req) => {
       const yn = classifyYesNo(speech, digits)
       await patchVoiceMeta(supabase, touchRunId, { available: { digits, speech, confidence, value: yn } }).catch(() => {})
       if (yn === "no") {
-        return xmlResponse(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">Listo, gracias. Que tengas buena tarde.</Say><Hangup/></Response>`)
+        return xmlResponse(
+          `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">Listo, gracias. Que tengas buena tarde.</Say><Hangup/></Response>`,
+        )
       }
       if (state === "available_busy") {
         return xmlResponse(buildGather({ actionUrl: action("negotiable_busy"), say: "¿El precio es negociable un poco? Marca 1 sí, 2 no.", numDigits: 1, timeoutSec: 5 }))
@@ -338,11 +651,11 @@ serve(async (req) => {
     if (state === "wa_ok") {
       const yn = classifyYesNo(speech, digits)
       await patchVoiceMeta(supabase, touchRunId, { whatsapp_ok: { digits, speech, confidence, value: yn } }).catch(() => {})
-      return xmlResponse(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">${escXml(
-        yn === "yes"
-          ? "Perfecto. Te escribo por WhatsApp en este mismo número para confirmar. Gracias."
-          : "Perfecto. Gracias por tu tiempo."
-      )}</Say><Hangup/></Response>`)
+      return xmlResponse(
+        `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice" language="es-PA">${escXml(
+          yn === "yes" ? "Perfecto. Te escribo por WhatsApp en este mismo número para confirmar. Gracias." : "Perfecto. Gracias por tu tiempo.",
+        )}</Say><Hangup/></Response>`,
+      )
     }
 
     return xmlResponse(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`)
@@ -421,7 +734,7 @@ serve(async (req) => {
 
       try {
         await supabase
-          .from("touch_runs")
+        .from("touch_runs")
           .update({
             payload: {
               ...(payload ?? {}),
@@ -473,10 +786,299 @@ serve(async (req) => {
     return json({ ok: true, terminal: true, outcome, scheduled, version: VERSION })
   }
 
+  // ---- Telnyx webhook (call status events) ----
+  if (mode === "telnyx_status") {
+    if (!supabase) return json({ ok: true, ignored: true, reason: "missing_supabase_env", version: VERSION })
+
+    const event = (await req.json().catch(() => ({}))) as any
+    const eventType: string | null =
+      (event?.data?.event_type as string | undefined) ??
+      (event?.data?.eventType as string | undefined) ??
+      (event?.event_type as string | undefined) ??
+      null
+
+    const payload = (event?.data?.payload ?? event?.payload ?? {}) as any
+    const callControlId: string | null =
+      (payload?.call_control_id as string | undefined) ??
+      (payload?.callControlId as string | undefined) ??
+      null
+
+    // Deterministic logging for every Telnyx event
+    console.log("TELNYX_IN", {
+      event_type: eventType,
+      call_control_id_present: Boolean(callControlId),
+    })
+
+    const clientStateRaw: string | null =
+      (payload?.client_state as string | undefined) ??
+      (payload?.clientState as string | undefined) ??
+      null
+
+    const clientState = safeBase64Json(clientStateRaw)
+    const inferredTouchRunId =
+      touchRunId ??
+      (typeof clientState?.touch_run_id === "string" ? clientState.touch_run_id : null) ??
+      (typeof clientState?.touchRunId === "string" ? clientState.touchRunId : null)
+
+    if (!inferredTouchRunId) {
+      return json({ ok: true, ignored: true, reason: "missing_touch_run_id", event_type: eventType, version: VERSION })
+    }
+
+    const { data: run, error: rErr } = await supabase
+      .from("touch_runs")
+      .select("id, account_id, campaign_id, lead_id, step, channel, payload, meta")
+      .eq("id", inferredTouchRunId)
+      .maybeSingle()
+
+    if (rErr) return json({ ok: false, error: rErr.message, version: VERSION }, 500)
+    if (!run) return json({ ok: true, ignored: true, reason: "touch_run_not_found", version: VERSION })
+
+    const runPayload = (run.payload ?? {}) as any
+    const meta = (run.meta ?? {}) as any
+
+    const hangupCause: string | null =
+      (payload?.hangup_cause as string | undefined) ??
+      (payload?.hangupCause as string | undefined) ??
+      null
+
+    const metaPatch = {
+      ...meta,
+      telnyx: {
+        ...(meta?.telnyx ?? {}),
+        event_type: eventType,
+        call_control_id: callControlId ?? (runPayload?.telnyx_call_control_id ?? null),
+        hangup_cause: hangupCause,
+        client_state: clientState ?? null,
+        in_last: {
+          event_type: eventType,
+          id: callControlId ?? null,
+          has_call_control_id: Boolean(callControlId),
+          received_at: new Date().toISOString(),
+        },
+        last_callback_at: new Date().toISOString(),
+        version: VERSION,
+      },
+    }
+
+    // Log playback events (if Telnyx sends them)
+    if (eventType === "call.playback.started" || eventType === "call.playback.ended") {
+      console.log("TELNYX_PLAYBACK_EVT", { event_type: eventType, call_control_id_present: Boolean(callControlId) })
+    }
+
+    // Answered flow: no fire-and-forget; no public URLs.
+    if (eventType === "call.answered") {
+      const ccid = (metaPatch?.telnyx?.call_control_id as string | null) ?? null
+      console.log("TELNYX_ANSWERED", { call_control_id: ccid, touch_run_id: run.id, lead_id: run.lead_id })
+
+      // update meta (fast)
+      await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch }).eq("id", run.id)
+
+      // Realtime streaming calls: NEVER start playback here.
+      // (1) check run payload voice mode, (2) check client_state voice_mode
+      try {
+        const payloadVoiceMode =
+          (typeof runPayload?.voice?.mode === "string" ? runPayload.voice.mode : null) ??
+          (typeof runPayload?.payload?.voice?.mode === "string" ? runPayload.payload.voice.mode : null)
+
+        const cs =
+          (clientState && typeof clientState === "object" ? clientState : null) ??
+          safeBase64Json(clientStateRaw) ??
+          null
+        const clientVoiceMode = (cs?.voice_mode ?? cs?.voiceMode ?? null) as string | null
+
+        const isRealtime =
+          (typeof payloadVoiceMode === "string" && payloadVoiceMode.startsWith("realtime")) ||
+          clientVoiceMode === "realtime"
+
+        if (isRealtime) {
+          console.log("TELNYX_REALTIME_SKIP_PLAYBACK", { touch_run_id: run.id, payloadVoiceMode, clientVoiceMode })
+          return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
+        }
+      } catch {}
+
+      // If the caller is configured for realtime streaming (Fly gateway), DO NOT start playback here.
+      // The WS bridge will handle the greeting + conversation.
+      try {
+        const cs =
+          (clientState && typeof clientState === "object" ? clientState : null) ??
+          safeBase64Json(clientStateRaw) ??
+          null
+        const voiceMode = (cs?.voice_mode ?? cs?.voiceMode ?? null) as string | null
+        if (voiceMode === "realtime") {
+          console.log("TELNYX_STREAMING_MODE_SKIP_PLAYBACK", { touch_run_id: run.id })
+          return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
+        }
+      } catch {}
+
+      const MEDIA_NAME = String(Deno.env.get("TELNYX_INTRO_MEDIA_NAME") ?? "ra_intro_v1").trim()
+      const INTRO_TEXT = String(Deno.env.get("INTRO_TEXT") ?? "Hola—un segundo.").trim()
+      const INTRO_TTL_SECS = Number(Deno.env.get("INTRO_TTL_SECS") ?? "630720000")
+
+      if (!ccid) {
+        console.log("TELNYX_PLAYBACK_RES", { status: null, body: "missing_call_control_id" })
+        return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
+      }
+
+      // 1) Playback by media_name
+      const cmd1 = crypto.randomUUID()
+      const pr1 = await telnyxPlaybackStartByMediaName({ call_control_id: ccid, media_name: MEDIA_NAME, command_id: cmd1 })
+      console.log("TELNYX_PLAYBACK_RES", { status: pr1.status, body: String(pr1.body || "") })
+
+      // 2) If missing media: bootstrap once (OpenAI TTS -> upload to Telnyx media -> retry playback)
+      let finalPlayback = { status: pr1.status ?? null, ok: Boolean(pr1.ok), body: String(pr1.body || "") }
+      let introTtsMeta: any = null
+      let mediaUploadMeta: any = null
+      let retryPlaybackMeta: any = null
+
+      if (!pr1.ok && isMissingMedia(String(pr1.body || ""), pr1.status)) {
+        const tts = await openaiIntroTtsMp3Bytes({ text: INTRO_TEXT })
+        if (tts.ok && tts.bytes) {
+          console.log("INTRO_TTS_OK", { bytes: tts.bytes.length })
+          introTtsMeta = { ok: true, bytes: tts.bytes.length }
+
+          const up = await telnyxUploadMedia({ media_name: MEDIA_NAME, ttl_secs: INTRO_TTL_SECS, mp3_bytes: tts.bytes })
+          console.log("TELNYX_MEDIA_UPLOAD_RES", { status: up.status, body: String(up.body || "") })
+          mediaUploadMeta = { ok: Boolean(up.ok), status: up.status ?? null, body: String(up.body || "").slice(0, 800) }
+
+          const cmd2 = crypto.randomUUID()
+          const pr2 = await telnyxPlaybackStartByMediaName({ call_control_id: ccid, media_name: MEDIA_NAME, command_id: cmd2 })
+          console.log("TELNYX_PLAYBACK_RETRY_RES", { status: pr2.status, body: String(pr2.body || "") })
+          finalPlayback = { status: pr2.status ?? null, ok: Boolean(pr2.ok), body: String(pr2.body || "") }
+          retryPlaybackMeta = { ok: Boolean(pr2.ok), status: pr2.status ?? null, body: String(pr2.body || "").slice(0, 800), command_id: cmd2 }
+        } else {
+          console.log("INTRO_TTS_OK", { bytes: 0 })
+          console.log("TELNYX_MEDIA_UPLOAD_RES", { status: null, body: String(tts.error || "tts_failed").slice(0, 400) })
+          introTtsMeta = { ok: false, error: String(tts.error || "tts_failed").slice(0, 800) }
+          mediaUploadMeta = { ok: false, status: null, body: String(tts.error || "tts_failed").slice(0, 800) }
+        }
+      }
+
+      // Persist deterministic evidence in DB meta (so we don't depend on runtime logs)
+      try {
+        const nextMeta = {
+          ...metaPatch,
+          telnyx: {
+            ...(metaPatch?.telnyx ?? {}),
+            answered_at: new Date().toISOString(),
+            playback_last: {
+              media_name: MEDIA_NAME,
+              status: finalPlayback.status,
+              ok: finalPlayback.ok,
+              body: finalPlayback.body.slice(0, 800),
+              command_id: cmd1,
+            },
+            intro_tts_last: introTtsMeta,
+            media_upload_last: mediaUploadMeta,
+            playback_retry_last: retryPlaybackMeta,
+          },
+        }
+        await supabase.from("touch_runs").update({ meta: nextMeta }).eq("id", run.id)
+      } catch {}
+
+      return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
+    }
+
+    // Initiated: keep storing meta (no blocking commands here).
+    if (eventType === "call.initiated") {
+      await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch }).eq("id", run.id)
+      return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
+    }
+
+    // Terminal: hangup maps outcome; schedule retries/fallback if advance_on=call_status.
+    if (eventType === "call.hangup") {
+      const cause = String(hangupCause ?? "").toLowerCase()
+      const outcome =
+        cause.includes("busy") ? "busy" :
+        (cause.includes("no_answer") || cause.includes("no-answer") || cause.includes("timeout")) ? "no_answer" :
+        cause.includes("machine") ? "machine" :
+        "answered"
+
+      const advanceOn = runPayload?.routing?.advance_on ?? runPayload?.routing?.advanceOn ?? "sent"
+      const optedIn = advanceOn === "call_status"
+      const isVoice = String(run.channel || "").toLowerCase() === "voice"
+
+      const finalStatus = outcome === "answered" ? "sent" : "failed"
+      await supabase
+        .from("touch_runs")
+        .update({
+          status: finalStatus,
+          meta: { ...metaPatch, outcome },
+          error: outcome === "answered" ? null : `telnyx_${outcome}`,
+          sent_at: new Date().toISOString(),
+        })
+        .eq("id", run.id)
+
+      let scheduled: any = null
+      if (optedIn && isVoice) {
+        const routing = runPayload?.routing ?? {}
+        const maxAttempts = Number(routing?.fallback?.max_attempts?.voice ?? 2)
+        const attemptsDone = Number(routing?.attempts_done ?? 0) + 1
+        const nextStep = Number(run.step ?? 1) + 1
+
+        const shouldRetry = ["no_answer", "machine", "busy", "failed"].includes(outcome) && attemptsDone < maxAttempts
+        const shouldFallbackToWhatsApp = ["no_answer", "machine", "busy", "failed"].includes(outcome) && attemptsDone >= maxAttempts
+
+        try {
+          await supabase
+            .from("touch_runs")
+            .update({
+              payload: {
+                ...(runPayload ?? {}),
+                routing: {
+                  ...(routing ?? {}),
+                  attempts_done: attemptsDone,
+                  last_outcome: outcome,
+                },
+              },
+            })
+            .eq("id", run.id)
+        } catch {}
+
+        if (shouldRetry) {
+          scheduled = await insertNextTouchIfExists({
+            supabase,
+            account_id: run.account_id,
+            campaign_id: run.campaign_id,
+            lead_id: run.lead_id,
+            next_step: nextStep,
+            preferred_channel: "voice",
+            previous_touch_id: run.id,
+          })
+        } else if (shouldFallbackToWhatsApp) {
+          scheduled = await insertNextTouchIfExists({
+            supabase,
+            account_id: run.account_id,
+            campaign_id: run.campaign_id,
+            lead_id: run.lead_id,
+            next_step: nextStep,
+            preferred_channel: "whatsapp",
+            previous_touch_id: run.id,
+          })
+        }
+      }
+
+      try {
+        await logEvaluation(supabase, {
+          scope: "lead",
+          actor: "webhook",
+          label: "telnyx_voice_status_terminal",
+          account_id: run.account_id,
+          entity_id: run.lead_id,
+          kpis: { terminal: 1, answered: outcome === "answered" ? 1 : 0 },
+          notes: `touch_run_id=${run.id} outcome=${outcome} scheduled=${scheduled?.created ? "yes" : "no"}`,
+        })
+      } catch {}
+
+      return json({ ok: true, terminal: true, outcome, scheduled, version: VERSION })
+    }
+
+    // Non-terminal: store meta + keep executing
+    await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch }).eq("id", run.id)
+    return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
+  }
+
   // Default: nothing to do (avoid breaking random callbacks)
   return xmlResponse(`<?xml version="1.0" encoding="UTF-8"?><Response></Response>`)
 })
 
 export const config = { verify_jwt: false }
-
-

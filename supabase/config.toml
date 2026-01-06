@@ -377,6 +377,11 @@ enabled = true
 verify_jwt = false
 entrypoint = "./functions/voice-webhook/index.ts"
 
+[functions.voice-handoff]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/voice-handoff/index.ts"
+
 [functions.render-voice]
 enabled = true
 verify_jwt = false

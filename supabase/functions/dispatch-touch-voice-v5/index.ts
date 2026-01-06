@@ -50,6 +50,11 @@ serve(async (req) => {
   // Prefer TWILIO_VOICE_FROM; accept legacy TWILIO_FROM_NUMBER (already used in some envs).
   const VOICE_FROM = Deno.env.get("TWILIO_VOICE_FROM") ?? Deno.env.get("TWILIO_FROM_NUMBER") // ej: "+14155551234"
 
+  // ENV Telnyx para VOICE (primary)
+  // NOTE: el secreto en Supabase Edge está cargado como "Telnyx_Api" (según usuario),
+  // pero también aceptamos TELNYX_API_KEY por consistencia.
+  const TELNYX_API_KEY = Deno.env.get("TELNYX_API_KEY") ?? Deno.env.get("Telnyx_Api") ?? null
+
   const QA_VOICE_SINK = Deno.env.get("QA_VOICE_SINK") ?? null
   const DRY_DEFAULT = Deno.env.get("DRY_RUN_VOICE") === "true"
 
@@ -133,6 +138,128 @@ serve(async (req) => {
     ? `https://${projectRef}.functions.supabase.co/voice-webhook`
     : null
 
+  async function telnyxCreateCall(args: {
+    to: string
+    from: string
+    touchRunId: string
+    config: Record<string, unknown>
+    clientStateExtra?: Record<string, unknown>
+  }): Promise<{ ok: true; call_control_id: string | null; raw: any } | { ok: false; error: string; raw: any }> {
+    if (!TELNYX_API_KEY) return { ok: false, error: "missing_telnyx_api_key", raw: null }
+
+    const connectionId =
+      (args.config?.telnyx_connection_id as string | undefined) ??
+      (args.config?.connection_id as string | undefined) ??
+      (Deno.env.get("TELNYX_CONNECTION_ID") ?? undefined)
+
+    if (!connectionId) return { ok: false, error: "missing_telnyx_connection_id", raw: null }
+
+    // Event webhook: prefer explicit config, else use our shared voice-webhook in telnyx mode.
+    const eventUrl =
+      (args.config?.telnyx_webhook_event_url as string | undefined) ??
+      (args.config?.webhook_event_url as string | undefined) ??
+      (voiceWebhookBaseUrl ? `${voiceWebhookBaseUrl}?mode=telnyx_status&touch_run_id=${encodeURIComponent(args.touchRunId)}` : null)
+
+    // client_state: many Telnyx events echo this back; we use it to map event -> touch_run_id.
+    const clientStateObj = {
+      touch_run_id: args.touchRunId,
+      ...(args.clientStateExtra ?? {}),
+    }
+    const clientState = btoa(JSON.stringify(clientStateObj))
+
+    const body: Record<string, unknown> = {
+      connection_id: connectionId,
+      to: args.to,
+      from: args.from,
+      client_state: clientState,
+    }
+    if (eventUrl) body.webhook_event_url = eventUrl
+
+    // Ring timeout (seconds). If too low, callee can "answer" near the end and Telnyx may still hang up as timeout.
+    const timeoutSecsRaw =
+      (args.config?.telnyx_timeout_secs as number | string | undefined) ??
+      (args.config?.timeout_secs as number | string | undefined) ??
+      (Deno.env.get("TELNYX_TIMEOUT_SECS") ?? undefined)
+    const timeoutSecs = timeoutSecsRaw ? Number(timeoutSecsRaw) : 60
+    if (Number.isFinite(timeoutSecs) && timeoutSecs > 0) body.timeout_secs = Math.min(Math.max(timeoutSecs, 15), 120)
+
+    // Optional: streaming to our Fly gateway (no TwiML). Provide wss URL with token.
+    const streamUrl =
+      (args.config?.telnyx_stream_url as string | undefined) ??
+      (args.config?.stream_url as string | undefined) ??
+      (Deno.env.get("TELNYX_STREAM_URL") ?? undefined)
+    if (streamUrl) {
+      body.stream_url = streamUrl
+
+      // Telnyx bidirectional streaming: RTP payload (no headers) over WebSocket.
+      // Force a deterministic codec to avoid OPUS defaults causing silence in our gateway.
+      const streamTrack =
+        (args.config?.telnyx_stream_track as string | undefined) ??
+        (args.config?.stream_track as string | undefined) ??
+        (Deno.env.get("TELNYX_STREAM_TRACK") ?? "both_tracks")
+
+      const bidiMode =
+        (args.config?.telnyx_stream_bidirectional_mode as string | undefined) ??
+        (args.config?.stream_bidirectional_mode as string | undefined) ??
+        (Deno.env.get("TELNYX_STREAM_BIDIRECTIONAL_MODE") ?? "rtp")
+
+      const bidiCodec =
+        (args.config?.telnyx_stream_bidirectional_codec as string | undefined) ??
+        (args.config?.stream_bidirectional_codec as string | undefined) ??
+        (Deno.env.get("TELNYX_STREAM_BIDIRECTIONAL_CODEC") ?? "PCMU")
+
+      body.stream_track = streamTrack
+      body.stream_bidirectional_mode = bidiMode
+      body.stream_bidirectional_codec = bidiCodec
+    }
+
+    const res = await fetch("https://api.telnyx.com/v2/calls", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TELNYX_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    })
+
+    const txt = await res.text().catch(() => "")
+    let j: any = null
+    try {
+      j = txt ? JSON.parse(txt) : null
+    } catch {
+      j = { raw: txt }
+    }
+
+    if (!res.ok) {
+      const msg = (j?.errors?.[0]?.detail as string | undefined) ?? (j?.message as string | undefined) ?? `telnyx_http_${res.status}`
+      return { ok: false, error: msg, raw: j }
+    }
+
+    const callControlId =
+      (j?.data?.call_control_id as string | undefined) ??
+      (j?.data?.id as string | undefined) ??
+      null
+
+    return { ok: true, call_control_id: callControlId, raw: j }
+  }
+
+  async function telnyxSpeakNow(args: { call_control_id: string; text: string }): Promise<{ ok: boolean; status: number | null; body: string }> {
+    if (!TELNYX_API_KEY) return { ok: false, status: null, body: "missing_telnyx_api_key" }
+    const ccid = String(args.call_control_id || "").trim()
+    if (!ccid) return { ok: false, status: null, body: "missing_call_control_id" }
+
+    const url = `https://api.telnyx.com/v2/calls/${encodeURIComponent(ccid)}/actions/speak`
+    const headers = {
+      Authorization: `Bearer ${TELNYX_API_KEY}`,
+      "Content-Type": "application/json",
+    }
+
+    // Attempt A: common call-control shape (voice required in some accounts)
+    const res = await fetch(url, { method: "POST", headers, body: JSON.stringify({ payload: String(args.text || ""), voice: "female", language: "es-PA" }) })
+    const txt = await res.text().catch(() => "")
+    return { ok: res.ok, status: res.status, body: txt }
+  }
+
   for (const run of runs) {
     try {
       if (!run.account_id) {
@@ -158,12 +285,10 @@ serve(async (req) => {
       const provider = providerRow.provider
       const config = (providerRow.config ?? {}) as Record<string, unknown>
 
-      if (provider !== "twilio") {
+      const isTelnyx = provider === "telnyx"
+      const isTwilio = provider === "twilio"
+      if (!isTelnyx && !isTwilio) {
         throw new Error(`unsupported_provider:${provider}`)
-      }
-
-      if (!TWILIO_SID || !TWILIO_TOKEN || !VOICE_FROM) {
-        throw new Error("missing_twilio_voice_env")
       }
 
       // 2.2 Resolver teléfono del lead (lead_enriched primero)
@@ -232,9 +357,59 @@ serve(async (req) => {
       }
 
       let twilioCallSid: string | null = null
+      let telnyxCallControlId: string | null = null
+      let telnyxRaw: any = null
+      let telnyxErr: string | null = null
+      let telnyxSpeakRes: any = null
 
-      // 2.5 Enviar por Twilio Voice (si no es dryRun)
-      if (!dryRun) {
+      // 2.5 Enviar por Telnyx (PRIMARY) o Twilio (fallback)
+      if (!dryRun && isTelnyx) {
+        const streamUrl =
+          (config?.telnyx_stream_url as string | undefined) ??
+          (config?.stream_url as string | undefined) ??
+          (Deno.env.get("TELNYX_STREAM_URL") ?? undefined)
+
+        const telnyxFrom =
+          (config?.telnyx_from as string | undefined) ??
+          (config?.from as string | undefined) ??
+          (Deno.env.get("TELNYX_VOICE_FROM") ?? undefined)
+
+        if (!telnyxFrom) throw new Error("missing_telnyx_from")
+
+        const clientStateExtra = {
+          lead_id: run.lead_id,
+          account_id: run.account_id,
+          source: (payload?.source ?? payload?.voice?.source ?? null),
+          voice_mode: streamUrl ? "realtime" : "call_control_tts",
+          buyer_name: (payload?.voice?.buyer_name ?? payload?.voice?.buyerName ?? null),
+          listing: (payload?.voice?.listing ?? null),
+        }
+        const r = await telnyxCreateCall({ to, from: telnyxFrom, touchRunId: run.id, config, clientStateExtra })
+        telnyxRaw = (r as any).raw ?? null
+        if (!r.ok) {
+          telnyxErr = String((r as any).error || "telnyx_failed")
+          // Fallback to Twilio if configured
+          if (!TWILIO_SID || !TWILIO_TOKEN || !VOICE_FROM) {
+            throw new Error(`telnyx_failed_and_no_twilio_fallback:${(r as any).error}`)
+          }
+          // Use Twilio branch below
+        } else {
+          telnyxCallControlId = r.call_control_id
+          // If we're using realtime streaming, the Fly gateway handles the conversation.
+          // Otherwise, keep best-effort immediate speech.
+          if (!streamUrl && telnyxCallControlId) {
+            telnyxSpeakRes = await telnyxSpeakNow({ call_control_id: telnyxCallControlId, text: textBody })
+          }
+        }
+      }
+
+      // 2.5b Twilio branch:
+      // - if provider is twilio, always
+      // - if provider is telnyx, only when telnyx failed (telnyxCallControlId is null)
+      if (!dryRun && (isTwilio || (isTelnyx && !telnyxCallControlId))) {
+        if (!TWILIO_SID || !TWILIO_TOKEN || !VOICE_FROM) {
+          throw new Error("missing_twilio_voice_env")
+        }
         const callUrl = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`
 
         const useInteractiveWebhook = voiceMode === "interactive_v1" && !!voiceWebhookBaseUrl
@@ -289,6 +464,9 @@ serve(async (req) => {
         const txt = await twilioResp.text()
 
         if (!twilioResp.ok) {
+          if (telnyxErr) {
+            throw new Error(`telnyx_failed:${telnyxErr}; twilio_error:${txt}`)
+          }
           throw new Error(`Twilio error: ${txt}`)
         }
 
@@ -316,9 +494,14 @@ serve(async (req) => {
             to,
             to_normalized: toReal,
             dryRun,
-            provider,
+            // If Telnyx is configured as primary but it failed and we fell back to Twilio,
+            // persist the actual provider used for this run.
+            provider: telnyxCallControlId ? "telnyx" : (twilioCallSid ? "twilio" : provider),
             provider_config: config,
             twilio_call_sid: twilioCallSid,
+            telnyx_call_control_id: telnyxCallControlId,
+            telnyx_response: telnyxRaw,
+            telnyx_speak: telnyxSpeakRes ? { ok: Boolean(telnyxSpeakRes.ok), status: telnyxSpeakRes.status ?? null } : null,
           },
         })
         .eq("id", run.id)
