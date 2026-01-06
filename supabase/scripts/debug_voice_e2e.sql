@@ -25,7 +25,7 @@ with step_pick as (
   from public.campaign_steps
   where channel = 'voice'
     and is_active = true
-  order by updated_at desc nulls last
+  order by created_at desc nulls last
   limit 1
 ),
 lead_pick as (
