@@ -138,6 +138,109 @@ async function patchVoiceMeta(supabase: any, touchRunId: string, patch: Record<s
   await supabase.from("touch_runs").update({ meta: next, updated_at: new Date().toISOString() }).eq("id", touchRunId)
 }
 
+async function emitDispatchEvent(
+  supabase: any,
+  args: { touch_run_id: string; account_id: string; provider: string; event: string; payload: any },
+) {
+  try {
+    await supabase.from("dispatch_events").insert({
+      touch_run_id: args.touch_run_id,
+      account_id: args.account_id,
+      channel: "voice",
+      provider: args.provider,
+      event: args.event,
+      payload: args.payload ?? {},
+    })
+  } catch {
+    // best-effort
+  }
+}
+
+function mapTelnyxEventToVoiceStatus(eventType: string | null, hangupCause: string | null) {
+  const t = String(eventType ?? "").toLowerCase()
+  if (!t) return "unknown"
+  if (t.includes("call.answered")) return "answered"
+  if (t.includes("call.ringing") || t.includes("call.initiated")) return "ringing"
+  if (t.includes("call.failed")) return "failed"
+  if (t.includes("call.hangup") || t.includes("call.completed") || t.includes("streaming.stopped")) {
+    // if Telnyx provides a hard failure cause we can still mark completed but keep last_error
+    return "completed"
+  }
+  // fallback: keep raw type (but cap length)
+  return t.slice(0, 64)
+}
+
+async function upsertVoiceCallMerged(
+  supabase: any,
+  args: {
+    touch_run_id: string
+    lead_id: string
+    provider: "telnyx" | "twilio"
+    from_phone: string | null
+    to_phone: string | null
+    provider_call_id: string | null
+    provider_job_id: string | null
+    status: string
+    last_error: string | null
+    meta_patch: any
+    started_at?: string | null
+    ended_at?: string | null
+  },
+) {
+  const nowIso = new Date().toISOString()
+  let existing: any = null
+  try {
+    const { data } = await supabase
+      .from("voice_calls")
+      .select("meta, from_phone, to_phone, provider_call_id, provider_job_id, provider")
+      .eq("touch_run_id", args.touch_run_id)
+      .maybeSingle()
+    existing = data ?? null
+  } catch {
+    existing = null
+  }
+
+  const mergedMeta = {
+    ...((existing?.meta ?? {}) as any),
+    ...(args.meta_patch ?? {}),
+    updated_at: nowIso,
+    version: VERSION,
+  }
+
+  const fromPhone = args.from_phone ?? existing?.from_phone ?? null
+  const toPhone = args.to_phone ?? existing?.to_phone ?? null
+
+  // voice_calls requires from_phone/to_phone NOT NULL. If we can't resolve them, skip (but do not throw).
+  if (!fromPhone || !toPhone) return
+
+  try {
+    await supabase.from("voice_calls").upsert(
+      {
+        id: args.touch_run_id, // stable id (uuid)
+        lead_id: args.lead_id,
+        touch_run_id: args.touch_run_id,
+        channel: "voice",
+        provider: args.provider,
+        provider_call_id: args.provider_call_id ?? existing?.provider_call_id ?? null,
+        provider_job_id: args.provider_job_id ?? existing?.provider_job_id ?? null,
+        from_phone: fromPhone,
+        to_phone: toPhone,
+        status: args.status,
+        scheduled_at: nowIso,
+        started_at: args.started_at ?? null,
+        ended_at: args.ended_at ?? null,
+        last_error: args.last_error,
+        meta: mergedMeta,
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+      { onConflict: "touch_run_id" },
+    )
+  } catch {
+    // best-effort
+  }
+}
+
 function toTerminalOutcome(args: { callStatus: string | null; answeredBy: string | null; callDuration: number | null }) {
   const st = (args.callStatus ?? "").toLowerCase()
   const answeredBy = (args.answeredBy ?? "").toLowerCase()
@@ -706,6 +809,30 @@ serve(async (req) => {
     if (!terminal) {
       // heartbeat: ensure updated_at moves so DB reapers don't kill active runs
       await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch, updated_at: new Date().toISOString() }).eq("id", run.id)
+
+      await emitDispatchEvent(supabase, {
+        touch_run_id: run.id,
+        account_id: run.account_id,
+        provider: "twilio",
+        event: "webhook_event",
+        payload: { call_status: callStatus, answered_by: answeredBy, call_sid: callSid, terminal: false },
+      })
+
+      const runPayload = (run.payload ?? {}) as any
+      const fromPhone = (runPayload?.from ?? runPayload?.provider_config?.from ?? null) as string | null
+      const toPhone = (runPayload?.to ?? runPayload?.to_normalized ?? null) as string | null
+      await upsertVoiceCallMerged(supabase, {
+        touch_run_id: run.id,
+        lead_id: run.lead_id,
+        provider: "twilio",
+        from_phone: fromPhone,
+        to_phone: toPhone,
+        provider_call_id: callSid ?? (runPayload?.twilio_call_sid ?? null),
+        provider_job_id: callSid ?? (runPayload?.twilio_call_sid ?? null),
+        status: String(outcome || "unknown"),
+        last_error: null,
+        meta_patch: { twilio: metaPatch.twilio ?? null },
+      })
       return json({ ok: true, terminal: false, outcome, version: VERSION })
     }
 
@@ -721,8 +848,37 @@ serve(async (req) => {
         meta: metaPatch,
         error: outcome === "answered" ? null : `twilio_${outcome}`,
         sent_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       })
       .eq("id", run.id)
+
+    await emitDispatchEvent(supabase, {
+      touch_run_id: run.id,
+      account_id: run.account_id,
+      provider: "twilio",
+      event: "webhook_event",
+      payload: { call_status: callStatus, answered_by: answeredBy, call_sid: callSid, terminal: true, outcome },
+    })
+
+    {
+      const runPayload = (run.payload ?? {}) as any
+      const fromPhone = (runPayload?.from ?? runPayload?.provider_config?.from ?? null) as string | null
+      const toPhone = (runPayload?.to ?? runPayload?.to_normalized ?? null) as string | null
+      const vcStatus = outcome === "answered" ? "answered" : (outcome === "failed" ? "failed" : "completed")
+      await upsertVoiceCallMerged(supabase, {
+        touch_run_id: run.id,
+        lead_id: run.lead_id,
+        provider: "twilio",
+        from_phone: fromPhone,
+        to_phone: toPhone,
+        provider_call_id: callSid ?? (runPayload?.twilio_call_sid ?? null),
+        provider_job_id: callSid ?? (runPayload?.twilio_call_sid ?? null),
+        status: vcStatus,
+        last_error: outcome === "answered" ? null : `twilio_${outcome}`,
+        meta_patch: { twilio: metaPatch.twilio ?? null, outcome },
+        ended_at: new Date().toISOString(),
+      })
+    }
 
     let scheduled: any = null
     if (optedIn && isVoice) {
@@ -860,6 +1016,51 @@ serve(async (req) => {
         last_callback_at: new Date().toISOString(),
         version: VERSION,
       },
+    }
+
+    // Always record webhook event in dispatch_events (best-effort)
+    await emitDispatchEvent(supabase, {
+      touch_run_id: run.id,
+      account_id: run.account_id,
+      provider: "telnyx",
+      event: "webhook_event",
+      payload: {
+        event_type: eventType,
+        call_control_id: callControlId,
+        hangup_cause: hangupCause,
+      },
+    })
+
+    // Always update voice_calls for Telnyx events (best-effort)
+    {
+      const fromPhone =
+        (runPayload?.provider_config?.telnyx_from as string | undefined) ??
+        (runPayload?.provider_config?.from as string | undefined) ??
+        (runPayload?.from as string | undefined) ??
+        (payload?.from as string | undefined) ??
+        null
+      const toPhone =
+        (runPayload?.to as string | undefined) ??
+        (runPayload?.to_normalized as string | undefined) ??
+        (payload?.to as string | undefined) ??
+        null
+
+      const vcStatus = mapTelnyxEventToVoiceStatus(eventType, hangupCause)
+      const terminalEnded = vcStatus === "completed" || vcStatus === "failed"
+      await upsertVoiceCallMerged(supabase, {
+        touch_run_id: run.id,
+        lead_id: run.lead_id,
+        provider: "telnyx",
+        from_phone: fromPhone,
+        to_phone: toPhone,
+        provider_call_id: callControlId ?? (runPayload?.telnyx_call_control_id ?? null),
+        provider_job_id: null,
+        status: vcStatus,
+        last_error: vcStatus === "failed" ? (hangupCause ?? "telnyx_failed") : null,
+        meta_patch: { telnyx: metaPatch.telnyx ?? null },
+        started_at: vcStatus === "answered" ? new Date().toISOString() : null,
+        ended_at: terminalEnded ? new Date().toISOString() : null,
+      })
     }
 
     // Log playback events (if Telnyx sends them)

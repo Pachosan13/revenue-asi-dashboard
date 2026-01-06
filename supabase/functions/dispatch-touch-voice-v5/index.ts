@@ -22,6 +22,66 @@ function isValidE164(p: string | null) {
   return /^\+\d{8,15}$/.test(p)
 }
 
+async function emitDispatchEvent(
+  supabase: any,
+  run: any,
+  args: { provider?: string | null; event: string; payload: any },
+) {
+  try {
+    await supabase.from("dispatch_events").insert({
+      touch_run_id: run.id,
+      account_id: run.account_id,
+      channel: "voice",
+      provider: args.provider ?? null,
+      event: args.event,
+      payload: args.payload ?? {},
+    })
+  } catch {
+    // best-effort: never break dispatch because of telemetry
+  }
+}
+
+async function upsertVoiceCall(
+  supabase: any,
+  run: any,
+  patch: {
+    provider?: string | null
+    provider_call_id?: string | null
+    provider_job_id?: string | null
+    from_phone: string
+    to_phone: string
+    status: string
+    last_error?: string | null
+    meta?: any
+  },
+) {
+  const nowIso = new Date().toISOString()
+  try {
+    await supabase.from("voice_calls").upsert(
+      {
+        id: run.id, // stable id to avoid rewriting ids on repeated upserts
+        lead_id: run.lead_id,
+        touch_run_id: run.id,
+        channel: "voice",
+        provider: patch.provider ?? null,
+        provider_call_id: patch.provider_call_id ?? null,
+        provider_job_id: patch.provider_job_id ?? null,
+        from_phone: patch.from_phone,
+        to_phone: patch.to_phone,
+        status: patch.status,
+        scheduled_at: nowIso,
+        last_error: patch.last_error ?? null,
+        meta: patch.meta ?? {},
+        created_at: nowIso,
+        updated_at: nowIso,
+      },
+      { onConflict: "touch_run_id" },
+    )
+  } catch {
+    // best-effort
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders })
@@ -266,6 +326,12 @@ serve(async (req) => {
         throw new Error("missing_account_id_on_run")
       }
 
+      await emitDispatchEvent(supabase, run, {
+        provider: null,
+        event: "dispatch_attempt",
+        payload: { version: VERSION, dry_run: dryRun, at: new Date().toISOString() },
+      })
+
       // 2.1 Resolver proveedor para esta cuenta/canal
       const { data: providerRow, error: provErr } = await supabase
         .from("account_provider_settings")
@@ -384,10 +450,38 @@ serve(async (req) => {
           buyer_name: (payload?.voice?.buyer_name ?? payload?.voice?.buyerName ?? null),
           listing: (payload?.voice?.listing ?? null),
         }
+
+        await upsertVoiceCall(supabase, run, {
+          provider: "telnyx",
+          from_phone: telnyxFrom,
+          to_phone: to,
+          status: "scheduled",
+          meta: { stream_url: streamUrl ?? null },
+        })
+
+        await emitDispatchEvent(supabase, run, {
+          provider: "telnyx",
+          event: "provider_request",
+          payload: { to, from: telnyxFrom, stream_url: streamUrl ?? null, voice_mode: clientStateExtra.voice_mode },
+        })
+
         const r = await telnyxCreateCall({ to, from: telnyxFrom, touchRunId: run.id, config, clientStateExtra })
         telnyxRaw = (r as any).raw ?? null
         if (!r.ok) {
           telnyxErr = String((r as any).error || "telnyx_failed")
+          await upsertVoiceCall(supabase, run, {
+            provider: "telnyx",
+            from_phone: telnyxFrom,
+            to_phone: to,
+            status: "failed",
+            last_error: telnyxErr,
+            meta: { stream_url: streamUrl ?? null, provider_response: telnyxRaw ?? null },
+          })
+          await emitDispatchEvent(supabase, run, {
+            provider: "telnyx",
+            event: "provider_response",
+            payload: { ok: false, error: telnyxErr, response: telnyxRaw ?? null },
+          })
           // Fallback to Twilio if configured
           if (!TWILIO_SID || !TWILIO_TOKEN || !VOICE_FROM) {
             throw new Error(`telnyx_failed_and_no_twilio_fallback:${(r as any).error}`)
@@ -395,6 +489,19 @@ serve(async (req) => {
           // Use Twilio branch below
         } else {
           telnyxCallControlId = r.call_control_id
+          await upsertVoiceCall(supabase, run, {
+            provider: "telnyx",
+            from_phone: telnyxFrom,
+            to_phone: to,
+            status: "scheduled",
+            provider_call_id: telnyxCallControlId,
+            meta: { stream_url: streamUrl ?? null, call_control_id: telnyxCallControlId, provider_response: telnyxRaw ?? null },
+          })
+          await emitDispatchEvent(supabase, run, {
+            provider: "telnyx",
+            event: "provider_response",
+            payload: { ok: true, call_control_id: telnyxCallControlId, response: telnyxRaw ?? null },
+          })
           // If we're using realtime streaming, the Fly gateway handles the conversation.
           // Otherwise, keep best-effort immediate speech.
           if (!streamUrl && telnyxCallControlId) {
@@ -452,6 +559,12 @@ serve(async (req) => {
           params.set("MachineDetection", "Enable")
         }
 
+        await emitDispatchEvent(supabase, run, {
+          provider: "twilio",
+          event: "provider_request",
+          payload: { to, from: VOICE_FROM, status_callback: statusCallback ?? null },
+        })
+
         const twilioResp = await fetch(callUrl, {
           method: "POST",
           headers: {
@@ -464,6 +577,19 @@ serve(async (req) => {
         const txt = await twilioResp.text()
 
         if (!twilioResp.ok) {
+          await emitDispatchEvent(supabase, run, {
+            provider: "twilio",
+            event: "provider_response",
+            payload: { ok: false, status: twilioResp.status, response: txt.slice(0, 2000) },
+          })
+          await upsertVoiceCall(supabase, run, {
+            provider: "twilio",
+            from_phone: VOICE_FROM,
+            to_phone: to,
+            status: "failed",
+            last_error: `twilio_http_${twilioResp.status}`,
+            meta: { twilio_raw: txt.slice(0, 2000) },
+          })
           if (telnyxErr) {
             throw new Error(`telnyx_failed:${telnyxErr}; twilio_error:${txt}`)
           }
@@ -476,6 +602,21 @@ serve(async (req) => {
         } catch {
           twilioCallSid = null
         }
+
+        await emitDispatchEvent(supabase, run, {
+          provider: "twilio",
+          event: "provider_response",
+          payload: { ok: true, call_sid: twilioCallSid, response: txt.slice(0, 2000) },
+        })
+        await upsertVoiceCall(supabase, run, {
+          provider: "twilio",
+          from_phone: VOICE_FROM,
+          to_phone: to,
+          status: "scheduled",
+          provider_call_id: twilioCallSid,
+          provider_job_id: twilioCallSid,
+          meta: { call_sid: twilioCallSid, twilio_raw: txt.slice(0, 2000) },
+        })
       }
 
       // 2.6 Marcar como enviado (solo si corresponde)
