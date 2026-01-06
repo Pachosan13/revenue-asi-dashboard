@@ -1437,8 +1437,12 @@ const server = http.createServer((req, res) => {
         }
         pcm16le = resamplePcm16leTo16k(pcm16le, sampleRate);
       } else {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ ok: false, error: "missing_wav_b64_or_pcm16_b64" }));
+        // VOICE_TEST_MODE: allow text-only tests
+        if (!VOICE_TEST_MODE) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: false, error: "missing_wav_b64_or_pcm16_b64" }));
+        }
+        pcm16le = Buffer.alloc(0);
       }
 
       const session_id = String(reqSessionId || crypto.randomUUID());
