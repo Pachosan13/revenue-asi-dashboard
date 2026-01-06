@@ -2,6 +2,8 @@
 
 # dependencies
 /node_modules
+**/node_modules
+**/node_modules/**
 /.pnp
 .pnp.*
 .yarn/*
@@ -42,3 +44,9 @@ yarn-error.log*
 .env.local
 .env
 .env.*.local
+
+# local voice test artifacts (do not commit)
+*.wav
+*.m4a
+*.aiff
+services/voice-rtp-gateway/scripts/
