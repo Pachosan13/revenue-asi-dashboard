@@ -3,7 +3,7 @@ import { NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 import { resolveActiveAccountFromJwt, setRevenueAccountCookie } from "@/app/api/_lib/resolveActiveAccount"
 import { getAccessTokenFromRequest } from "@/app/api/_lib/getAccessToken"
-import { createUserClientFromJwt } from "@/app/api/_lib/createUserClientFromJwt"
+import { createServiceRoleClient, createUserClientFromJwt } from "@/app/api/_lib/createUserClientFromJwt"
 
 export const dynamic = "force-dynamic"
 
@@ -82,8 +82,7 @@ export async function GET(req: Request) {
     const internalExpected = String(process.env.BILLING_INTERNAL_TOKEN || "")
 
     const jwt = INTERNAL_ONLY ? null : await getAccessTokenFromRequest()
-    const userClient =
-      INTERNAL_ONLY || !jwt ? null : createUserClientFromJwt(jwt)
+    const userClient = INTERNAL_ONLY || !jwt ? null : createUserClientFromJwt(jwt)
 
     if (INTERNAL_ONLY) {
       if (!internalExpected || !internalToken || internalToken !== internalExpected) {
@@ -97,7 +96,9 @@ export async function GET(req: Request) {
         return NextResponse.json({ ok: false, error: "Missing Supabase env vars" }, { status: 500 })
       }
 
-      const { data: userData, error: userErr } = await userClient.auth.getUser(jwt)
+      // Deterministic JWT validation: always validate using service role client.
+      const authClient = createServiceRoleClient()
+      const { data: userData, error: userErr } = await authClient.auth.getUser(jwt)
       if (userErr) {
         return NextResponse.json({ ok: false, error: "Invalid session" }, { status: 401 })
       }

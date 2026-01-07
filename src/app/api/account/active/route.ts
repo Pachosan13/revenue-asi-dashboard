@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { setRevenueAccountCookie } from "@/app/api/_lib/resolveActiveAccount"
 import { getAccessTokenFromRequest } from "@/app/api/_lib/getAccessToken"
-import { createUserClientFromJwt } from "@/app/api/_lib/createUserClientFromJwt"
+import { createServiceRoleClient, createUserClientFromJwt } from "@/app/api/_lib/createUserClientFromJwt"
 
 export const dynamic = "force-dynamic"
 
@@ -11,14 +11,16 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "Missing Authorization Bearer token" }, { status: 401 })
   }
 
-  const supabase = createUserClientFromJwt(token)
-
-  // Explicit token validation (do not rely on stored session)
-  const { data: userData, error: userErr } = await supabase.auth.getUser(token)
+  // Deterministic JWT validation: always validate using service role client.
+  const authClient = createServiceRoleClient()
+  const { data: userData, error: userErr } = await authClient.auth.getUser(token)
   if (userErr || !userData?.user?.id) {
     return NextResponse.json({ ok: false, error: "Invalid session" }, { status: 401 })
   }
   const user_id = userData.user.id
+
+  // RLS client (anon + Bearer JWT) for all membership queries
+  const supabase = createUserClientFromJwt(token)
 
   // RLS: account_members_read_self ensures user_id=auth.uid()
   const { data: m, error: mErr } = await supabase

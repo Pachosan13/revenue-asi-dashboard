@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { getAccessTokenFromRequest } from "@/app/api/_lib/getAccessToken"
-import { createUserClientFromJwt } from "@/app/api/_lib/createUserClientFromJwt"
+import { createServiceRoleClient, createUserClientFromJwt } from "@/app/api/_lib/createUserClientFromJwt"
 
 function isUuidLike(s: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s)
@@ -47,12 +47,16 @@ export async function resolveActiveAccountFromJwt(req: Request): Promise<
   if (!jwt) return { ok: false, status: 401, error: "Missing Authorization Bearer token" }
   if (issuerMismatch(jwt)) return { ok: false, status: 401, error: "Invalid session (issuer mismatch)" }
 
-  const userClient = createUserClientFromJwt(jwt)
-  const { data: userData, error: userErr } = await userClient.auth.getUser(jwt)
+  // Deterministic JWT validation: always validate using service role client.
+  const authClient = createServiceRoleClient()
+  const { data: userData, error: userErr } = await authClient.auth.getUser(jwt)
   if (userErr || !userData?.user?.id) return { ok: false, status: 401, error: "Invalid session" }
 
   const user_id = userData.user.id
   if (!isUuidLike(user_id)) return { ok: false, status: 401, error: "Invalid session" }
+
+  // RLS client (anon + Bearer JWT) for all membership queries
+  const userClient = createUserClientFromJwt(jwt)
 
   // RLS: account_members_read_self ensures user_id=auth.uid()
   const { data: m, error: mErr } = await userClient

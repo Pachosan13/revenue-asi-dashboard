@@ -11,4 +11,11 @@ export function createUserClientFromJwt(token: string) {
   })
 }
 
+export function createServiceRoleClient() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const srv = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !srv) throw new Error("Missing Supabase env vars")
+  return createClient(url, srv, { auth: { persistSession: false } })
+}
+
 
