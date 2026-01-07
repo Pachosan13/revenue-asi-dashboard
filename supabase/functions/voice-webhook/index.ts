@@ -979,6 +979,60 @@ serve(async (req) => {
       (typeof clientState?.touchRunId === "string" ? clientState.touchRunId : null)
 
     if (!inferredTouchRunId) {
+      // Manual Telnyx calls (portal / ad-hoc):
+      // If there's no touch_run_id but we have call_control_id, start realtime streaming so the call isn't mute.
+      if (eventType === "call.answered" && callControlId) {
+        const VOICE_GATEWAY_STREAM_URL = Deno.env.get("VOICE_GATEWAY_STREAM_URL") ?? null
+        if (TELNYX_API_KEY && VOICE_GATEWAY_STREAM_URL) {
+          const manualTouchRunId = `manual_${String(callControlId).replace("v3:", "")}`
+          const client_state_obj = {
+            touch_run_id: manualTouchRunId,
+            source: "manual_test",
+            intent: "sell_only",
+          }
+          const client_state_b64 = btoa(JSON.stringify(client_state_obj))
+
+          try {
+            const res = await fetch(
+              `https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/streaming_start`,
+              {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${TELNYX_API_KEY}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  stream_url: VOICE_GATEWAY_STREAM_URL,
+                  track: "both_tracks",
+                  client_state: client_state_b64,
+                  media_format: { encoding: "PCMU", sample_rate: 8000, channels: 1 },
+                }),
+              },
+            )
+
+            // Required structured log (no secrets)
+            console.log("TELNYX_MANUAL_FALLBACK", {
+              event: "TELNYX_MANUAL_FALLBACK",
+              call_control_id: callControlId,
+              touch_run_id: manualTouchRunId,
+              streaming_start_ok: res.ok,
+              status: res.status,
+            })
+          } catch (e) {
+            console.log("TELNYX_MANUAL_FALLBACK", {
+              event: "TELNYX_MANUAL_FALLBACK",
+              call_control_id: callControlId,
+              touch_run_id: manualTouchRunId,
+              streaming_start_ok: false,
+              status: null,
+              err: String((e as any)?.message ?? e),
+            })
+          }
+
+          return json({ ok: true, manual_fallback: true, touch_run_id: manualTouchRunId, version: VERSION })
+        }
+      }
+
       return json({ ok: true, ignored: true, reason: "missing_touch_run_id", event_type: eventType, version: VERSION })
     }
 
