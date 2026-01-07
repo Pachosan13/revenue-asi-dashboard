@@ -46,6 +46,21 @@ Recommended wiring points:
 
 Billing v1 ships without adjustments. If/when we add credits/refunds, we will do it via additional immutable ledger events (never mutating history).
 
+## Regression note: Authorization header in App Router
+
+In Next.js App Router route handlers, `req.headers.get("authorization")` can be unreliable in some setups.
+We use `next/headers` `headers()` via `getAccessTokenFromRequest()` for consistent Bearer token parsing.
+
+### Curl (local Next.js → Supabase Cloud)
+
+```bash
+curl -i -sS 'http://127.0.0.1:3000/api/account/active' \
+  -H "Authorization: Bearer $TEST_JWT"
+
+curl -sS 'http://127.0.0.1:3000/api/billing/summary' \
+  -H "Authorization: Bearer $TEST_JWT" | jq
+```
+
 ## Statements (for future payments layer)
 
 Statements are monthly aggregates:

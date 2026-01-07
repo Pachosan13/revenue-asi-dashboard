@@ -1,6 +1,8 @@
 // src/app/api/billing/summary/route.ts
 import { NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
+import { resolveActiveAccountFromJwt, setRevenueAccountCookie } from "@/app/api/_lib/resolveActiveAccount"
+import { getAccessTokenFromRequest } from "@/app/api/_lib/getAccessToken"
 
 export const dynamic = "force-dynamic"
 
@@ -14,12 +16,6 @@ function startOfNextMonthISO(d = new Date()) {
 
 function isUuidLike(s: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s)
-}
-
-function getBearerToken(req: Request) {
-  const h = req.headers.get("authorization") || ""
-  const m = h.match(/^Bearer\s+(.+)$/i)
-  return m?.[1]?.trim() || null
 }
 
 function getInternalToken(req: Request) {
@@ -45,22 +41,17 @@ export async function GET(req: Request) {
     // ─────────────────────────────────────────
     const cookieHeader = req.headers.get("cookie")
     const cookies = parseCookies(cookieHeader)
-    const accountId = cookies["revenue_account_id"]
+    let accountId = cookies["revenue_account_id"]
+    let shouldSetAccountCookie = false
 
-    if (!accountId) {
-      return NextResponse.json(
-        { ok: false, error: "Missing revenue_account_id cookie" },
-        { status: 401 }
-      )
-    }
-
-    // SECURITY NOTE:
-    // This endpoint reads billing using the Supabase Service Role Key and MUST validate caller authz.
-    if (!isUuidLike(accountId)) {
-      return NextResponse.json(
-        { ok: false, error: "Invalid revenue_account_id cookie" },
-        { status: 401 }
-      )
+    // If cookie missing/invalid, resolve active account from JWT membership and set cookie for compatibility.
+    if (!accountId || !isUuidLike(accountId)) {
+      const resolved = await resolveActiveAccountFromJwt(req)
+      if (!resolved.ok) {
+        return NextResponse.json({ ok: false, error: resolved.error }, { status: resolved.status })
+      }
+      accountId = resolved.account_id
+      shouldSetAccountCookie = true
     }
 
     // ─────────────────────────────────────────
@@ -89,22 +80,20 @@ export async function GET(req: Request) {
     const internalToken = getInternalToken(req)
     const internalExpected = String(process.env.BILLING_INTERNAL_TOKEN || "")
 
-    const userClient = (() => {
-      if (INTERNAL_ONLY) return null
-      const jwt = getBearerToken(req)
-      if (!jwt) return null
-      return createClient(SUPABASE_URL, ANON_KEY, {
-        auth: { persistSession: false },
-        global: { headers: { Authorization: `Bearer ${jwt}` } },
-      })
-    })()
+    const jwt = INTERNAL_ONLY ? null : await getAccessTokenFromRequest()
+    const userClient =
+      INTERNAL_ONLY || !jwt
+        ? null
+        : createClient(SUPABASE_URL, ANON_KEY, {
+            auth: { persistSession: false },
+            global: { headers: { Authorization: `Bearer ${jwt}` } },
+          })
 
     if (INTERNAL_ONLY) {
       if (!internalExpected || !internalToken || internalToken !== internalExpected) {
         return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 })
       }
     } else {
-      const jwt = getBearerToken(req)
       if (!jwt) {
         return NextResponse.json({ ok: false, error: "Missing Authorization Bearer token" }, { status: 401 })
       }
@@ -306,7 +295,7 @@ export async function GET(req: Request) {
       projected_total_cents: projectedAmount,
     }
 
-    return NextResponse.json({
+    const res = NextResponse.json({
       ok: true,
       account_id: accountId,
       period: { from, to },
@@ -328,6 +317,9 @@ export async function GET(req: Request) {
       projection,
       needs_plan: needsPlan,
     })
+
+    if (shouldSetAccountCookie) setRevenueAccountCookie(res, accountId)
+    return res
   } catch (err: any) {
     return NextResponse.json(
       { ok: false, error: err?.message ?? String(err) },
