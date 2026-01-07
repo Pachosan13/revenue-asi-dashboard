@@ -2,6 +2,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import { supabaseBrowser } from "@/lib/supabase"
 
 type Plan = {
   name: string
@@ -27,7 +28,7 @@ type BillingSummary = {
     source: string
     ref_id: string
     occurred_at: string
-    meta: any
+    meta: unknown
   }[]
   plan: Plan | null
   overage: {
@@ -143,12 +144,21 @@ export default function BillingPage() {
   const [err, setErr] = useState<string | null>(null)
 
   useEffect(() => {
-    fetch("/api/billing/summary", { credentials: "include" })
-      .then((r) => r.json())
-      .then((j) => {
-        if (!j?.ok) throw new Error(j?.error || "Failed to load billing")
-        setData(j)
+    const supabase = supabaseBrowser()
+    ;(async () => {
+      const { data: sess, error: sErr } = await supabase.auth.getSession()
+      if (sErr) throw sErr
+      const token = sess?.session?.access_token
+      if (!token) throw new Error("Not authenticated")
+
+      const r = await fetch("/api/billing/summary", {
+        credentials: "include",
+        headers: { Authorization: `Bearer ${token}` },
       })
+      const j = await r.json()
+      if (!j?.ok) throw new Error(j?.error || "Failed to load billing")
+      setData(j)
+    })()
       .catch((e) => setErr(e?.message || String(e)))
       .finally(() => setLoading(false))
   }, [])
