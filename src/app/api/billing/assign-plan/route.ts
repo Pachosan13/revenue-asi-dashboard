@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 import { resolveActiveAccountFromJwt, setRevenueAccountCookie } from "@/app/api/_lib/resolveActiveAccount"
 import { getAccessTokenFromRequest } from "@/app/api/_lib/getAccessToken"
+import { createUserClientFromJwt } from "@/app/api/_lib/createUserClientFromJwt"
 
 export const dynamic = "force-dynamic"
 
@@ -34,12 +35,9 @@ export async function POST(req: Request) {
     }
 
     // userClient: anon + Bearer JWT (RLS enforced)
-    const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-      auth: { persistSession: false },
-      global: { headers: { Authorization: `Bearer ${jwt}` } },
-    })
+    const userClient = createUserClientFromJwt(jwt)
 
-    const { data: userData, error: userErr } = await userClient.auth.getUser()
+    const { data: userData, error: userErr } = await userClient.auth.getUser(jwt)
     if (userErr || !userData?.user?.id) {
       return NextResponse.json({ ok: false, error: "Invalid session" }, { status: 401 })
     }

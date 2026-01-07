@@ -1,20 +1,42 @@
-import { createClient } from "@supabase/supabase-js"
 import { NextResponse } from "next/server"
 import { getAccessTokenFromRequest } from "@/app/api/_lib/getAccessToken"
+import { createUserClientFromJwt } from "@/app/api/_lib/createUserClientFromJwt"
 
 function isUuidLike(s: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s)
 }
 
-export function createSupabaseUserClientFromJwt(jwt: string) {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  if (!url || !anon) throw new Error("Missing Supabase env vars")
+function expectedIssuer() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
+  return url ? `${url.replace(/\/$/, "")}/auth/v1` : ""
+}
 
-  return createClient(url, anon, {
-    auth: { persistSession: false },
-    global: { headers: { Authorization: `Bearer ${jwt}` } },
-  })
+function decodeJwtPayload(token: string): any | null {
+  try {
+    const parts = token.split(".")
+    if (parts.length < 2) return null
+    const b64url = parts[1]
+    const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((b64url.length + 3) % 4)
+    const json =
+      typeof Buffer !== "undefined"
+        ? Buffer.from(b64, "base64").toString("utf8")
+        : decodeURIComponent(
+            Array.from(atob(b64))
+              .map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`)
+              .join("")
+          )
+    return JSON.parse(json)
+  } catch {
+    return null
+  }
+}
+
+function issuerMismatch(token: string) {
+  if (process.env.NODE_ENV === "production") return false
+  const payload = decodeJwtPayload(token)
+  const iss = String(payload?.iss || "")
+  const exp = expectedIssuer()
+  return Boolean(iss && exp && iss !== exp)
 }
 
 export async function resolveActiveAccountFromJwt(req: Request): Promise<
@@ -23,9 +45,10 @@ export async function resolveActiveAccountFromJwt(req: Request): Promise<
 > {
   const jwt = await getAccessTokenFromRequest()
   if (!jwt) return { ok: false, status: 401, error: "Missing Authorization Bearer token" }
+  if (issuerMismatch(jwt)) return { ok: false, status: 401, error: "Invalid session (issuer mismatch)" }
 
-  const userClient = createSupabaseUserClientFromJwt(jwt)
-  const { data: userData, error: userErr } = await userClient.auth.getUser()
+  const userClient = createUserClientFromJwt(jwt)
+  const { data: userData, error: userErr } = await userClient.auth.getUser(jwt)
   if (userErr || !userData?.user?.id) return { ok: false, status: 401, error: "Invalid session" }
 
   const user_id = userData.user.id

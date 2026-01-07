@@ -1,20 +1,43 @@
 import { NextResponse } from "next/server"
-import { resolveActiveAccountFromJwt, setRevenueAccountCookie } from "@/app/api/_lib/resolveActiveAccount"
+import { setRevenueAccountCookie } from "@/app/api/_lib/resolveActiveAccount"
+import { getAccessTokenFromRequest } from "@/app/api/_lib/getAccessToken"
+import { createUserClientFromJwt } from "@/app/api/_lib/createUserClientFromJwt"
 
 export const dynamic = "force-dynamic"
 
 export async function GET(req: Request) {
-  const resolved = await resolveActiveAccountFromJwt(req)
-  if (!resolved.ok) {
-    return NextResponse.json({ ok: false, error: resolved.error }, { status: resolved.status })
+  const token = await getAccessTokenFromRequest()
+  if (!token) {
+    return NextResponse.json({ ok: false, error: "Missing Authorization Bearer token" }, { status: 401 })
   }
 
-  const res = NextResponse.json({
-    ok: true,
-    account_id: resolved.account_id,
-    role: resolved.role,
-  })
-  setRevenueAccountCookie(res, resolved.account_id)
+  const supabase = createUserClientFromJwt(token)
+
+  // Explicit token validation (do not rely on stored session)
+  const { data: userData, error: userErr } = await supabase.auth.getUser(token)
+  if (userErr || !userData?.user?.id) {
+    return NextResponse.json({ ok: false, error: "Invalid session" }, { status: 401 })
+  }
+  const user_id = userData.user.id
+
+  // RLS: account_members_read_self ensures user_id=auth.uid()
+  const { data: m, error: mErr } = await supabase
+    .from("account_members")
+    .select("account_id, role, created_at")
+    .eq("user_id", user_id)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (mErr) {
+    return NextResponse.json({ ok: false, error: mErr.message }, { status: 500 })
+  }
+  if (!m?.account_id) {
+    return NextResponse.json({ ok: false, error: "No account membership" }, { status: 403 })
+  }
+
+  const res = NextResponse.json({ ok: true, account_id: String(m.account_id), role: String(m.role || "member") })
+  setRevenueAccountCookie(res, String(m.account_id))
   return res
 }
 

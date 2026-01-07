@@ -3,6 +3,7 @@ import { NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 import { resolveActiveAccountFromJwt, setRevenueAccountCookie } from "@/app/api/_lib/resolveActiveAccount"
 import { getAccessTokenFromRequest } from "@/app/api/_lib/getAccessToken"
+import { createUserClientFromJwt } from "@/app/api/_lib/createUserClientFromJwt"
 
 export const dynamic = "force-dynamic"
 
@@ -82,12 +83,7 @@ export async function GET(req: Request) {
 
     const jwt = INTERNAL_ONLY ? null : await getAccessTokenFromRequest()
     const userClient =
-      INTERNAL_ONLY || !jwt
-        ? null
-        : createClient(SUPABASE_URL, ANON_KEY, {
-            auth: { persistSession: false },
-            global: { headers: { Authorization: `Bearer ${jwt}` } },
-          })
+      INTERNAL_ONLY || !jwt ? null : createUserClientFromJwt(jwt)
 
     if (INTERNAL_ONLY) {
       if (!internalExpected || !internalToken || internalToken !== internalExpected) {
@@ -101,7 +97,7 @@ export async function GET(req: Request) {
         return NextResponse.json({ ok: false, error: "Missing Supabase env vars" }, { status: 500 })
       }
 
-      const { data: userData, error: userErr } = await userClient.auth.getUser()
+      const { data: userData, error: userErr } = await userClient.auth.getUser(jwt)
       if (userErr) {
         return NextResponse.json({ ok: false, error: "Invalid session" }, { status: 401 })
       }
