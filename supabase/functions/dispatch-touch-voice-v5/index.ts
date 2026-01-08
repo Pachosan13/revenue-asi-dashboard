@@ -466,12 +466,15 @@ serve(async (req) => {
         await supabase
           .from("touch_runs")
           .update({
-            status: "simulated",
+            // NOTE: must comply with touch_runs.status CHECK constraint and MUST NOT
+            // pollute success metrics on dry_run.
+            status: "canceled",
             sent_at: null,
             error: null,
             updated_at: new Date().toISOString(),
             meta: {
               ...(run.meta ?? {}),
+              simulated: true,
               dry_run_simulated: true,
               dispatcher_version: VERSION,
             },

@@ -140,12 +140,15 @@ async function invokeDispatch(run: TouchRun) {
   }
 
   await mark(run.id, {
-    status: DRY_RUN ? "simulated" : "sent",
+    // NOTE: must comply with touch_runs.status CHECK constraint and MUST NOT
+    // pollute success metrics on dry_run.
+    status: DRY_RUN ? "canceled" : "sent",
     sent_at: DRY_RUN ? null : nowIso(),
     execution_ms: ms,
     meta: {
       ...(run.meta ?? {}),
       dispatch_engine: { at: nowIso(), fn, dry_run: DRY_RUN },
+      simulated: DRY_RUN,
       function_result: res.data ?? null,
     },
   })

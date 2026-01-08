@@ -296,7 +296,8 @@ serve(async (req) => {
       const { error: uErr } = await supabase
         .from("touch_runs")
         .update({
-          status: "cancelled",
+          // touch_runs.status CHECK constraint uses 'canceled' (single-l)
+          status: "canceled",
           error: "stopped_due_to_appointment_booked",
         })
         .in("id", ids)

@@ -215,11 +215,11 @@ serve(async (req) => {
         payload.body ||
         "Hola, esto es un correo de prueba de Revenue ASI."
 
-      // 2.3 (opcional) marcar como processing
+      // 2.3 (opcional) marcar como executing (compatible con CHECK constraint)
       await supabase
         .from("touch_runs")
         .update({
-          status: "processing",
+          status: "executing",
           executed_at: new Date().toISOString(),
           error: null,
         })
@@ -274,8 +274,9 @@ serve(async (req) => {
       await supabase
         .from("touch_runs")
         .update({
-          status: "sent",
-          sent_at: sentAtIso,
+          // In dry_run, avoid polluting "success" metrics.
+          status: dryRun ? "canceled" : "sent",
+          sent_at: dryRun ? null : sentAtIso,
           payload: {
             ...(payload ?? {}),
             to,

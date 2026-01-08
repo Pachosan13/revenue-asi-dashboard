@@ -244,13 +244,13 @@ serve(async (req) => {
         (payload.body as string | undefined) ??
         "Hola, este es un SMS de prueba de Revenue ASI."
 
-      // 2.4 Marcar como processing (NO executed_at)
+      // 2.4 Marcar como executing (compatible con CHECK constraint)
       {
         const meta = safeObj(run.meta)
         await supabase
           .from("touch_runs")
           .update({
-            status: "processing",
+            status: "executing",
             error: null,
             meta: { ...meta, dispatcher_version: VERSION, provider },
             payload: {
@@ -308,13 +308,15 @@ serve(async (req) => {
         await supabase
           .from("touch_runs")
           .update({
-            status: "sent",
+            // In dry_run, avoid polluting "success" metrics.
+            status: dryRun ? "canceled" : "sent",
             error: null,
             meta: {
               ...meta,
               dispatcher_version: VERSION,
               provider,
               provider_message_id: providerMessageId,
+              simulated: Boolean(dryRun),
             },
             payload: {
               ...payload,

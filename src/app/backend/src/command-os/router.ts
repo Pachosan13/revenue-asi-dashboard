@@ -1441,7 +1441,13 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
                 : new Date(Date.now() - 30_000).toISOString()
 
               const payload = {}
-              const meta = { source: "touch.simulate", action: step_key, step_key, dry_run }
+              const meta = { source: "touch.simulate", action: step_key, step_key, dry_run, simulated: dry_run }
+
+              // Preferred behavior: in dry_run/simulate, do NOT write to touch_runs at all.
+              if (dry_run) {
+                results.push({ lead_id, ok: true, skipped: true, reason: "dry_run_no_db_write", account_id, channel, step, step_key, scheduled_at })
+                continue
+              }
 
               const { error: trErr } = await supabase.from("touch_runs").insert({
                 account_id,
@@ -1450,7 +1456,7 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
                 channel,
                 payload,
                 scheduled_at,
-                status: dry_run ? "simulated" : "queued",
+                status: "queued",
                 meta,
               })
 
@@ -1536,7 +1542,13 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
             : new Date(Date.now() - 30_000).toISOString()
 
           const payload = {}
-          const meta = { source: "touch.simulate", action: step_key, step_key, dry_run }
+          const meta = { source: "touch.simulate", action: step_key, step_key, dry_run, simulated: dry_run }
+
+          // Preferred behavior: in dry_run/simulate, do NOT write to touch_runs at all.
+          if (dry_run) {
+            results.push({ lead_id, ok: true, skipped: true, reason: "dry_run_no_db_write", account_id, channel: effective_channel, step, step_key, scheduled_at })
+            continue
+          }
 
           const { error: trErr } = await supabase.from("touch_runs").insert({
             account_id,
@@ -1545,7 +1557,7 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
             channel: effective_channel,
             payload,
             scheduled_at,
-            status: dry_run ? "simulated" : "queued",
+            status: "queued",
             meta,
           })
 

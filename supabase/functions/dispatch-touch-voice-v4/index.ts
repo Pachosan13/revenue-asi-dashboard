@@ -182,10 +182,10 @@ serve(async (req) => {
     )
   }
 
-  // 2) claim atómico -> processing (incluyendo account_id)
+  // 2) claim atómico -> executing (compatible con CHECK constraint)
   const { data: runs, error: claimErr } = await supabase
     .from("touch_runs")
-    .update({ status: "processing" })
+    .update({ status: "executing" })
     .in("id", ids)
     .eq("status", "queued")
     .select("id, lead_id, account_id, payload, step, created_at")
@@ -302,12 +302,12 @@ serve(async (req) => {
         twilio_call_sid = call.sid
       }
 
-      // 2.5 marcar como sent
+      // 2.5 marcar como finalizado (en DRY_RUN NO debe contaminar métricas de éxito)
       await supabase
         .from("touch_runs")
         .update({
-          status: "sent",
-          sent_at: new Date().toISOString(),
+          status: DRY_RUN ? "canceled" : "sent",
+          sent_at: DRY_RUN ? null : new Date().toISOString(),
           error: null,
           payload: {
             ...payload,
