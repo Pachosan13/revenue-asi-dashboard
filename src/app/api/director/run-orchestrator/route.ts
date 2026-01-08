@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { createServiceRoleClient } from "@/lib/supabaseServer"
+import { createClient } from "@supabase/supabase-js"
 
 const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/
 
@@ -33,7 +33,24 @@ export async function POST(req: Request) {
   }
 
   try {
-    const supabase = createServiceRoleClient()
+    const url = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+    if (!url) {
+      return NextResponse.json(
+        { ok: false, error: "Missing SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) for service-role client" },
+        { status: 500 },
+      )
+    }
+
+    if (!serviceRoleKey) {
+      return NextResponse.json(
+        { ok: false, error: "Missing SUPABASE_SERVICE_ROLE_KEY for service-role orchestrator invoke" },
+        { status: 500 },
+      )
+    }
+
+    const supabase = createClient(url, serviceRoleKey, { auth: { persistSession: false } })
 
     const { data: campaign, error: cErr } = await supabase
       .from("campaigns")
