@@ -56,8 +56,28 @@ export async function POST(req: Request) {
     })
 
     if (error) {
+      const e = error as any
+      const status = typeof e?.context?.status === "number" ? e.context.status : (typeof e?.status === "number" ? e.status : undefined)
+      const name = typeof e?.name === "string" ? e.name : undefined
+      const message = typeof e?.message === "string" ? e.message : String(e)
+      const context = e?.context ?? undefined
+
       return NextResponse.json(
-        { ok: false, invoked: "touch-orchestrator-v7", account_id, campaign_id: campaignId, dry_run, error: error.message },
+        {
+          ok: false,
+          invoked: "touch-orchestrator-v7",
+          account_id,
+          campaign_id: campaignId,
+          dry_run,
+          limit,
+          error: message,
+          details: {
+            status,
+            name,
+            message,
+            context,
+          },
+        },
         { status: 500 },
       )
     }
@@ -68,6 +88,7 @@ export async function POST(req: Request) {
       account_id,
       campaign_id: campaignId,
       dry_run,
+      limit,
       result,
     })
   } catch (error) {
