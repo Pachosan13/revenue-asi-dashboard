@@ -1745,10 +1745,15 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
           finalCampaignId = campaign.id as string
         }
 
+        // Runtime contract: campaigns are enabled/disabled via campaigns.status, not campaigns.is_active.
+        // Quick check:
+        //   rg "from\\(\"campaigns\"\\).*\\.eq\\(\"status\",\\s*\"active\"\\)" -n supabase/functions touch-orchestrator*
+        const nextStatus = isActive ? "active" : "paused"
+
         const supabase = getSupabaseAdmin()
         const { data, error } = await supabase
           .from("campaigns")
-          .update({ is_active: isActive })
+          .update({ status: nextStatus })
           .eq("id", finalCampaignId)
           .eq("account_id", accountId)
           .select()
