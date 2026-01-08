@@ -1,11 +1,20 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getAccountContextOrThrow } from "@/app/api/_lib/getAccountContextOrThrow"
 
-type ActionType = "show" | "no_show" | "rescheduled" | "cancelled"
+type ActionType = "show" | "no_show" | "rescheduled" | "canceled"
 
 type Body = {
-  action?: ActionType
+  action?: string
   new_starts_at?: string
+}
+
+function normalizeAction(input: string): ActionType {
+  const a = input.trim().toLowerCase()
+  const normalized = a.replace(/^cancell?ed$/, "canceled")
+  if (normalized === "show" || normalized === "no_show" || normalized === "rescheduled" || normalized === "canceled") {
+    return normalized
+  }
+  throw new Error("Invalid action")
 }
 
 function mapActionToUpdate(action: ActionType, newStartsAt?: string) {
@@ -14,8 +23,8 @@ function mapActionToUpdate(action: ActionType, newStartsAt?: string) {
       return { status: "completed", outcome: "show" }
     case "no_show":
       return { status: "no_show", outcome: "no_show" }
-    case "cancelled":
-      return { status: "cancelled", outcome: "cancelled" }
+    case "canceled":
+      return { status: "canceled", outcome: "canceled" }
     case "rescheduled":
       if (!newStartsAt) throw new Error("new_starts_at required")
       return {
@@ -47,7 +56,8 @@ export async function POST(
       return NextResponse.json({ ok: false, error: "Missing action" }, { status: 400 })
     }
 
-    const patch = mapActionToUpdate(body.action, body.new_starts_at)
+    const action = normalizeAction(body.action)
+    const patch = mapActionToUpdate(action, body.new_starts_at)
 
     const { data, error } = await supabase
       .from("appointments")
@@ -72,7 +82,7 @@ export async function POST(
       return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
     }
 
-    return NextResponse.json({ ok: true, action: body.action, appointment: data })
+    return NextResponse.json({ ok: true, action, appointment: data })
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: e?.message ?? "Unexpected error" },

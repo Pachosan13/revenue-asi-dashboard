@@ -29,7 +29,7 @@ type ApiResponse = {
   appointments: Appointment[];
 };
 
-type ActionType = "show" | "no_show" | "rescheduled" | "cancelled";
+type ActionType = "show" | "no_show" | "rescheduled" | "canceled";
 
 type AppointmentKpi = {
   account_id: string;
@@ -38,7 +38,7 @@ type AppointmentKpi = {
   total_scheduled: number;
   total_completed: number;
   total_no_show: number;
-  total_cancelled: number;
+  total_canceled: number;
   total_rescheduled: number;
   show_rate_pct: number;
   no_show_rate_pct: number;
@@ -54,7 +54,7 @@ type ChannelKpi = {
   total_appointments: number;
   shows: number;
   no_shows: number;
-  cancelled: number;
+  canceled: number;
   show_rate_pct: number;
 };
 
@@ -84,14 +84,15 @@ function formatTime(d: Date) {
 }
 
 function statusBadgeClasses(status: string) {
-  switch (status) {
+  const s = String(status ?? "").toLowerCase().replace(/^cancell?ed$/, "canceled");
+  switch (s) {
     case "scheduled":
       return "bg-blue-500/10 text-blue-400 border border-blue-500/30";
     case "completed":
       return "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30";
     case "no_show":
       return "bg-red-500/10 text-red-400 border border-red-500/30";
-    case "cancelled":
+    case "canceled":
       return "bg-slate-500/10 text-slate-300 border border-slate-500/30";
     default:
       return "bg-slate-500/10 text-slate-300 border border-slate-500/30";
@@ -399,7 +400,7 @@ export default function OperatorAppointmentsPage() {
               <option value="">Todas</option>
               <option value="completed">Completadas</option>
               <option value="no_show">No show</option>
-              <option value="cancelled">Canceladas</option>
+              <option value="canceled">Canceladas</option>
             </select>
           </div>
         </div>
@@ -520,7 +521,7 @@ export default function OperatorAppointmentsPage() {
                           </button>
                           <button
                             disabled={isUpdating}
-                            onClick={() => handleAction(appt, "cancelled")}
+                            onClick={() => handleAction(appt, "canceled")}
                             className="rounded-md border border-slate-600/60 bg-slate-900/40 px-2 py-1 text-slate-200 hover:bg-slate-900/80 disabled:opacity-40"
                           >
                             🗑 Cancelar
