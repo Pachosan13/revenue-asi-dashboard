@@ -318,7 +318,7 @@ export function LeadStateBadge({ state }: { state: MaybeString }) {
 }
 
 /**
- * Appointment status badge (scheduled, completed, cancelled, no_show...)
+ * Appointment status badge (scheduled, completed, canceled, no_show...)
  * útil para voz + calendar
  */
 export function AppointmentStatusBadge({
@@ -326,7 +326,9 @@ export function AppointmentStatusBadge({
 }: {
   status: MaybeString
 }) {
-  const value = status?.toLowerCase() ?? ""
+  const valueRaw = status?.toLowerCase() ?? ""
+  // Treat legacy double-l spelling as an alias, but never display/return it.
+  const value = valueRaw.replace(/^cancell?ed$/, "canceled")
 
   const base =
     "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium"
@@ -361,7 +363,7 @@ export function AppointmentStatusBadge({
     )
   }
 
-  if (value === "cancelled") {
+  if (value === "canceled") {
     return (
       <span
         className={cn(

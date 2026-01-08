@@ -53,7 +53,7 @@ type AppointmentRow = {
   meta?: Record<string, unknown> | null
 }
 
-type StatusFilter = "all" | "scheduled" | "completed" | "cancelled" | "no_show"
+type StatusFilter = "all" | "scheduled" | "completed" | "canceled" | "no_show"
 type TimeFilter = "all" | "upcoming" | "past" | "today"
 
 const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
@@ -182,7 +182,8 @@ export default function AppointmentsPage() {
 
   const filtered = useMemo(() => {
     return rows.filter((row) => {
-      const statusValue = row.status?.toLowerCase?.() ?? ""
+      const statusValueRaw = row.status?.toLowerCase?.() ?? ""
+      const statusValue = statusValueRaw.replace(/^cancell?ed$/, "canceled")
 
       if (statusFilter !== "all") {
         if (statusFilter === "no_show" && statusValue !== "no_show") {
@@ -333,7 +334,7 @@ export default function AppointmentsPage() {
               <option value="all">All statuses</option>
               <option value="scheduled">Scheduled</option>
               <option value="completed">Completed</option>
-              <option value="cancelled">Cancelled</option>
+              <option value="canceled">Cancelled</option>
               <option value="no_show">No-show</option>
             </Select>
 
