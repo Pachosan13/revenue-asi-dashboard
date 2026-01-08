@@ -50,6 +50,11 @@ export async function POST(req: Request) {
       )
     }
 
+    const revenueSecret = process.env.REVENUE_SECRET
+    if (!revenueSecret) {
+      return NextResponse.json({ ok: false, error: "Missing REVENUE_SECRET for orchestrator invoke" }, { status: 500 })
+    }
+
     const supabase = createClient(url, serviceRoleKey, { auth: { persistSession: false } })
 
     const { data: campaign, error: cErr } = await supabase
@@ -70,6 +75,7 @@ export async function POST(req: Request) {
 
     const { data: result, error } = await supabase.functions.invoke("touch-orchestrator-v7", {
       body: { account_id, limit, dry_run },
+      headers: { "x-revenue-secret": revenueSecret },
     })
 
     if (error) {
