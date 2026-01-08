@@ -11,7 +11,7 @@
 // - Keep voice flow short (60–90s), yes/no + one open question.
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts"
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+import { createClient } from "jsr:@supabase/supabase-js@2"
 import { logEvaluation } from "../_shared/eval.ts"
 
 const VERSION = "voice-webhook-v4_2026-01-02_clean_flow_and_status"
