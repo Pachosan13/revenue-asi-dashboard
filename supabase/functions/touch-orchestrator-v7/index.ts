@@ -92,7 +92,7 @@ serve(async (req) => {
   if (req.method !== "POST") return json({ ok: false, version: VERSION, error: "POST only" }, 405);
 
   const SB_URL = Deno.env.get("SUPABASE_URL");
-  const SB_KEY = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim();
+  const SB_KEY = (Deno.env.get("SB_SERVICE_ROLE_KEY") ?? "").trim();
   if (!SB_URL || !SB_KEY) {
     return json(
       {
