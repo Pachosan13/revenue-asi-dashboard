@@ -26,6 +26,16 @@ function json(res: any, status = 200) {
   });
 }
 
+async function sha256HexPrefix8(input: string): Promise<string> {
+  if (!input) return "";
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return hex.slice(0, 8);
+}
+
 async function logEvalSafe(supabase: any, payload: any) {
   try {
     await (logEvaluation as any)(supabase, payload);
@@ -82,7 +92,7 @@ serve(async (req) => {
   if (req.method !== "POST") return json({ ok: false, version: VERSION, error: "POST only" }, 405);
 
   const SB_URL = Deno.env.get("SUPABASE_URL");
-  const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const SB_KEY = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim();
   if (!SB_URL || !SB_KEY) {
     return json(
       {
@@ -98,15 +108,36 @@ serve(async (req) => {
   // Auth:
   // - Preferred: x-revenue-secret == REVENUE_SECRET
   // - Local/dev fallback: allow service-role authenticated calls (Authorization/apikey == SB_KEY)
-  const REVENUE_SECRET = Deno.env.get("REVENUE_SECRET");
-  const incomingSecret = req.headers.get("x-revenue-secret");
-  const authHeader = req.headers.get("authorization") ?? "";
-  const apiKeyHeader = req.headers.get("apikey") ?? "";
-  const bearerToken = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7) : authHeader;
-  const isServiceRoleAuthed = bearerToken === SB_KEY || apiKeyHeader === SB_KEY;
+  const REVENUE_SECRET = (Deno.env.get("REVENUE_SECRET") ?? "").trim();
+  const incomingSecret = (req.headers.get("x-revenue-secret") ?? "").trim();
+  const auth = (req.headers.get("authorization") ?? "").trim();
+  // Some callers send `Authorization: Bearer <token>`; accept both raw token and Bearer format.
+  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : auth.trim();
+  const apiKey = (req.headers.get("apikey") ?? "").trim();
+
+  const isServiceRoleAuthed = (bearer && bearer === SB_KEY) || (apiKey && apiKey === SB_KEY);
   const isRevenueSecretAuthed = !!REVENUE_SECRET && incomingSecret === REVENUE_SECRET;
 
   if (!isRevenueSecretAuthed && !isServiceRoleAuthed) {
+    const hasSBKey = Boolean(SB_KEY);
+    const sbKeyLen = SB_KEY.length;
+    const bearerLen = bearer.length;
+    const apiKeyLen = apiKey.length;
+    const sbKeyHash8 = await sha256HexPrefix8(SB_KEY);
+    const bearerHash8 = await sha256HexPrefix8(bearer);
+    const apiKeyHash8 = await sha256HexPrefix8(apiKey);
+
+    console.log("TOUCH_ORCH_AUTH_FAIL", {
+      hasSBKey,
+      sbKeyLen,
+      bearerLen,
+      apiKeyLen,
+      isRevenueSecretAuthed,
+      isServiceRoleAuthed,
+      sbKeyHash8,
+      bearerHash8,
+      apiKeyHash8,
+    });
     return json({ ok: false, version: VERSION, error: "unauthorized" }, 401);
   }
 
