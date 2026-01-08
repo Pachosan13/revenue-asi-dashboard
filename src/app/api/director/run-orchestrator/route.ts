@@ -75,8 +75,12 @@ export async function POST(req: Request) {
 
     const { data: result, error } = await supabase.functions.invoke("touch-orchestrator-v7", {
       body: { account_id, limit, dry_run },
-      headers: { "x-revenue-secret": revenueSecret },
-    })
+      headers: {
+        Authorization: `Bearer ${(process.env.SB_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim()}`,
+        apikey: (process.env.SB_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim(),
+        ...(process.env.REVENUE_SECRET ? { "x-revenue-secret": process.env.REVENUE_SECRET } : {}),
+      },
+    })    
 
     if (error) {
       const e = error as any
