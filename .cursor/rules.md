@@ -1,4 +1,4 @@
-Read /docs/system-truth.md as SOT
+MANDATORY: Read /docs/system-truth.md (SOT) before doing anything.
 
 - The file `docs/system-truth.md` is the Single Source of Truth (SOT) for repo behavior.
 - Before doing any task: read `docs/system-truth.md` and align actions to it.
@@ -24,6 +24,7 @@ Read /docs/system-truth.md as SOT
 - Minimal diffs. No drive-by formatting.
 - Do not change unrelated files. If you touch a file, explain why.
 - If behavior changes, propose the SOT update first (or in the same PR) and keep it factual.
+- If you change behavior, you MUST update SOT changelog in the same PR/commit set.
 - Record confirmed changes in the SOT changelog:
   - If a changelog section does not exist, add a short `## Changelog` section and append one bullet per confirmed change.
 - When unsure, ask for repo evidence (file path, logs, SQL output) OR mark **UNRESOLVED**.
@@ -78,5 +79,9 @@ If a task depends on unknowns:
 
 - Ask for the exact repo evidence (file path, migration, function logs, SQL query output), OR
 - Mark the claim **UNRESOLVED** and proceed only with provable changes.
+
+## Output policy (default)
+
+- Default output: patch/diff + exact commands + expected result. No essays.
 
 
