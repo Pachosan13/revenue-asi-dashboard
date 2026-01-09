@@ -107,6 +107,16 @@ serve(async (req) => {
           },
         ]
 
+  const ELASTIC_API_KEY =
+    (Deno.env.get("ELASTIC_EMAIL_API_KEY") ?? "").trim() ||
+    (Deno.env.get("ELASTICEMAIL_API_KEY") ?? "").trim()
+  const ELASTIC_FROM = (Deno.env.get("ELASTIC_EMAIL_FROM") ?? "").trim()
+  const EMAIL_READY = Boolean(ELASTIC_API_KEY && ELASTIC_FROM)
+
+  const cadenceFiltered = EMAIL_READY
+    ? cadence
+    : cadence.filter((t: any) => String(t?.channel ?? "").toLowerCase().trim() !== "email")
+
   // 3) leads elegibles (dead=stop, phone required, account required)
   const { data: leads, error: lErr } = await supabase
     .from("leads")
@@ -184,7 +194,7 @@ serve(async (req) => {
 
   const inserts: any[] = []
   for (const lead of leads ?? []) {
-    for (const touch of cadence) {
+    for (const touch of cadenceFiltered) {
       const step = Number(touch.step ?? 1)
       const channel = String(touch.channel ?? "whatsapp").toLowerCase()
       const key = `${lead.id}:${step}:${channel}`

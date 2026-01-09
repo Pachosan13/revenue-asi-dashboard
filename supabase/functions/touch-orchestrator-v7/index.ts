@@ -8,6 +8,9 @@ const DEFAULT_FALLBACK_ORDER = ["voice", "whatsapp", "sms", "email"];
 const DEFAULT_MAX_ATTEMPTS = { voice: 2, whatsapp: 2, sms: 2, email: 2 };
 const DEFAULT_COOLDOWNS = { voice: 120, whatsapp: 120, sms: 120, email: 120 };
 
+const UUID_REGEX =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -147,13 +150,22 @@ serve(async (req) => {
   const accountId = String(body.account_id ?? "").trim();
   if (!accountId) return json({ ok: false, version: VERSION, stage: "parse_body", error: "account_id required" }, 400);
 
+  const campaignIdFilter = String(body.campaign_id ?? "").trim();
+  if (campaignIdFilter && !UUID_REGEX.test(campaignIdFilter)) {
+    return json(
+      { ok: false, version: VERSION, stage: "parse_body", error: "Invalid campaign_id" },
+      400,
+    );
+  }
+
   const limit = Math.min(Math.max(Number(body.limit ?? 20), 1), 200);
   const dryRun = Boolean(body.dry_run ?? false);
 
   const nowIso = new Date().toISOString();
+  const windowStartIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
   // 1) campaign_leads DUE + (active|enrolled)
-  const { data: enrolled, error: eErr } = await supabase
+  let enrolledQuery = supabase
     .from("campaign_leads")
     .select("id, campaign_id, lead_id, enrolled_at, next_action_at, status, account_id")
     .eq("account_id", accountId)
@@ -161,6 +173,12 @@ serve(async (req) => {
     .lte("next_action_at", nowIso)
     .order("next_action_at", { ascending: true })
     .limit(limit);
+
+  if (campaignIdFilter) {
+    enrolledQuery = enrolledQuery.eq("campaign_id", campaignIdFilter);
+  }
+
+  const { data: enrolled, error: eErr } = await enrolledQuery;
 
   if (eErr) return json({ ok: false, version: VERSION, stage: "select_campaign_leads", error: eErr.message }, 500);
 
@@ -226,9 +244,20 @@ serve(async (req) => {
 
   if (sErr) return json({ ok: false, version: VERSION, stage: "select_campaign_steps", error: sErr.message }, 500);
 
+  const ELASTIC_API_KEY =
+    (Deno.env.get("ELASTIC_EMAIL_API_KEY") ?? "").trim() ||
+    (Deno.env.get("ELASTICEMAIL_API_KEY") ?? "").trim();
+  const ELASTIC_FROM = (Deno.env.get("ELASTIC_EMAIL_FROM") ?? "").trim();
+  const EMAIL_READY = Boolean(ELASTIC_API_KEY && ELASTIC_FROM);
+
   const stepsByCampaign = new Map<string, any[]>();
   for (const st of steps ?? []) {
     if (!st?.campaign_id) continue;
+    const channel = toLower(st?.channel);
+    if (channel === "email" && !EMAIL_READY) {
+      console.log("ORCH_EMAIL_DISABLED_MISSING_ELASTIC_ENV", { campaign_id: st?.campaign_id, step: st?.step });
+      continue;
+    }
     if (!stepsByCampaign.has(st.campaign_id)) stepsByCampaign.set(st.campaign_id, []);
     stepsByCampaign.get(st.campaign_id)!.push(st);
   }
@@ -248,6 +277,7 @@ serve(async (req) => {
   }
 
   const futureApptCache = new Map<string, boolean>();
+  const touches24hCache = new Map<string, number>();
 
   let inserted = 0;
   const errors: any[] = [];
@@ -265,6 +295,42 @@ serve(async (req) => {
     const account_id = row.account_id ?? info?.account_id ?? null;
     if (!account_id) {
       errors.push({ lead_id: row.lead_id, campaign_id: row.campaign_id, error: "missing_account_id" });
+      continue;
+    }
+
+    // Anti-spam guardrail: max 3 touches / (account_id, lead_id, campaign_id) / 24h
+    const touchCapKey = `${account_id}:${row.lead_id}:${row.campaign_id}`;
+    let touches24h = touches24hCache.get(touchCapKey);
+    if (touches24h === undefined) {
+      const { count, error: tErr } = await supabase
+        .from("touch_runs")
+        .select("id", { head: true, count: "exact" })
+        .eq("account_id", account_id)
+        .eq("lead_id", row.lead_id)
+        .eq("campaign_id", row.campaign_id)
+        .gte("created_at", windowStartIso);
+
+      if (tErr) {
+        errors.push({
+          lead_id: row.lead_id,
+          campaign_id: row.campaign_id,
+          error: `touches_24h_count_error: ${tErr.message}`,
+        });
+        continue;
+      }
+
+      touches24h = Number(count ?? 0);
+      touches24hCache.set(touchCapKey, touches24h);
+    }
+
+    if (touches24h >= 3) {
+      console.log("ORCH_SPAM_GUARD_LEAD_DAY_CAP", {
+        account_id,
+        campaign_id: row.campaign_id,
+        lead_id: row.lead_id,
+        touches_24h: touches24h,
+        cap: 3,
+      });
       continue;
     }
 
@@ -287,7 +353,8 @@ serve(async (req) => {
 
     const enrolledAtMs = row.enrolled_at ? new Date(row.enrolled_at).getTime() : nowMs;
 
-    const stepNums = [...new Set(campaignSteps.map((s: any) => Number(s.step ?? 1)))];
+    const stepNums = [...new Set(campaignSteps.map((s: any) => Number(s.step ?? 1)))]
+      .filter((n) => Number.isFinite(n) && n >= 1 && n <= 1000);
     const channels = [...new Set(campaignSteps.map((s: any) => toLower(s.channel)).filter(Boolean))];
 
     const { data: existingActive, error: xErr } = await supabase
@@ -314,6 +381,17 @@ serve(async (req) => {
       if (!channel) continue;
 
       const stepNum = Number(st.step ?? 1);
+      if (!Number.isFinite(stepNum) || stepNum < 1) continue;
+      if (stepNum > 1000) {
+        console.log("ORCH_STEP_CAP_SKIP", {
+          account_id,
+          campaign_id: row.campaign_id,
+          lead_id: row.lead_id,
+          step: stepNum,
+          cap: 1000,
+        });
+        continue;
+      }
       const k = `${stepNum}:${channel}`;
       if (activeKey.has(k)) continue;
 

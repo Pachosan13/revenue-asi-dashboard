@@ -57,8 +57,9 @@ create table if not exists public.billing_statements (
 );
 
 -- Seed: a minimal default plan (adjust pricing/limits later)
-insert into public.billing_plans (name, currency, billing_cycle, included, unit_cost_cents, active)
+insert into public.billing_plans (code, name, currency, billing_cycle, included, unit_cost_cents, active)
 select
+  'forge_usage_draft' as code,
   'Forge Usage (Draft Pricing)' as name,
   'USD' as currency,
   'monthly' as billing_cycle,
