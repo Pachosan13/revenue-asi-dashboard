@@ -50,8 +50,19 @@ type CampaignRow = {
   name: string
   type: CampaignType
   status: CampaignStatus
+  campaign_status: string
+  is_running: boolean
   created_at: string
   kpis: CampaignKPI | null
+}
+
+type RuntimeRow = {
+  campaign_id: string | null
+  name: string | null
+  type: string | null
+  campaign_status: string | null
+  is_running: boolean | null
+  last_touch_run_at: string | null
 }
 
 // ------------------
@@ -113,6 +124,7 @@ export default function CampaignsPage() {
 
   const [loading, setLoading] = useState(true)
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([])
+  const [runtimeError, setRuntimeError] = useState<string | null>(null)
 
   // -------------------------------
   // Load campaigns + KPIs
@@ -121,33 +133,95 @@ export default function CampaignsPage() {
   const loadCampaigns = useCallback(async () => {
     if (!supabase) {
       setCampaigns([])
+      setRuntimeError("Missing Supabase client configuration")
       setLoading(false)
       return
     }
 
     setLoading(true)
+    setRuntimeError(null)
 
-    const [{ data: base }, { data: kpis }] = await Promise.all([
-      supabase.from("campaigns").select("*").order("created_at", { ascending: false }).limit(200),
+    const { data: userRes, error: userErr } = await supabase.auth.getUser()
+    if (userErr || !userRes?.user) {
+      setCampaigns([])
+      setRuntimeError("Not authenticated")
+      setLoading(false)
+      return
+    }
+
+    const { data: membership, error: mErr } = await supabase
+      .from("account_members")
+      .select("account_id, role")
+      .eq("user_id", userRes.user.id)
+      .limit(1)
+      .maybeSingle()
+
+    if (mErr) {
+      setCampaigns([])
+      setRuntimeError(`Failed to resolve account membership: ${mErr.message}`)
+      setLoading(false)
+      return
+    }
+
+    const accountId = membership?.account_id ? String(membership.account_id) : null
+    if (!accountId) {
+      setCampaigns([])
+      setRuntimeError("No account membership")
+      setLoading(false)
+      return
+    }
+
+    const [{ data: runtime, error: rErr }, { data: kpis }] = await Promise.all([
+      supabase
+        .from("v_campaign_runtime_status_v1")
+        .select("campaign_id,name,type,campaign_status,is_running,last_touch_run_at")
+        .eq("account_id", accountId)
+        .order("is_running", { ascending: false })
+        .order("last_touch_run_at", { ascending: false })
+        .limit(200),
       supabase.from("campaign_funnel_overview").select("*"),
     ])
+
+    if (rErr) {
+      setCampaigns([])
+      setRuntimeError(`Runtime view query failed: ${rErr.message}`)
+      setLoading(false)
+      return
+    }
 
     const kpiMap = new Map<string, CampaignKPI>()
     ;(kpis ?? []).forEach((row: CampaignKPI) => {
       kpiMap.set(row.campaign_id, row)
     })
 
-    const mapped = (base ?? []).map((row: any) => {
-      const mappedStatus = statusMap[row.status] ?? "draft"
-      const mappedType = (row.type ?? "outbound") as CampaignType
+    const mapped = (runtime ?? []).map((row: RuntimeRow) => {
+      const campaign_status = String(row?.campaign_status ?? "").toLowerCase().trim()
+      const is_running = Boolean(row?.is_running)
+
+      // “Live” is enabled campaigns (campaign_status='active'), not necessarily running.
+      const mappedStatus = statusMap[campaign_status] ?? "draft"
+
+      const rawType = String(row?.type ?? "outbound").toLowerCase().trim()
+      const mappedType =
+        rawType === "outbound" ||
+        rawType === "nurture" ||
+        rawType === "reactivation" ||
+        rawType === "whatsapp" ||
+        rawType === "sms" ||
+        rawType === "email"
+          ? (rawType as CampaignType)
+          : ("outbound" as CampaignType)
 
       return {
-        id: row.id,
+        id: String(row.campaign_id ?? ""),
         name: row.name ?? "Untitled",
         type: mappedType,
         status: mappedStatus,
-        created_at: row.created_at ?? "",
-        kpis: kpiMap.get(row.id) ?? null,
+        campaign_status,
+        is_running,
+        // view is our runtime truth; use last_touch_run_at for activity sorting
+        created_at: row.last_touch_run_at ?? "",
+        kpis: row.campaign_id ? kpiMap.get(String(row.campaign_id)) ?? null : null,
       } as CampaignRow
     })
 
@@ -177,7 +251,8 @@ export default function CampaignsPage() {
   // -------------------------------
 
   const summary = useMemo(() => {
-    const live = campaigns.filter((c) => c.status === "live").length
+    const live = campaigns.filter((c) => c.campaign_status === "active").length
+    const running = campaigns.filter((c) => c.is_running === true).length
     const avgReply =
       campaigns.length > 0
         ? (
@@ -190,6 +265,7 @@ export default function CampaignsPage() {
 
     return {
       live,
+      running,
       total: campaigns.length,
       avgReply,
     }
@@ -228,8 +304,8 @@ export default function CampaignsPage() {
         <StatCard
           label="Live"
           value={`${summary.live} active`}
-          helper="Running campaigns"
-          delta="Synced"
+          helper="Enabled campaigns"
+          delta={`${summary.running} running`}
         />
 
         <StatCard
@@ -261,6 +337,22 @@ export default function CampaignsPage() {
         />
 
         <CardContent className="space-y-4">
+          {runtimeError ? (
+            <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 flex items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold">Runtime data unavailable</div>
+                <div className="text-rose-200/80">{runtimeError}</div>
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="gap-2"
+                onClick={() => loadCampaigns()}
+              >
+                <RefreshCw size={14} /> Retry
+              </Button>
+            </div>
+          ) : null}
 
           {/* Search + selects */}
           <div className="grid gap-3 md:grid-cols-[1.2fr,1fr,1fr]">
@@ -337,6 +429,12 @@ export default function CampaignsPage() {
                             <span className="h-2 w-2 rounded-full bg-current" />
                             {c.status}
                           </span>
+
+                          {c.is_running ? (
+                            <Badge variant="success" className="text-xs">
+                              Running
+                            </Badge>
+                          ) : null}
                         </div>
                       </div>
                     </TableCell>

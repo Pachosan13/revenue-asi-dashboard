@@ -73,11 +73,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Campaign not found" }, { status: 404 })
     }
 
+    const invokeKey = (process.env.SB_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim()
+
     const { data: result, error } = await supabase.functions.invoke("touch-orchestrator-v7", {
-      body: { account_id, limit, dry_run },
+      body: { account_id, campaign_id: campaignId, limit, dry_run },
       headers: {
-        Authorization: `Bearer ${(process.env.SB_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim()}`,
-        apikey: (process.env.SB_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim(),
+        Authorization: `Bearer ${invokeKey}`,
+        apikey: invokeKey,
         ...(process.env.REVENUE_SECRET ? { "x-revenue-secret": process.env.REVENUE_SECRET } : {}),
       },
     })    
