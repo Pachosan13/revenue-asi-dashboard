@@ -244,9 +244,20 @@ serve(async (req) => {
 
   if (sErr) return json({ ok: false, version: VERSION, stage: "select_campaign_steps", error: sErr.message }, 500);
 
+  const ELASTIC_API_KEY =
+    (Deno.env.get("ELASTIC_EMAIL_API_KEY") ?? "").trim() ||
+    (Deno.env.get("ELASTICEMAIL_API_KEY") ?? "").trim();
+  const ELASTIC_FROM = (Deno.env.get("ELASTIC_EMAIL_FROM") ?? "").trim();
+  const EMAIL_READY = Boolean(ELASTIC_API_KEY && ELASTIC_FROM);
+
   const stepsByCampaign = new Map<string, any[]>();
   for (const st of steps ?? []) {
     if (!st?.campaign_id) continue;
+    const channel = toLower(st?.channel);
+    if (channel === "email" && !EMAIL_READY) {
+      console.log("ORCH_EMAIL_DISABLED_MISSING_ELASTIC_ENV", { campaign_id: st?.campaign_id, step: st?.step });
+      continue;
+    }
     if (!stepsByCampaign.has(st.campaign_id)) stepsByCampaign.set(st.campaign_id, []);
     stepsByCampaign.get(st.campaign_id)!.push(st);
   }

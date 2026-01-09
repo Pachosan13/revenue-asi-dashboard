@@ -46,9 +46,11 @@ serve(async (req) => {
   const supabase = createClient(SB_URL, SB_KEY)
 
   // ENV para Elastic Email (ajusta nombres si ya usas otros)
-  const ELASTIC_API_KEY = Deno.env.get("ELASTIC_EMAIL_API_KEY")
-  const ELASTIC_FROM = Deno.env.get("ELASTIC_EMAIL_FROM")
-  const ELASTIC_FROM_NAME = Deno.env.get("ELASTIC_EMAIL_FROM_NAME") ?? "Revenue ASI"
+  const ELASTIC_API_KEY =
+    (Deno.env.get("ELASTIC_EMAIL_API_KEY") ?? "").trim() ||
+    (Deno.env.get("ELASTICEMAIL_API_KEY") ?? "").trim()
+  const ELASTIC_FROM = (Deno.env.get("ELASTIC_EMAIL_FROM") ?? "").trim()
+  const ELASTIC_FROM_NAME = (Deno.env.get("ELASTIC_EMAIL_FROM_NAME") ?? "Revenue ASI").trim()
 
   const DRY_DEFAULT = Deno.env.get("DRY_RUN_EMAIL") === "true"
 
@@ -177,7 +179,7 @@ serve(async (req) => {
       }
 
       if (!ELASTIC_API_KEY || !ELASTIC_FROM) {
-        throw new Error("missing_elastic_env")
+        throw new Error("missing_elastic_env: set ELASTIC_EMAIL_API_KEY (or ELASTICEMAIL_API_KEY) + ELASTIC_EMAIL_FROM")
       }
 
       // 2.2 Resolver email del lead (lead_enriched primero)

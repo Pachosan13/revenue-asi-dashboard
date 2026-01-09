@@ -51,7 +51,9 @@ serve(async (req) => {
 
   const SB_URL = Deno.env.get("SUPABASE_URL")
   const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
-  const ELASTIC_KEY = Deno.env.get("ELASTICEMAIL_API_KEY") || ""
+  const ELASTIC_KEY =
+    (Deno.env.get("ELASTIC_EMAIL_API_KEY") ?? "").trim() ||
+    (Deno.env.get("ELASTICEMAIL_API_KEY") ?? "").trim()
   if (!SB_URL || !SB_KEY) {
     return new Response(JSON.stringify({ ok:false, stage:"env", error:"Missing supabase env" }), {
       status: 500, headers: { ...corsHeaders, "Content-Type":"application/json" },
