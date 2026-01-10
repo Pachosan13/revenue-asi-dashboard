@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useMemo, useState, useEffect } from "react"
+import React, { useMemo, useState, useEffect, useCallback } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { AlertTriangle, Pause, Play, Plus, RefreshCcw, Sparkles } from "lucide-react"
 import Link from "next/link"
@@ -46,7 +46,7 @@ export default function CampaignDetailPage() {
   const supabase = supabaseBrowser()
 
   const [campaign, setCampaign] = useState<Campaign | null>(null)
-  const [status, setStatus] = useState<CampaignStatus>("draft")
+  const [isActive, setIsActive] = useState(false)
   const [isStarting, setIsStarting] = useState(false)
   const [startFeedback, setStartFeedback] = useState<
     | {
@@ -65,7 +65,7 @@ export default function CampaignDetailPage() {
     async function loadCampaign() {
       if (!params?.id || params.id === "new") {
         setCampaign(null)
-        setStatus("draft")
+        setIsActive(false)
         setLoading(false)
         return
       }
@@ -86,14 +86,13 @@ export default function CampaignDetailPage() {
         return
       }
 
-      const mappedStatus: CampaignStatus =
-        statusMap[data.status] ?? "draft"
+      const nextIsActive = Boolean((data as any).is_active)
 
       const campaignFromDb: Campaign = {
         id: data.id,
         name: data.name ?? "Untitled",
         type: (data.type ?? "outbound") as CampaignType,
-        status: mappedStatus,
+        status: nextIsActive ? "live" : "paused",
         leads_count: data.leads_count ?? 0,
         reply_rate: data.reply_rate ?? 0,
         meetings_booked: data.meetings_booked ?? 0,
@@ -107,7 +106,7 @@ export default function CampaignDetailPage() {
       }
 
       setCampaign(campaignFromDb)
-      setStatus(campaignFromDb.status)
+      setIsActive(nextIsActive)
       setLoading(false)
     }
 
@@ -133,8 +132,9 @@ export default function CampaignDetailPage() {
         message_variants: messageVariants,
       }
     }
-    return { ...campaign, status }
-  }, [campaign, status, params])
+    const derivedStatus: CampaignStatus = isActive ? "live" : "paused"
+    return { ...campaign, status: derivedStatus }
+  }, [campaign, isActive, params])
 
   const eventsData = {
     deliveries: {
@@ -155,6 +155,68 @@ export default function CampaignDetailPage() {
   }
 
   const emptyState = !campaign || params?.id === "new"
+
+  const reloadCampaign = useCallback(async () => {
+    if (!params?.id || params.id === "new") return
+    const { data, error } = await supabase.from("campaigns").select("*").eq("id", params.id).single()
+    if (error) {
+      console.error("Error reloading campaign", error)
+      return
+    }
+    const nextIsActive = Boolean((data as any).is_active)
+    if (typeof (data as any).status === "string") {
+      const s = String((data as any).status).trim().toLowerCase()
+      const expected = nextIsActive ? "active" : "paused"
+      if (s && s !== expected) {
+        console.warn("campaign row status/is_active mismatch; rendering from is_active", {
+          campaign_id: params.id,
+          is_active: nextIsActive,
+          status: s,
+        })
+      }
+    }
+    setCampaign({
+      id: data.id,
+      name: data.name ?? "Untitled",
+      type: (data.type ?? "outbound") as CampaignType,
+      status: nextIsActive ? "live" : "paused",
+      leads_count: data.leads_count ?? 0,
+      reply_rate: data.reply_rate ?? 0,
+      meetings_booked: data.meetings_booked ?? 0,
+      conversion: data.conversion ?? 0,
+      created_at: data.created_at ?? new Date().toISOString().slice(0, 10),
+      error_rate: data.error_rate ?? 0,
+      daily_throughput: data.daily_throughput ?? 0,
+      leads_contacted: data.leads_contacted ?? 0,
+      touches: data.touches ?? campaignTouches,
+      message_variants: data.message_variants ?? messageVariants,
+    })
+    setIsActive(nextIsActive)
+  }, [params?.id, supabase])
+
+  const handleToggleActive = useCallback(
+    async (desired: boolean) => {
+      if (!campaign || !campaign.id || campaign.id === "new") return
+      const nextStatus = desired ? "active" : "paused"
+      const { data, error } = await supabase
+        .from("campaigns")
+        .update({ is_active: desired, status: nextStatus })
+        .eq("id", campaign.id)
+        .select("id,is_active,status")
+        .maybeSingle()
+      if (error) {
+        console.error("campaign.toggle failed", error)
+      } else if (data && Boolean((data as any).is_active) !== desired) {
+        console.warn("campaign.toggle inconsistent response; rendering from is_active", {
+          campaign_id: campaign.id,
+          desired_is_active: desired,
+          got: { is_active: (data as any).is_active, status: (data as any).status },
+        })
+      }
+      await reloadCampaign()
+    },
+    [campaign, supabase, reloadCampaign],
+  )
 
   // --------------------------------
   // Start campaign
@@ -193,7 +255,7 @@ export default function CampaignDetailPage() {
         throw new Error(errorMessage)
       }
 
-      setStatus("live")
+      setIsActive(true)
       setStartFeedback({
         type: "success",
         message: `Campaign started. Selected ${
@@ -257,22 +319,20 @@ export default function CampaignDetailPage() {
           <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60">
             <span
               className={`h-2 w-2 rounded-full ${
-                status === "live"
+                isActive
                   ? "bg-emerald-400"
-                  : status === "paused"
+                  : !isActive
                   ? "bg-amber-300"
                   : "bg-white/40"
               }`}
             />
             <span
-              className={`rounded-full px-3 py-1 text-xs capitalize ${statusPill[status]}`}
+              className={`rounded-full px-3 py-1 text-xs capitalize ${statusPill[isActive ? "live" : "paused"]}`}
             >
-              {status}
+              {isActive ? "live" : "paused"}
             </span>
             <button
-              onClick={() =>
-                setStatus((s) => (s === "live" ? "paused" : "live"))
-              }
+              onClick={() => handleToggleActive(!isActive)}
               className="text-emerald-300 underline decoration-emerald-400/60 decoration-dashed"
             >
               Toggle
@@ -294,7 +354,7 @@ export default function CampaignDetailPage() {
         </div>
       </div>
 
-      <CampaignKpis campaign={{ ...effectiveCampaign, status }} />
+      <CampaignKpis campaign={effectiveCampaign} />
 
       {emptyState ? (
         <Card className="border-dashed border-emerald-400/30 bg-white/5">
@@ -400,7 +460,12 @@ export default function CampaignDetailPage() {
           <Play size={16} />{" "}
           {isStarting ? "Starting..." : "Start campaign"}
         </Button>
-        <Button variant="subtle" className="gap-2 text-amber-200">
+        <Button
+          variant="subtle"
+          className="gap-2 text-amber-200"
+          onClick={() => handleToggleActive(false)}
+          disabled={!campaign || campaign.id === "new"}
+        >
           <Pause size={16} /> Pause
         </Button>
         <Button variant="ghost" className="gap-2 border border-white/10">
