@@ -274,23 +274,39 @@ function tryRuleBasedCommandOs(input: { message: string; context?: any }): Comma
   // "prende autos miami" => autos.activate (default full_funnel)
   // "prende solo leads autos miami" => autos.activate supply_only
   const mentionsAutos = m.includes("autos")
-  const wantsOn = mentionsAutos && (m.includes("prende") || m.includes("enciende") || m.includes("activar") || m.includes("activa"))
-  const wantsOff = mentionsAutos && (m.includes("apaga") || m.includes("desactivar") || m.includes("desactiva"))
-  const supplyOnly = m.includes("solo leads") || m.includes("solo lead") || m.includes("supply only") || m.includes("solo supply")
+  const wantsOn =
+    mentionsAutos &&
+    (m.includes("prende") || m.includes("enciende") || m.includes("activar") || m.includes("activa"))
+  const wantsOff =
+    mentionsAutos &&
+    (m.includes("apaga") || m.includes("desactivar") || m.includes("desactiva"))
+  const supplyOnly =
+    m.includes("solo leads") || m.includes("solo lead") || m.includes("supply only") || m.includes("solo supply")
+
+  const marketHints = ["panama", "pty", "pa"]
+
+  function extractTokenAfterAutos(): string | null {
+    const idx = m.indexOf("autos")
+    if (idx < 0) return null
+    const after = m.slice(idx + "autos".length).trim()
+    if (!after) return null
+    const tok = after.split(/\s+/)[0] ?? ""
+    return tok || null
+  }
 
   if (wantsOn || wantsOff) {
-    // Minimal city extraction (best-effort). If missing, router will use program defaults (routing city_fallback).
-    let city: string | undefined
-    if (m.includes("miami")) city = "miami"
+    const tok = extractTokenAfterAutos()
+    const looksLikeMarket = tok ? marketHints.includes(tok) : false
+    const city = tok && !looksLikeMarket ? tok : undefined
+    const market = tok && looksLikeMarket ? tok : undefined
 
     return {
       version: COMMAND_OS_VERSION,
       intent: wantsOn ? "autos.activate" : "autos.deactivate",
       args: {
+        ...(market ? { market } : null),
         ...(city ? { city } : null),
         mode: supplyOnly ? "supply_only" : "full_funnel",
-        // carry the original message so router can make safe decisions if needed
-        query_text: raw,
       },
       explanation: `rule_based_match: ${wantsOn ? "autos.activate" : "autos.deactivate"}`,
       confidence: 1,

@@ -570,7 +570,6 @@ interface AutosActivateArgs {
   market?: string
   city?: string
   mode?: AutosMode
-  query_text?: string
 }
 
 interface AutosDeactivateArgs {
@@ -578,7 +577,6 @@ interface AutosDeactivateArgs {
   market?: string
   city?: string
   mode?: AutosMode
-  query_text?: string
 }
 
 interface LeadInspectArgs {
@@ -731,7 +729,6 @@ function isAutosArgs(args: Record<string, any>): args is AutosActivateArgs | Aut
   if (args.city !== undefined && typeof args.city !== "string") return false
   if (args.market !== undefined && typeof args.market !== "string") return false
   if (args.mode !== undefined && args.mode !== "full_funnel" && args.mode !== "supply_only") return false
-  if (args.query_text !== undefined && typeof args.query_text !== "string") return false
   return true
 }
 function isCampaignInspectArgs(args: Record<string, any>): args is CampaignInspectArgs {
@@ -799,67 +796,185 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
 
         const accountId = requireAccountId(args, intent)
         const mode: AutosMode = (args.mode as AutosMode) ?? "full_funnel"
-        const city = typeof args.city === "string" && args.city.trim() ? args.city.trim().toLowerCase() : undefined
+        const supabase = getSupabaseAdmin()
 
-        // LeadGen for autos (Miami => craigslist). We reuse existing wiring: craigslist.cto.start.
-        const leadgenRes = await handleCommandOsIntent({
-          version: "v1",
-          intent: "craigslist.cto.start" as any,
-          args: { account_id: accountId, ...(city ? { city } : null) },
-          explanation: "autos.activate: leadgen",
-          confidence: 1,
-        } as any)
+        const cityArg =
+          typeof args.city === "string" && args.city.trim() ? args.city.trim().toLowerCase() : null
+        const marketArg =
+          typeof args.market === "string" && args.market.trim() ? args.market.trim().toLowerCase() : null
+
+        // -------------------------
+        // A) PROGRAM ON (LeadGen)
+        // -------------------------
+        // Repo-truth: leadgen routing is stored in org_settings.leadgen_routing (singleton row).
+        // Constraint: if active=true, dealer_address must be non-empty; radius must be valid (1–50).
+        const { data: orgRow, error: orgErr } = await supabase
+          .from("org_settings")
+          .select("id,leadgen_routing")
+          .limit(1)
+          .maybeSingle()
+
+        if (orgErr) {
+          return { ok: false, intent, args, data: { error: "Failed to load org_settings", details: orgErr.message } }
+        }
+
+        const existingRouting = (orgRow as any)?.leadgen_routing ?? null
+        const dealerAddress = typeof existingRouting?.dealer_address === "string" ? existingRouting.dealer_address.trim() : ""
+        const radiusMiles = Number(existingRouting?.radius_miles)
+        const currentCityFallback =
+          typeof existingRouting?.city_fallback === "string" ? existingRouting.city_fallback.trim().toLowerCase() : ""
+
+        const city = cityArg || currentCityFallback || null
+
+        let program_on: true | "needs_configuration" = true
+        let leadgen_note = ""
+
+        // We only flip routing.active=true if the routing object is complete enough to satisfy DB constraint + existing LeadGen logic.
+        const routingCanActivate = Boolean(dealerAddress) && Number.isFinite(radiusMiles) && radiusMiles >= 1 && radiusMiles <= 50
+
+        if (!routingCanActivate) {
+          program_on = "needs_configuration"
+          leadgen_note =
+            "LeadGen Routing is missing required fields. Set dealer_address + radius_miles in Settings/Onboarding, then retry."
+        } else {
+          const nextRouting = {
+            ...(typeof existingRouting === "object" && existingRouting ? existingRouting : {}),
+            active: true,
+            ...(city ? { city_fallback: city } : null),
+          }
+
+          if ((orgRow as any)?.id) {
+            const { error: updErr } = await supabase
+              .from("org_settings")
+              .update({ leadgen_routing: nextRouting })
+              .eq("id", (orgRow as any).id)
+            if (updErr) {
+              return { ok: false, intent, args, data: { error: "Failed to enable leadgen_routing", details: updErr.message } }
+            }
+          } else {
+            const { error: insErr } = await supabase.from("org_settings").insert({ leadgen_routing: nextRouting })
+            if (insErr) {
+              return { ok: false, intent, args, data: { error: "Failed to create org_settings row", details: insErr.message } }
+            }
+          }
+        }
+
+        // Trigger LeadGen work (Craigslist for US-style cities like Miami).
+        // We do not invent routing fields (lat/lon). We only enqueue if routing is activated.
+        let leadgen_exec: any = null
+        if (program_on === true && city) {
+          const { data: enqId, error: enqErr } = await supabase
+            .schema("lead_hunter")
+            .rpc("enqueue_craigslist_discover_v1", { p_account_id: accountId, p_city: city })
+          leadgen_exec = enqErr ? { ok: false, error: enqErr.message } : { ok: true, enqueued_task_id: enqId }
+        }
+
+        // Optional: Encuentra24 autopilot when market indicates Panama (repo-truth: lead_hunter.enc24_autopilot_settings).
+        let enc24_exec: any = null
+        const wantsEnc24 = marketArg === "pa" || city === "panama" || city === "pty"
+        if (program_on === true && wantsEnc24) {
+          enc24_exec = await handleCommandOsIntent({
+            version: "v1",
+            intent: "enc24.autos_usados.autopilot.start" as any,
+            args: { account_id: accountId },
+            explanation: "autos.activate: enc24 autopilot",
+            confidence: 1,
+          } as any)
+        }
 
         if (mode === "supply_only") {
           return {
-            ok: Boolean(leadgenRes?.ok),
+            ok: program_on === true,
             intent,
             args,
             data: {
-              mode,
-              leadgen: leadgenRes,
-              note: "Supply-only: LeadGen ON. Outbound campaigns unchanged.",
+              program_on,
+              campaign_on: false,
+              next_steps: program_on === true ? "Supply-only: LeadGen ON." : leadgen_note,
+              leadgen: { routing_active_set: program_on === true, city, enqueue: leadgen_exec, enc24: enc24_exec },
             },
           }
         }
 
-        // Full funnel includes outbound campaigns.
-        // Repo-truth does not provide a canonical mapping from 'autos' to a subset of campaigns,
-        // so we apply to all outbound campaigns in this account (public.campaigns scoped by account_id).
-        const supabase = getSupabaseAdmin()
-        const { data: updated, error: updErr } = await supabase
+        // -------------------------
+        // B) CAMPAIGN ON (full_funnel)
+        // -------------------------
+        // We must not invent which campaign represents autos outbound.
+        // Attempt inference by key/name containing 'autos' (and city if present). Otherwise return candidates for confirmation.
+        const likeCity = city ? `%${city}%` : null
+        const { data: allCampaigns, error: cErr } = await supabase
           .from("campaigns")
-          .update({ is_active: true, status: "active" })
+          .select("id,name,campaign_key,is_active,status,type")
           .eq("account_id", accountId)
-          .select("id,name,is_active,status")
+          .order("created_at", { ascending: false })
+          .limit(200)
 
-        if (updErr) {
+        if (cErr) {
+          return { ok: false, intent, args, data: { error: "Failed to load campaigns", details: cErr.message } }
+        }
+
+        const campaigns = Array.isArray(allCampaigns) ? allCampaigns : []
+        const autosCandidates = campaigns.filter((c: any) => {
+          const key = String(c?.campaign_key ?? "").toLowerCase()
+          const name = String(c?.name ?? "").toLowerCase()
+          const looksAutos = key.includes("autos") || name.includes("autos")
+          if (!looksAutos) return false
+          if (!likeCity) return true
+          return key.includes(city!) || name.includes(city!)
+        })
+
+        if (autosCandidates.length === 1) {
+          const target = autosCandidates[0]
+          const { data: upd, error: updErr } = await supabase
+            .from("campaigns")
+            .update({ is_active: true, status: "active" })
+            .eq("account_id", accountId)
+            .eq("id", target.id)
+            .select("id,name,campaign_key,is_active,status,type")
+            .maybeSingle()
+          if (updErr) {
+            return {
+              ok: false,
+              intent,
+              args,
+              data: { error: "Failed to enable autos outbound campaign", details: updErr.message },
+            }
+          }
+
           return {
-            ok: false,
+            ok: program_on === true,
             intent,
             args,
             data: {
-              error: "Failed to enable outbound campaigns",
-              details: updErr.message,
-              leadgen: leadgenRes,
+              program_on,
+              campaign_on: true,
+              next_steps: "Full funnel: LeadGen ON + autos outbound campaign enabled.",
+              leadgen: { routing_active_set: program_on === true, city, enqueue: leadgen_exec, enc24: enc24_exec },
+              outbound: { campaign: upd ?? target },
             },
           }
         }
+
+        const candidatesForConfirm = autosCandidates.length ? autosCandidates : campaigns.slice(0, 20)
 
         return {
-          ok: Boolean(leadgenRes?.ok),
+          ok: true,
           intent,
           args,
           data: {
-            mode,
-            leadgen: leadgenRes,
-            outbound: {
-              count_updated: Array.isArray(updated) ? updated.length : 0,
-              campaigns: Array.isArray(updated)
-                ? updated.map((c: any) => ({ id: c.id, name: c.name ?? null, is_active: c.is_active, status: c.status ?? null }))
-                : [],
-            },
-            note: "Full funnel: LeadGen ON + outbound campaigns enabled.",
+            program_on,
+            campaign_on: "needs_confirmation",
+            next_steps:
+              "No puedo inferir con certeza cuál campaign representa autos outbound. Confirma cuál campaign activar (id/name/campaign_key).",
+            leadgen: { routing_active_set: program_on === true, city, enqueue: leadgen_exec, enc24: enc24_exec, note: leadgen_note || null },
+            outbound_candidates: candidatesForConfirm.map((c: any) => ({
+              id: c.id,
+              name: c.name ?? null,
+              campaign_key: c.campaign_key ?? null,
+              is_active: Boolean(c.is_active),
+              status: c.status ?? null,
+              type: c.type ?? null,
+            })),
           },
         }
       }
@@ -871,63 +986,154 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
 
         const accountId = requireAccountId(args, intent)
         const mode: AutosMode = (args.mode as AutosMode) ?? "full_funnel"
-        const city = typeof args.city === "string" && args.city.trim() ? args.city.trim().toLowerCase() : undefined
+        const supabase = getSupabaseAdmin()
 
-        const leadgenRes = await handleCommandOsIntent({
-          version: "v1",
-          intent: "craigslist.cto.stop" as any,
-          args: { account_id: accountId, ...(city ? { city } : null) },
-          explanation: "autos.deactivate: leadgen",
-          confidence: 1,
-        } as any)
+        const cityArg =
+          typeof args.city === "string" && args.city.trim() ? args.city.trim().toLowerCase() : null
+        const marketArg =
+          typeof args.market === "string" && args.market.trim() ? args.market.trim().toLowerCase() : null
+
+        // -------------------------
+        // Program OFF: routing.active=false (if row exists), and stop queued tasks (best-effort).
+        // -------------------------
+        const { data: orgRow, error: orgErr } = await supabase
+          .from("org_settings")
+          .select("id,leadgen_routing")
+          .limit(1)
+          .maybeSingle()
+
+        if (orgErr) {
+          return { ok: false, intent, args, data: { error: "Failed to load org_settings", details: orgErr.message } }
+        }
+
+        const existingRouting = (orgRow as any)?.leadgen_routing ?? null
+        const currentCityFallback =
+          typeof existingRouting?.city_fallback === "string" ? existingRouting.city_fallback.trim().toLowerCase() : ""
+        const city = cityArg || currentCityFallback || null
+
+        if ((orgRow as any)?.id && existingRouting && typeof existingRouting === "object") {
+          const nextRouting = { ...existingRouting, active: false }
+          const { error: updErr } = await supabase
+            .from("org_settings")
+            .update({ leadgen_routing: nextRouting })
+            .eq("id", (orgRow as any).id)
+          if (updErr) {
+            return { ok: false, intent, args, data: { error: "Failed to disable leadgen_routing", details: updErr.message } }
+          }
+        }
+
+        let leadgen_stop: any = null
+        if (city) {
+          leadgen_stop = await handleCommandOsIntent({
+            version: "v1",
+            intent: "craigslist.cto.stop" as any,
+            args: { account_id: accountId, city },
+            explanation: "autos.deactivate: craigslist stop",
+            confidence: 1,
+          } as any)
+        }
+
+        let enc24_stop: any = null
+        const wantsEnc24 = marketArg === "pa" || city === "panama" || city === "pty"
+        if (wantsEnc24) {
+          enc24_stop = await handleCommandOsIntent({
+            version: "v1",
+            intent: "enc24.autos_usados.autopilot.stop" as any,
+            args: { account_id: accountId },
+            explanation: "autos.deactivate: enc24 autopilot stop",
+            confidence: 1,
+          } as any)
+        }
 
         if (mode === "supply_only") {
           return {
-            ok: Boolean(leadgenRes?.ok),
+            ok: true,
             intent,
             args,
             data: {
-              mode,
-              leadgen: leadgenRes,
-              note: "Supply-only: LeadGen OFF. Outbound campaigns unchanged.",
+              program_on: false,
+              campaign_on: false,
+              next_steps: "Supply-only: LeadGen OFF. Outbound campaigns unchanged.",
+              leadgen: { routing_active_set: false, city, stop: leadgen_stop, enc24: enc24_stop },
             },
           }
         }
 
-        const supabase = getSupabaseAdmin()
-        const { data: updated, error: updErr } = await supabase
+        // -------------------------
+        // Campaign OFF (full_funnel): infer autos outbound campaign or request confirmation.
+        // -------------------------
+        const { data: allCampaigns, error: cErr } = await supabase
           .from("campaigns")
-          .update({ is_active: false, status: "paused" })
+          .select("id,name,campaign_key,is_active,status,type")
           .eq("account_id", accountId)
-          .select("id,name,is_active,status")
+          .order("created_at", { ascending: false })
+          .limit(200)
 
-        if (updErr) {
+        if (cErr) {
+          return { ok: false, intent, args, data: { error: "Failed to load campaigns", details: cErr.message } }
+        }
+
+        const campaigns = Array.isArray(allCampaigns) ? allCampaigns : []
+        const autosCandidates = campaigns.filter((c: any) => {
+          const key = String(c?.campaign_key ?? "").toLowerCase()
+          const name = String(c?.name ?? "").toLowerCase()
+          const looksAutos = key.includes("autos") || name.includes("autos")
+          if (!looksAutos) return false
+          if (!city) return true
+          return key.includes(city) || name.includes(city)
+        })
+
+        if (autosCandidates.length === 1) {
+          const target = autosCandidates[0]
+          const { data: upd, error: updErr } = await supabase
+            .from("campaigns")
+            .update({ is_active: false, status: "paused" })
+            .eq("account_id", accountId)
+            .eq("id", target.id)
+            .select("id,name,campaign_key,is_active,status,type")
+            .maybeSingle()
+          if (updErr) {
+            return {
+              ok: false,
+              intent,
+              args,
+              data: { error: "Failed to disable autos outbound campaign", details: updErr.message },
+            }
+          }
+
           return {
-            ok: false,
+            ok: true,
             intent,
             args,
             data: {
-              error: "Failed to disable outbound campaigns",
-              details: updErr.message,
-              leadgen: leadgenRes,
+              program_on: false,
+              campaign_on: false,
+              next_steps: "Full funnel OFF: LeadGen OFF + autos outbound campaign paused.",
+              leadgen: { routing_active_set: false, city, stop: leadgen_stop, enc24: enc24_stop },
+              outbound: { campaign: upd ?? target },
             },
           }
         }
 
+        const candidatesForConfirm = autosCandidates.length ? autosCandidates : campaigns.slice(0, 20)
         return {
-          ok: Boolean(leadgenRes?.ok),
+          ok: true,
           intent,
           args,
           data: {
-            mode,
-            leadgen: leadgenRes,
-            outbound: {
-              count_updated: Array.isArray(updated) ? updated.length : 0,
-              campaigns: Array.isArray(updated)
-                ? updated.map((c: any) => ({ id: c.id, name: c.name ?? null, is_active: c.is_active, status: c.status ?? null }))
-                : [],
-            },
-            note: "Full funnel: LeadGen OFF + outbound campaigns paused.",
+            program_on: false,
+            campaign_on: "needs_confirmation",
+            next_steps:
+              "No puedo inferir con certeza cuál campaign representa autos outbound para apagar. Confirma cuál campaign pausar (id/name/campaign_key).",
+            leadgen: { routing_active_set: false, city, stop: leadgen_stop, enc24: enc24_stop },
+            outbound_candidates: candidatesForConfirm.map((c: any) => ({
+              id: c.id,
+              name: c.name ?? null,
+              campaign_key: c.campaign_key ?? null,
+              is_active: Boolean(c.is_active),
+              status: c.status ?? null,
+              type: c.type ?? null,
+            })),
           },
         }
       }

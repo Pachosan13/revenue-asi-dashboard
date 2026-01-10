@@ -376,6 +376,9 @@ Server-side validation exists as a DB CHECK constraint (radius 1–50; if `activ
 - Command OS: `campaign.toggle` now keeps `campaigns.is_active` and `campaigns.status` consistent and returns the re-read row.
 - Campaigns: added a safe bulk toggle (`campaign.toggle.bulk`) and UI “Pause all running” action; bulk updates always keep `status` derived from `is_active` (active/paused).
 - Command OS (leads): lead listing/inspect/next_action now use `lead_next_action_view_v5` (plus `lead_enriched` + `inbox_events`) and support suppression via `leads.status='suppressed'` (run-cadence selects `status='new'`, so suppression fail-closes scheduling).
+- Command OS: added Autos full-funnel commands:
+  - `autos.activate`: turns LeadGen routing ON via `org_settings.leadgen_routing.active=true` (only if routing is already fully configured), enqueues a Craigslist discover task for the city, and enables the autos outbound campaign **only if it can be uniquely inferred** from existing `public.campaigns` rows (otherwise returns `needs_confirmation` with candidate campaigns).
+  - `autos.deactivate`: turns LeadGen routing OFF via `org_settings.leadgen_routing.active=false`, stops queued Craigslist tasks for the city, and pauses the autos outbound campaign **only if it can be uniquely inferred** (otherwise returns `needs_confirmation` with candidates).
 
 ### Verification snippets (no secrets)
 
