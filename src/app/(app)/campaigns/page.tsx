@@ -65,6 +65,13 @@ type RuntimeRow = {
   last_touch_run_at: string | null
 }
 
+type LeadgenRouting = {
+  dealer_address: string
+  radius_miles: number
+  city_fallback: string
+  active: boolean
+}
+
 // ------------------
 // Mappings
 // ------------------
@@ -170,7 +177,7 @@ export default function CampaignsPage() {
     }
     setAccountId(accountId)
 
-    const [{ data: runtime, error: rErr }, { data: kpis }, { data: clTasks }] = await Promise.all([
+    const [{ data: runtime, error: rErr }, { data: kpis }, { data: clTasks }, { data: orgSettings }] = await Promise.all([
       supabase
         .from("v_campaign_runtime_status_v1")
         .select("campaign_id,name,type,campaign_status,is_running,last_touch_run_at")
@@ -187,6 +194,7 @@ export default function CampaignsPage() {
         .eq("city", "miami")
         .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString())
         .limit(2000),
+      supabase.from("org_settings").select("leadgen_routing").limit(1).maybeSingle(),
     ])
 
     if (rErr) {
@@ -241,9 +249,14 @@ export default function CampaignsPage() {
       .sort()
       .slice(-1)[0] as string | undefined
 
+    const routing = (orgSettings as any)?.leadgen_routing as LeadgenRouting | null | undefined
+    const radius = Number(routing?.radius_miles)
+    const radiusMi = Number.isFinite(radius) && radius > 0 ? radius : 10
+    const name = `Craigslist · Miami · ${radiusMi}mi · LeadGen`
+
     const craigslistMiami: CampaignRow = {
       id: "craigslist:miami",
-      name: "Craigslist Miami",
+      name,
       type: "outbound",
       status: clQueuedOrClaimed ? "live" : "paused",
       campaign_status: clQueuedOrClaimed ? "active" : "paused",

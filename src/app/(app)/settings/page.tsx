@@ -12,6 +12,12 @@ type OrgSettings = {
   sync_crm_webhooks: boolean
   fallback_email: string
   webhook_url: string
+  leadgen_routing?: {
+    dealer_address: string
+    radius_miles: number
+    city_fallback: string
+    active: boolean
+  } | null
   updated_at?: string | null
 }
 
@@ -21,6 +27,12 @@ const defaultSettings: OrgSettings = {
   sync_crm_webhooks: false,
   fallback_email: "alerts@company.com",
   webhook_url: "https://hooks.slack.com/...",
+  leadgen_routing: {
+    dealer_address: "",
+    radius_miles: 10,
+    city_fallback: "",
+    active: false,
+  },
 }
 
 export default function SettingsPage() {
@@ -54,6 +66,7 @@ export default function SettingsPage() {
           sync_crm_webhooks: Boolean(data.sync_crm_webhooks),
           fallback_email: data.fallback_email ?? defaultSettings.fallback_email,
           webhook_url: data.webhook_url ?? defaultSettings.webhook_url,
+          leadgen_routing: data.leadgen_routing ?? defaultSettings.leadgen_routing,
           updated_at: data.updated_at,
         })
       } else {
@@ -84,6 +97,19 @@ export default function SettingsPage() {
       return
     }
 
+    const routing = settings.leadgen_routing ?? null
+    if (routing) {
+      const radius = Number(routing.radius_miles)
+      if (!Number.isFinite(radius) || radius < 1 || radius > 50) {
+        setToast({ type: "error", message: "LeadGen Routing: radius must be 1–50 miles" })
+        return
+      }
+      if (routing.active && !String(routing.dealer_address ?? "").trim()) {
+        setToast({ type: "error", message: "LeadGen Routing: dealer address required when active" })
+        return
+      }
+    }
+
     setSaving(true)
     const payload = {
       id: settings.id || crypto.randomUUID(),
@@ -92,6 +118,7 @@ export default function SettingsPage() {
       sync_crm_webhooks: settings.sync_crm_webhooks,
       fallback_email: settings.fallback_email,
       webhook_url: settings.webhook_url,
+      leadgen_routing: routing,
       updated_at: new Date().toISOString(),
     }
 
@@ -107,6 +134,7 @@ export default function SettingsPage() {
         sync_crm_webhooks: Boolean(data.sync_crm_webhooks),
         fallback_email: data.fallback_email ?? "",
         webhook_url: data.webhook_url ?? "",
+        leadgen_routing: data.leadgen_routing ?? defaultSettings.leadgen_routing,
         updated_at: data.updated_at,
       })
       setToast({ type: "success", message: "Settings saved" })
@@ -210,6 +238,113 @@ export default function SettingsPage() {
               <p className="text-xs text-white/50">Delivery target for anomalies and pauses.</p>
             </div>
           </div>
+
+          <Card>
+            <CardHeader
+              title="LeadGen Routing"
+              description="Dealer routing settings for Craigslist LeadGen (stored in org_settings.leadgen_routing)."
+            />
+            <CardContent className="space-y-3">
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-[0.12em] text-white/50">Dealer address</p>
+                  <Input
+                    placeholder="123 Main St, Miami, FL"
+                    value={settings.leadgen_routing?.dealer_address ?? ""}
+                    onChange={(e) =>
+                      setSettings((prev) => ({
+                        ...prev,
+                        leadgen_routing: {
+                          dealer_address: e.target.value,
+                          radius_miles: Number(prev.leadgen_routing?.radius_miles ?? 10),
+                          city_fallback: String(prev.leadgen_routing?.city_fallback ?? ""),
+                          active: Boolean(prev.leadgen_routing?.active ?? false),
+                        },
+                      }))
+                    }
+                    disabled={!supabase}
+                  />
+                  <p className="text-xs text-white/50">Required when Active is enabled.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-[0.12em] text-white/50">Radius (miles)</p>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={String(settings.leadgen_routing?.radius_miles ?? 10)}
+                    onChange={(e) => {
+                      const n = Number(e.target.value)
+                      setSettings((prev) => ({
+                        ...prev,
+                        leadgen_routing: {
+                          dealer_address: String(prev.leadgen_routing?.dealer_address ?? ""),
+                          radius_miles: Number.isFinite(n) ? n : 10,
+                          city_fallback: String(prev.leadgen_routing?.city_fallback ?? ""),
+                          active: Boolean(prev.leadgen_routing?.active ?? false),
+                        },
+                      }))
+                    }}
+                    disabled={!supabase}
+                  />
+                  <p className="text-xs text-white/50">1–50 miles.</p>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-[0.12em] text-white/50">City fallback</p>
+                  <Input
+                    placeholder="miami"
+                    value={settings.leadgen_routing?.city_fallback ?? ""}
+                    onChange={(e) =>
+                      setSettings((prev) => ({
+                        ...prev,
+                        leadgen_routing: {
+                          dealer_address: String(prev.leadgen_routing?.dealer_address ?? ""),
+                          radius_miles: Number(prev.leadgen_routing?.radius_miles ?? 10),
+                          city_fallback: e.target.value,
+                          active: Boolean(prev.leadgen_routing?.active ?? false),
+                        },
+                      }))
+                    }
+                    disabled={!supabase}
+                  />
+                  <p className="text-xs text-white/50">Used when Command OS command omits a city.</p>
+                </div>
+
+                <button
+                  type="button"
+                  className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left"
+                  onClick={() =>
+                    setSettings((prev) => ({
+                      ...prev,
+                      leadgen_routing: {
+                        dealer_address: String(prev.leadgen_routing?.dealer_address ?? ""),
+                        radius_miles: Number(prev.leadgen_routing?.radius_miles ?? 10),
+                        city_fallback: String(prev.leadgen_routing?.city_fallback ?? ""),
+                        active: !Boolean(prev.leadgen_routing?.active ?? false),
+                      },
+                    }))
+                  }
+                  disabled={!supabase}
+                >
+                  <div>
+                    <p className="font-semibold text-white">Active</p>
+                    <p className="text-xs text-white/50">
+                      {settings.leadgen_routing?.active ? "Enabled" : "Disabled"}
+                    </p>
+                  </div>
+                  {settings.leadgen_routing?.active ? (
+                    <ToggleRight className="text-emerald-300" />
+                  ) : (
+                    <ToggleLeft className="text-white/40" />
+                  )}
+                </button>
+              </div>
+            </CardContent>
+          </Card>
 
           {settings.updated_at ? (
             <p className="text-xs text-white/50">Last updated {new Date(settings.updated_at).toLocaleString()}</p>

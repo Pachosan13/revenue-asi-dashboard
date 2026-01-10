@@ -343,6 +343,10 @@ function tryRuleBasedCraigslist(input: { message: string; context?: any }): Comm
 
   if (!isStart && !isStop) return null
 
+  const confirm =
+    m.includes("apagar-y-recrear") ? "apagar-y-recrear" : m.includes("crear") ? "crear" : m.includes("dejar") ? "dejar" : null
+  const override = m.includes("override") || m.includes("forzar")
+
   // Best-effort city extraction: everything after "craigslist" (preserve raw casing).
   // UNRESOLVED: full US geo normalization (city->site mapping) is not in repo; caller may pass args.site explicitly.
   const rawAfter = raw.toLowerCase().includes("craigslist")
@@ -354,7 +358,11 @@ function tryRuleBasedCraigslist(input: { message: string; context?: any }): Comm
   return {
     version: COMMAND_OS_VERSION,
     intent: isStop ? "craigslist.cto.stop" : "craigslist.cto.start",
-    args: city ? { city } : {},
+    args: {
+      ...(city ? { city } : {}),
+      ...(confirm ? { confirm } : {}),
+      ...(override ? { override: true } : {}),
+    },
     explanation: isStop ? "rule_based_match: craigslist stop" : "rule_based_match: craigslist start",
     confidence: 1,
   }

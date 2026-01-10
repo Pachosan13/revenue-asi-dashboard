@@ -216,6 +216,28 @@ select lead_hunter.enqueue_craigslist_discover_v1('<account_id>'::uuid, 'miami')
 - No Edge Function scraping: Command OS only enqueues; worker is the only component that fetches Craigslist HTML.
 - DB enforces dedupe and worker is idempotent via upserts (tasks and leads).
 
+## Org Settings (UI)
+
+The Settings UI reads/writes `public.org_settings` via Supabase PostgREST.
+
+- UI: `src/app/(app)/settings/page.tsx`
+- Storage: `public.org_settings`
+
+### LeadGen Routing (MVP)
+
+LeadGen routing is stored as JSON in `org_settings.leadgen_routing`:
+
+```json
+{
+  "dealer_address": "string",
+  "radius_miles": 10,
+  "city_fallback": "miami",
+  "active": true
+}
+```
+
+Server-side validation exists as a DB CHECK constraint (radius 1–50; if `active=true`, `dealer_address` is required).
+
 ## Changelog
 
 - Added Craigslist (US) V0 collector + SSV view + minimal `public.leads` columns/indexes required for `(account_id, source, external_id)` ingestion. See: `supabase/migrations/20260109090000_public_leads_source_external_id_v1.sql`, `supabase/migrations/20260109090100_v_craigslist_ssv_v0.sql`.
@@ -224,4 +246,5 @@ select lead_hunter.enqueue_craigslist_discover_v1('<account_id>'::uuid, 'miami')
 - Verified Craigslist V0 end-to-end on cloud (discover ok, detail tasks created, leads inserted) and documented required env + failure evidence behavior. See: `docs/system-truth.md` (Craigslist V0 verified state).
 - Local dev: normalized OpenAI env lookup (`OPENAI_API_KEY` → `OPEN_AI_KEY` → legacy `OPEN_API_KEY`) and added a debug endpoint (`/api/debug/openai-env`) that returns only existence/len/prefix (no secrets).
 - Campaigns UI: added a demo “Craigslist Miami” row that reflects `lead_hunter.craigslist_tasks_v1` state and can start/stop via Command OS (`prende/apaga craigslist miami`).
+- Settings: added `org_settings.leadgen_routing` (dealer_address + radius_miles + city_fallback + active) and wired Craigslist LeadGen start to require it (or explicit override), with duplicate-run confirmation.
 
