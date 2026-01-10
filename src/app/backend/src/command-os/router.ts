@@ -555,11 +555,31 @@ type KnownIntent =
   | "campaign.metrics"
   | "program.list"
   | "program.status"
+  | "autos.activate"
+  | "autos.deactivate"
   | "orchestrator.run"
   | "dispatcher.run"
   | "enrichment.run"
   | "appointment.list"
   | "appointment.inspect"
+
+type AutosMode = "full_funnel" | "supply_only"
+
+interface AutosActivateArgs {
+  account_id?: string
+  market?: string
+  city?: string
+  mode?: AutosMode
+  query_text?: string
+}
+
+interface AutosDeactivateArgs {
+  account_id?: string
+  market?: string
+  city?: string
+  mode?: AutosMode
+  query_text?: string
+}
 
 interface LeadInspectArgs {
   account_id?: string
@@ -707,6 +727,13 @@ function isProgramStatusArgs(args: Record<string, any>): args is ProgramStatusAr
   return true
 }
 
+function isAutosArgs(args: Record<string, any>): args is AutosActivateArgs | AutosDeactivateArgs {
+  if (args.city !== undefined && typeof args.city !== "string") return false
+  if (args.market !== undefined && typeof args.market !== "string") return false
+  if (args.mode !== undefined && args.mode !== "full_funnel" && args.mode !== "supply_only") return false
+  if (args.query_text !== undefined && typeof args.query_text !== "string") return false
+  return true
+}
 function isCampaignInspectArgs(args: Record<string, any>): args is CampaignInspectArgs {
   return (
     (typeof args.campaign_id === "string" && args.campaign_id.length > 0) ||
@@ -765,6 +792,145 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
 
   try {
     switch (intent) {
+      case "autos.activate": {
+        if (!isAutosArgs(args)) {
+          return { ok: false, intent, args, data: { error: "autos.activate args inválidos" } }
+        }
+
+        const accountId = requireAccountId(args, intent)
+        const mode: AutosMode = (args.mode as AutosMode) ?? "full_funnel"
+        const city = typeof args.city === "string" && args.city.trim() ? args.city.trim().toLowerCase() : undefined
+
+        // LeadGen for autos (Miami => craigslist). We reuse existing wiring: craigslist.cto.start.
+        const leadgenRes = await handleCommandOsIntent({
+          version: "v1",
+          intent: "craigslist.cto.start" as any,
+          args: { account_id: accountId, ...(city ? { city } : null) },
+          explanation: "autos.activate: leadgen",
+          confidence: 1,
+        } as any)
+
+        if (mode === "supply_only") {
+          return {
+            ok: Boolean(leadgenRes?.ok),
+            intent,
+            args,
+            data: {
+              mode,
+              leadgen: leadgenRes,
+              note: "Supply-only: LeadGen ON. Outbound campaigns unchanged.",
+            },
+          }
+        }
+
+        // Full funnel includes outbound campaigns.
+        // Repo-truth does not provide a canonical mapping from 'autos' to a subset of campaigns,
+        // so we apply to all outbound campaigns in this account (public.campaigns scoped by account_id).
+        const supabase = getSupabaseAdmin()
+        const { data: updated, error: updErr } = await supabase
+          .from("campaigns")
+          .update({ is_active: true, status: "active" })
+          .eq("account_id", accountId)
+          .select("id,name,is_active,status")
+
+        if (updErr) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: {
+              error: "Failed to enable outbound campaigns",
+              details: updErr.message,
+              leadgen: leadgenRes,
+            },
+          }
+        }
+
+        return {
+          ok: Boolean(leadgenRes?.ok),
+          intent,
+          args,
+          data: {
+            mode,
+            leadgen: leadgenRes,
+            outbound: {
+              count_updated: Array.isArray(updated) ? updated.length : 0,
+              campaigns: Array.isArray(updated)
+                ? updated.map((c: any) => ({ id: c.id, name: c.name ?? null, is_active: c.is_active, status: c.status ?? null }))
+                : [],
+            },
+            note: "Full funnel: LeadGen ON + outbound campaigns enabled.",
+          },
+        }
+      }
+
+      case "autos.deactivate": {
+        if (!isAutosArgs(args)) {
+          return { ok: false, intent, args, data: { error: "autos.deactivate args inválidos" } }
+        }
+
+        const accountId = requireAccountId(args, intent)
+        const mode: AutosMode = (args.mode as AutosMode) ?? "full_funnel"
+        const city = typeof args.city === "string" && args.city.trim() ? args.city.trim().toLowerCase() : undefined
+
+        const leadgenRes = await handleCommandOsIntent({
+          version: "v1",
+          intent: "craigslist.cto.stop" as any,
+          args: { account_id: accountId, ...(city ? { city } : null) },
+          explanation: "autos.deactivate: leadgen",
+          confidence: 1,
+        } as any)
+
+        if (mode === "supply_only") {
+          return {
+            ok: Boolean(leadgenRes?.ok),
+            intent,
+            args,
+            data: {
+              mode,
+              leadgen: leadgenRes,
+              note: "Supply-only: LeadGen OFF. Outbound campaigns unchanged.",
+            },
+          }
+        }
+
+        const supabase = getSupabaseAdmin()
+        const { data: updated, error: updErr } = await supabase
+          .from("campaigns")
+          .update({ is_active: false, status: "paused" })
+          .eq("account_id", accountId)
+          .select("id,name,is_active,status")
+
+        if (updErr) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: {
+              error: "Failed to disable outbound campaigns",
+              details: updErr.message,
+              leadgen: leadgenRes,
+            },
+          }
+        }
+
+        return {
+          ok: Boolean(leadgenRes?.ok),
+          intent,
+          args,
+          data: {
+            mode,
+            leadgen: leadgenRes,
+            outbound: {
+              count_updated: Array.isArray(updated) ? updated.length : 0,
+              campaigns: Array.isArray(updated)
+                ? updated.map((c: any) => ({ id: c.id, name: c.name ?? null, is_active: c.is_active, status: c.status ?? null }))
+                : [],
+            },
+            note: "Full funnel: LeadGen OFF + outbound campaigns paused.",
+          },
+        }
+      }
       case "enc24.autos_usados.autopilot.start": {
         const accountId = requireAccountId(args, intent)
         const supabase = getSupabaseAdmin()

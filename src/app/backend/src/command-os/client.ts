@@ -32,6 +32,8 @@ export type CommandOsIntent =
   | "campaign.metrics"
   | "program.list"
   | "program.status"
+  | "autos.activate"
+  | "autos.deactivate"
   | "orchestrator.run"
   | "dispatcher.run"
   | "enrichment.run"
@@ -99,6 +101,8 @@ INTENTS SOPORTADOS EN ESTE BUILD
 - "campaign.metrics" - Métricas de una campaña
 - "program.list" - Listar LeadGen programs (Craigslist, etc)
 - "program.status" - Ver status de un LeadGen program específico
+- "autos.activate" - Full funnel autos (LeadGen + Outbound)
+- "autos.deactivate" - Apagar full funnel autos (LeadGen + Outbound)
 - "orchestrator.run" - Ejecutar orchestrator manualmente
 - "dispatcher.run" - Ejecutar dispatcher manualmente
 - "enrichment.run" - Ejecutar enrichment manualmente
@@ -140,6 +144,9 @@ EJEMPLOS DE USO
 - "reactiva el lead <uuid>" => lead.update { lead_id, suppress: false }
 - "lista programas leadgen" => program.list {}
 - "qué de craigslist está activo?" => program.status { program: "craigslist" }
+- "prende autos miami" => autos.activate { city:"miami", mode:"full_funnel" }
+- "prende solo leads autos miami" => autos.activate { city:"miami", mode:"supply_only" }
+- "apaga autos miami" => autos.deactivate { city:"miami", mode:"full_funnel" }
 - "prende encuentra24" => enc24.autos_usados.autopilot.start
 - "apaga encuentra24" => enc24.autos_usados.autopilot.stop
 - "status encuentra24" => enc24.autos_usados.autopilot.status
@@ -259,6 +266,33 @@ function tryRuleBasedCommandOs(input: { message: string; context?: any }): Comma
       intent: "program.status",
       args: { program: "craigslist", ...(city ? { city } : null) },
       explanation: "rule_based_match: program.status craigslist",
+      confidence: 1,
+    }
+  }
+
+  // Autos full-funnel (one command = full funnel)
+  // "prende autos miami" => autos.activate (default full_funnel)
+  // "prende solo leads autos miami" => autos.activate supply_only
+  const mentionsAutos = m.includes("autos")
+  const wantsOn = mentionsAutos && (m.includes("prende") || m.includes("enciende") || m.includes("activar") || m.includes("activa"))
+  const wantsOff = mentionsAutos && (m.includes("apaga") || m.includes("desactivar") || m.includes("desactiva"))
+  const supplyOnly = m.includes("solo leads") || m.includes("solo lead") || m.includes("supply only") || m.includes("solo supply")
+
+  if (wantsOn || wantsOff) {
+    // Minimal city extraction (best-effort). If missing, router will use program defaults (routing city_fallback).
+    let city: string | undefined
+    if (m.includes("miami")) city = "miami"
+
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: wantsOn ? "autos.activate" : "autos.deactivate",
+      args: {
+        ...(city ? { city } : null),
+        mode: supplyOnly ? "supply_only" : "full_funnel",
+        // carry the original message so router can make safe decisions if needed
+        query_text: raw,
+      },
+      explanation: `rule_based_match: ${wantsOn ? "autos.activate" : "autos.deactivate"}`,
       confidence: 1,
     }
   }
