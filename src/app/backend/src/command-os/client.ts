@@ -23,6 +23,7 @@ export type CommandOsIntent =
   | "lead.list.recents"
   | "lead.enroll"
   | "lead.update"
+  | "lead.next_action"
   | "campaign.list"
   | "campaign.inspect"
   | "campaign.create"
@@ -87,6 +88,7 @@ INTENTS SOPORTADOS EN ESTE BUILD
 - "lead.list.recents" - Listar leads recientes
 - "lead.enroll" - Enrolar leads en campañas
 - "lead.update" - Actualizar campos de un lead
+- "lead.next_action" - Ver siguiente acción recomendada para un lead (si existe)
 - "campaign.list" - Listar campañas
 - "campaign.inspect" - Ver detalle de campaña
 - "campaign.create" - Crear nueva campaña
@@ -121,6 +123,13 @@ EJEMPLOS DE USO
 - "enciende el autopilot de encuentra24" => enc24.autos_usados.autopilot.start (interval_minutes: 5, max_new_per_tick: 2, start_hour: 8, end_hour: 19)
 - "apaga el autopilot de encuentra24" => enc24.autos_usados.autopilot.stop
 - "estado del autopilot de encuentra24" => enc24.autos_usados.autopilot.status
+- "leads recientes" => lead.list.recents (limit: 10)
+- "inspecciona el lead <uuid>" => lead.inspect { lead_id }
+- "busca el lead por teléfono/email/nombre" => lead.inspect { phone/email/contact_name }
+- "qué sigue para este lead <uuid>" => lead.next_action { lead_id }
+- "mueve el lead <uuid> a qualified" => lead.update { lead_id, lead_state: "qualified" }
+- "suprime el lead <uuid>" => lead.update { lead_id, suppress: true }
+- "reactiva el lead <uuid>" => lead.update { lead_id, suppress: false }
 - "prende encuentra24" => enc24.autos_usados.autopilot.start
 - "apaga encuentra24" => enc24.autos_usados.autopilot.stop
 - "status encuentra24" => enc24.autos_usados.autopilot.status

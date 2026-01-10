@@ -505,7 +505,28 @@ export function LeadInboxTable({ leads, loading }: { leads: LeadInboxEntry[]; lo
                   </TableCell>
 
                   {/* Next Action */}
-                  <TableCell>{/* Next action pill ya lo tienes */}</TableCell>
+                  <TableCell>
+                    {lead.next_action ? (
+                      <div className="space-y-1">
+                        <div className="inline-flex items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] text-emerald-100">
+                          <ArrowRight size={12} className="text-emerald-300" />
+                          <span className="truncate max-w-[220px]">
+                            {lead.next_action}
+                          </span>
+                        </div>
+                        {lead.next_channel ? (
+                          <div className="text-[11px] text-white/45">
+                            via {lead.next_channel}
+                            {typeof lead.next_delay_minutes === "number"
+                              ? ` • ${lead.next_delay_minutes}m`
+                              : ""}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-white/40">—</span>
+                    )}
+                  </TableCell>
 
                   {/* Last touch */}
                   <TableCell className="text-right text-sm text-white/70">

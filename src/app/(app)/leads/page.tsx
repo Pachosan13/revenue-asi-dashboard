@@ -313,10 +313,27 @@ export default function LeadsPage() {
             )
             .in("id", ids)
 
-          const [brainRes, signalsRes, genomeRes] = await Promise.all([
+          // 5) Director Brain v5 (next action + priority)
+          const nextActionPromise = client2
+            .from("lead_next_action_view_v5")
+            .select(
+              [
+                "lead_id",
+                "recommended_action",
+                "recommended_channel",
+                "recommended_delay_minutes",
+                "priority_score",
+                "effective_channel",
+                "lead_state",
+              ].join(", "),
+            )
+            .in("lead_id", ids)
+
+          const [brainRes, signalsRes, genomeRes, nextRes] = await Promise.all([
             brainPromise,
             signalsPromise,
             genomePromise,
+            nextActionPromise,
           ])
 
           // Map Lead Brain
@@ -426,11 +443,42 @@ export default function LeadsPage() {
             )
           }
 
+          // Map Director Brain v5 (next action)
+          const nextMap = new Map<
+            string,
+            {
+              next_action: string | null
+              next_channel: string | null
+              next_delay_minutes: number | null
+              next_priority_score: number | null
+            }
+          >()
+
+          if (!nextRes.error && Array.isArray(nextRes.data)) {
+            ;(nextRes.data as any[]).forEach((row) => {
+              const id = row?.lead_id ? String(row.lead_id) : null
+              if (!id) return
+              nextMap.set(id, {
+                next_action: row.recommended_action ?? null,
+                next_channel: row.effective_channel ?? row.recommended_channel ?? null,
+                next_delay_minutes:
+                  row.recommended_delay_minutes == null
+                    ? null
+                    : Number(row.recommended_delay_minutes) || 0,
+                next_priority_score:
+                  row.priority_score == null ? null : Number(row.priority_score) || 0,
+              })
+            })
+          } else if (nextRes.error) {
+            console.error("Error loading lead_next_action_view_v5", nextRes.error)
+          }
+
           // Hidratar todos los leads con Brain + Signals + Genome
           mapped = mapped.map((lead) => {
             const brain = brainMap.get(lead.id)
             const s = signalsMap.get(lead.id)
             const g = genomeMap.get(lead.id)
+            const nx = nextMap.get(lead.id)
 
             return {
               ...lead,
@@ -473,6 +521,13 @@ export default function LeadsPage() {
                 ...(lead.channel_last == null && g.channel_last
                   ? { channel_last: g.channel_last }
                   : null),
+              }),
+
+              ...(nx && {
+                next_action: nx.next_action,
+                next_channel: nx.next_channel,
+                next_delay_minutes: nx.next_delay_minutes,
+                next_priority_score: nx.next_priority_score,
               }),
             }
           })
@@ -674,6 +729,12 @@ export default function LeadsPage() {
             <h1 className="text-3xl font-semibold text-white">Leads</h1>
             <Badge variant="neutral">Inbox</Badge>
             <Badge variant="info">Lead Brain v1 + Genome v2</Badge>
+            <Badge
+              variant="outline"
+              title="Data sources: inbox_events + leads + multichannel_lead_signals + v_lead_with_enrichment_and_campaign_v1 + lead_next_action_view_v5"
+            >
+              Data sources
+            </Badge>
           </div>
           <p className="text-sm text-white/60">
             Campos mínimos: {REQUIRED_FIELDS.join(", ")}

@@ -106,6 +106,18 @@ Definition is in migrations:
 - **LeadGen Programs**: lead generation sources (scraping + ingestion). Example: Craigslist V0. They are controlled via Command OS start/stop and **do not** live in `public.campaigns`.
 - **Outbound Campaigns**: outbound cadences that live in `public.campaigns`. The **only** enable/disable truth is `campaigns.is_active` (UI must not derive from `status`).
 
+UI copy may present both under a single **LeadGen** page, but the internal distinction above remains required for correctness.
+
+## Lead truth surfaces (UI + Command OS)
+
+Leads UI and Command OS must use the same DB truth:
+
+- Inbox aggregation: `public.inbox_events` (view; defined in `supabase/migrations/20251231170000_public_ui_support_v1.sql`)
+- Lead enrichment: `public.lead_enriched` (view; defined in `supabase/migrations/20251231182100_lead_enriched_view_v1.sql`)
+- Multichannel aggregates: `public.multichannel_lead_signals` (view; defined in `supabase/migrations/20251231170000_public_ui_support_v1.sql`)
+- Campaign/enrichment join: `public.v_lead_with_enrichment_and_campaign_v1` (view; defined in `supabase/migrations/20251231170000_public_ui_support_v1.sql`)
+- Next-action / priority: `public.lead_next_action_view_v5` (**UNRESOLVED** definition in this repo; the view is referenced by code but no migration defines it here)
+
 ## Executable Lead Requirements (minimum)
 
 These are the minimum fields required for a lead to be eligible for scheduling/execution.
@@ -266,4 +278,33 @@ Server-side validation exists as a DB CHECK constraint (radius 1–50; if `activ
 - Onboarding v1: added `business_name`, `contact_email`, `contact_phone`, `contact_whatsapp`, `vertical` to `public.org_settings` and updated the Settings UI to a 3-step onboarding flow (identity + contact + routing).
 - Campaigns UI: separated LeadGen Programs from Outbound Campaigns; outbound enable/disable truth is `campaigns.is_active` and UI re-reads after toggles.
 - Command OS: `campaign.toggle` now keeps `campaigns.is_active` and `campaigns.status` consistent and returns the re-read row.
+- Campaigns: added a safe bulk toggle (`campaign.toggle.bulk`) and UI “Pause all running” action; bulk updates always keep `status` derived from `is_active` (active/paused).
+- Command OS (leads): lead listing/inspect/next_action now use `lead_next_action_view_v5` (plus `lead_enriched` + `inbox_events`) and support suppression via `leads.status='suppressed'` (run-cadence selects `status='new'`, so suppression fail-closes scheduling).
+
+### Verification snippets (no secrets)
+
+Campaign consistency (should return 0 rows):
+
+```sql
+select id, name, is_active, status
+from public.campaigns
+where is_active = true and status <> 'active';
+```
+
+Bulk pause impact (running count should drop):
+
+```sql
+select count(*) as running
+from public.campaigns
+where is_active = true;
+```
+
+Lead next action exists (sample):
+
+```sql
+select lead_id, priority_score, recommended_action, effective_channel
+from public.lead_next_action_view_v5
+order by priority_score desc
+limit 10;
+```
 

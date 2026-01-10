@@ -309,6 +309,7 @@ async function enrollLeadsToCampaign(args: {
 const ALLOWED_LEAD_UPDATE_FIELDS = [
   "status",
   "state",
+  "lead_state",
   "score",
   "lead_brain_score",
   "lead_brain_bucket",
@@ -361,19 +362,75 @@ async function listRecentLeads(args: {
   const supabase = getSupabaseAdmin()
   const limit = Math.min(Math.max(args.limit ?? 20, 1), 100)
 
-  let query = supabase
+  // Preferred: Director Brain view (lead_next_action_view_v5) for priority_score + next_action.
+  // NOTE: This view is referenced by code but its SQL definition is not versioned in repo migrations (UNRESOLVED).
+  const { data: nextRows, error: nextErr } = await supabase
+    .from("lead_next_action_view_v5")
+    .select(
+      "lead_id,recommended_channel,recommended_action,recommended_delay_minutes,priority_score,effective_channel,lead_state",
+    )
+    .order("priority_score", { ascending: false })
+    .limit(Math.max(limit, 50))
+
+  if (nextErr) {
+    // Fallback: base leads table only.
+    let query = supabase
+      .from("leads")
+      .select("*")
+      .eq("account_id", args.account_id)
+      .order("created_at", { ascending: false })
+
+    if (args.status) query = query.eq("status", args.status)
+    if (args.state) query = query.eq("state", args.state)
+
+    const { data, error } = await query.limit(limit)
+    if (error) throw new Error(`Error listing recent leads: ${error.message}`)
+    return { leads: data ?? [] }
+  }
+
+  const leadIdsOrdered = (nextRows ?? [])
+    .map((r: any) => (typeof r?.lead_id === "string" ? r.lead_id : null))
+    .filter((x: any) => typeof x === "string" && x.length > 0)
+
+  if (leadIdsOrdered.length === 0) return { leads: [] }
+
+  // Enforce account scope via leads table.
+  const { data: leadRows, error: leadErr } = await supabase
     .from("leads")
-    .select("*")
+    .select("id,account_id,contact_name,email,phone,status,state,lead_state,created_at")
     .eq("account_id", args.account_id)
-    .order("created_at", { ascending: false })
+    .in("id", leadIdsOrdered)
 
-  if (args.status) query = query.eq("status", args.status)
-  if (args.state) query = query.eq("state", args.state)
+  if (leadErr) throw new Error(`Error loading leads for next_action list: ${leadErr.message}`)
 
-  const { data, error } = await query.limit(limit)
-  if (error) throw new Error(`Error listing recent leads: ${error.message}`)
+  const byId = new Map<string, any>()
+  for (const r of leadRows ?? []) byId.set(String(r.id), r)
 
-  return { leads: data ?? [] }
+  const byNext = new Map<string, any>()
+  for (const r of nextRows ?? []) {
+    const id = typeof (r as any)?.lead_id === "string" ? (r as any).lead_id : null
+    if (!id) continue
+    byNext.set(id, r)
+  }
+
+  const results: any[] = []
+  for (const id of leadIdsOrdered) {
+    const base = byId.get(id)
+    if (!base) continue
+    const nx = byNext.get(id) ?? {}
+    results.push({
+      ...base,
+      lead_id: id,
+      priority_score: nx.priority_score ?? null,
+      next_action: nx.recommended_action ?? null,
+      next_channel: nx.effective_channel ?? nx.recommended_channel ?? null,
+      next_delay_minutes: nx.recommended_delay_minutes ?? null,
+      lead_state: nx.lead_state ?? (base as any).lead_state ?? (base as any).state ?? null,
+    })
+    if (results.length >= limit) break
+  }
+
+  return { leads: results }
 }
 
 /**
@@ -489,6 +546,7 @@ type KnownIntent =
   | "lead.enroll"
   | "lead.update"
   | "lead.list.recents"
+  | "lead.next_action"
   | "campaign.list"
   | "campaign.inspect"
   | "campaign.create"
@@ -528,7 +586,9 @@ interface LeadEnrollArgs {
 interface LeadUpdateArgs {
   account_id?: string
   lead_id: string
-  updates: Record<string, any>
+  updates?: Record<string, any>
+  lead_state?: string
+  suppress?: boolean
 }
 
 interface LeadListRecentsArgs {
@@ -536,6 +596,11 @@ interface LeadListRecentsArgs {
   limit?: number
   status?: string
   state?: string
+}
+
+interface LeadNextActionArgs {
+  account_id?: string
+  lead_id: string
 }
 
 interface CampaignListArgs {
@@ -594,7 +659,11 @@ function isLeadEnrollArgs(args: Record<string, any>): args is LeadEnrollArgs {
 }
 
 function isLeadUpdateArgs(args: Record<string, any>): args is LeadUpdateArgs {
-  return typeof args.lead_id === "string" && args.lead_id.length > 0 && args.updates && typeof args.updates === "object"
+  if (!(typeof args.lead_id === "string" && args.lead_id.length > 0)) return false
+  const hasUpdates = args.updates && typeof args.updates === "object"
+  const hasLeadState = args.lead_state !== undefined && typeof args.lead_state === "string"
+  const hasSuppress = args.suppress !== undefined && typeof args.suppress === "boolean"
+  return Boolean(hasUpdates || hasLeadState || hasSuppress)
 }
 
 function isLeadListRecentsArgs(args: Record<string, any>): args is LeadListRecentsArgs {
@@ -602,6 +671,10 @@ function isLeadListRecentsArgs(args: Record<string, any>): args is LeadListRecen
   if (args.status !== undefined && typeof args.status !== "string") return false
   if (args.state !== undefined && typeof args.state !== "string") return false
   return true
+}
+
+function isLeadNextActionArgs(args: Record<string, any>): args is LeadNextActionArgs {
+  return typeof args.lead_id === "string" && args.lead_id.length > 0
 }
 
 function isCampaignListArgs(args: Record<string, any>): args is CampaignListArgs {
@@ -1808,7 +1881,38 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
           name: args.name,
         })
 
-        return { ok: true, intent, args, data: { lead } }
+        const supabase = getSupabaseAdmin()
+
+        const [enrichedRes, nextRes, inboxRes] = await Promise.all([
+          supabase
+            .from("lead_enriched")
+            .select("id, full_name, email, phone, state, last_touch_at, channel_last, campaign_id, campaign_name, company_name, enriched")
+            .eq("id", lead.id)
+            .maybeSingle(),
+          supabase
+            .from("lead_next_action_view_v5")
+            .select("lead_id,recommended_channel,recommended_action,recommended_delay_minutes,priority_score,effective_channel,lead_state")
+            .eq("lead_id", lead.id)
+            .maybeSingle(),
+          supabase
+            .from("inbox_events")
+            .select("*")
+            .eq("lead_id", lead.id)
+            .order("last_step_at", { ascending: false })
+            .limit(20),
+        ])
+
+        return {
+          ok: true,
+          intent,
+          args,
+          data: {
+            lead,
+            lead_enriched: enrichedRes.data ?? null,
+            next_action: nextRes.data ?? null,
+            inbox_events: inboxRes.data ?? [],
+          },
+        }
       }
 
       case "lead.enroll": {
@@ -1859,15 +1963,28 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
 
       case "lead.update": {
         if (!isLeadUpdateArgs(args)) {
-          return { ok: false, intent, args, data: { error: "lead.update requiere lead_id: string y updates: object con campos permitidos." } }
+          return { ok: false, intent, args, data: { error: "lead.update requiere lead_id y al menos uno de: updates{}, lead_state, suppress" } }
         }
 
         const accountId = requireAccountId(args, intent)
 
+        const updates: Record<string, any> = args.updates && typeof args.updates === "object" ? { ...args.updates } : {}
+
+        if (typeof args.lead_state === "string" && args.lead_state.trim()) {
+          updates.lead_state = args.lead_state.trim()
+        }
+
+        if (typeof args.suppress === "boolean") {
+          // Minimal suppression mechanism: use leads.status to gate scheduling (run-cadence selects status='new').
+          updates.status = args.suppress ? "suppressed" : "new"
+          // Keep lead_state aligned for UI/readability unless user explicitly set lead_state.
+          if (updates.lead_state === undefined) updates.lead_state = args.suppress ? "suppressed" : "new"
+        }
+
         const updated = await updateLead({
           account_id: accountId,
           lead_id: args.lead_id,
-          updates: args.updates,
+          updates,
         })
 
         return { ok: true, intent, args, data: { message: "Lead actualizado correctamente.", lead: updated, allowed_fields: ALLOWED_LEAD_UPDATE_FIELDS } }
@@ -1888,6 +2005,36 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
         })
 
         return { ok: true, intent, args, data: { message: "Leads recientes obtenidos.", leads: result.leads } }
+      }
+
+      case "lead.next_action": {
+        if (!isLeadNextActionArgs(args)) {
+          return { ok: false, intent, args, data: { error: "lead.next_action requiere lead_id: string" } }
+        }
+
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+
+        // Ensure account scope via leads table lookup.
+        const { data: lead, error: leadErr } = await supabase
+          .from("leads")
+          .select("id,account_id,contact_name,email,phone,status,state,lead_state")
+          .eq("account_id", accountId)
+          .eq("id", args.lead_id)
+          .maybeSingle()
+
+        if (leadErr) return { ok: false, intent, args, data: { error: leadErr.message } }
+        if (!lead) return { ok: false, intent, args, data: { error: "No se encontró ese lead en esta cuenta." } }
+
+        const { data: nx, error: nxErr } = await supabase
+          .from("lead_next_action_view_v5")
+          .select("lead_id,recommended_channel,recommended_action,recommended_delay_minutes,priority_score,effective_channel,lead_state")
+          .eq("lead_id", args.lead_id)
+          .maybeSingle()
+
+        if (nxErr) return { ok: false, intent, args, data: { error: `Failed to read lead_next_action_view_v5: ${nxErr.message}` } }
+
+        return { ok: true, intent, args, data: { lead, next_action: nx ?? null } }
       }
 
       case "campaign.list": {

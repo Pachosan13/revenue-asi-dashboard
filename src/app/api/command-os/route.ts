@@ -13,6 +13,10 @@ type CommandOsBody = {
   context?: Record<string, any>
 }
 
+// Minimal in-memory cache to support "inspecciona #3" after "leads recientes".
+// Keyed by accountId (multi-tenant scoped). TTL-based. No secrets stored.
+const _recentLeadIdsByAccount = new Map<string, { ts: number; lead_ids: string[] }>()
+
 let _openaiEnvLogged = false
 
 function logOpenAiEnvOnceDevOnly() {
@@ -166,7 +170,10 @@ async function llmAssistantMessage(input: {
           "Formato: texto corto + bullets cuando aplique. Máximo 12 líneas.",
           "Si intent = lead.list.recents: lista los top 10 con estado/bucket y score si existe.",
           "Si intent = enc24.autos_usados.leads.list_today: lista los top leads del día con nombre/teléfono + auto (make/model/year/price) + url.",
-          "Si intent = lead.inspect/latest: resume lead (nombre, email, phone, estado, recomendado).",
+          "Si intent = lead.inspect/latest: resume lead (nombre, email, phone, estado, next_action si existe).",
+          "Si intent = lead.next_action: explica la recomendación usando SOLO next_action/priority_score/delay del execution.",
+          "Si intent = campaign.list: usa campaigns_running (is_active=true) como verdad; no uses status como truth.",
+          "Si intent = campaign.toggle.bulk: confirma cuántas se cambiaron y su nuevo estado.",
           "Si intent = system.status: lista checks principales con OK/WARN/FAIL.",
           "Si hay error: explica causa + siguiente acción concreta.",
         ].join("\n"),
@@ -181,7 +188,7 @@ async function llmAssistantMessage(input: {
 export async function POST(req: NextRequest) {
   try {
     const body = (await req.json().catch(() => null)) as CommandOsBody | null
-    const message = body?.message?.toString?.().trim?.() ?? ""
+    let message = body?.message?.toString?.().trim?.() ?? ""
     if (!message) {
       return NextResponse.json(
         { ok: false, error: "message is required" },
@@ -191,11 +198,27 @@ export async function POST(req: NextRequest) {
 
     // ✅ server-derived tenant context (session + account_members)
     const { accountId, userId, role } = await getAccountContext(req)
+    const now = Date.now()
+    const cached = accountId ? _recentLeadIdsByAccount.get(accountId) : null
+    const cachedIds =
+      cached && now - cached.ts < 30 * 60 * 1000 && Array.isArray(cached.lead_ids)
+        ? cached.lead_ids
+        : []
+
+    // If user says "inspecciona #N" and we have a recent list, rewrite message to use the actual lead_id.
+    const idxMatch = message.match(/#\s*(\d{1,3})\b/)
+    if (idxMatch && cachedIds.length > 0) {
+      const n = Number(idxMatch[1])
+      const leadId = Number.isFinite(n) && n >= 1 && n <= cachedIds.length ? cachedIds[n - 1] : null
+      if (leadId) message = `inspecciona el lead ${leadId}`
+    }
+
     const context = {
       ...(body?.context ?? {}),
       account_id: accountId,
       user_id: userId,
       user_role: role,
+      last_lead_ids: cachedIds,
     }
 
     // 1) OpenAI #1 → intent + args (JSON)
@@ -239,6 +262,15 @@ export async function POST(req: NextRequest) {
 
     // 2) Router → ejecución real (DB, etc)
     const execution = await handleCommandOsIntent(command)
+
+    // Update recent list cache after successful lead.list.recents.
+    if (execution?.ok === true && execution?.intent === "lead.list.recents" && accountId) {
+      const leads = Array.isArray((execution as any)?.data?.leads) ? (execution as any).data.leads : []
+      const leadIds = leads
+        .map((l: any) => String(l?.lead_id ?? l?.id ?? "").trim())
+        .filter((x: any) => typeof x === "string" && x.length > 0)
+      if (leadIds.length > 0) _recentLeadIdsByAccount.set(accountId, { ts: now, lead_ids: leadIds })
+    }
 
     // 3) OpenAI #2 → respuesta humana para el chat (si hay key)
     let assistant_message = ""
