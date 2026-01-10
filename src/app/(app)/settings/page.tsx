@@ -12,6 +12,11 @@ type OrgSettings = {
   sync_crm_webhooks: boolean
   fallback_email: string
   webhook_url: string
+  business_name?: string
+  contact_email?: string
+  contact_phone?: string
+  contact_whatsapp?: string
+  vertical?: string
   leadgen_routing?: {
     dealer_address: string
     radius_miles: number
@@ -27,6 +32,11 @@ const defaultSettings: OrgSettings = {
   sync_crm_webhooks: false,
   fallback_email: "alerts@company.com",
   webhook_url: "https://hooks.slack.com/...",
+  business_name: "",
+  contact_email: "",
+  contact_phone: "",
+  contact_whatsapp: "",
+  vertical: "car_dealer",
   leadgen_routing: {
     dealer_address: "",
     radius_miles: 10,
@@ -46,6 +56,13 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(Boolean(supabase))
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null)
+  const [errors, setErrors] = useState<{
+    business_name?: string
+    contact_email?: string
+    dealer_address?: string
+    radius_miles?: string
+    city?: string
+  }>({})
 
   useEffect(() => {
     if (!supabase) return
@@ -66,6 +83,11 @@ export default function SettingsPage() {
           sync_crm_webhooks: Boolean(data.sync_crm_webhooks),
           fallback_email: data.fallback_email ?? defaultSettings.fallback_email,
           webhook_url: data.webhook_url ?? defaultSettings.webhook_url,
+          business_name: data.business_name ?? defaultSettings.business_name,
+          contact_email: data.contact_email ?? defaultSettings.contact_email,
+          contact_phone: data.contact_phone ?? defaultSettings.contact_phone,
+          contact_whatsapp: data.contact_whatsapp ?? defaultSettings.contact_whatsapp,
+          vertical: data.vertical ?? defaultSettings.vertical,
           leadgen_routing: data.leadgen_routing ?? defaultSettings.leadgen_routing,
           updated_at: data.updated_at,
         })
@@ -87,27 +109,39 @@ export default function SettingsPage() {
     return () => clearTimeout(id)
   }, [toast])
 
-  const toggleSetting = (key: keyof Pick<OrgSettings, "autopause_on_errors" | "notify_on_anomalies" | "sync_crm_webhooks">) => {
-    setSettings((prev) => ({ ...prev, [key]: !prev[key] }))
-  }
-
   const handleSave = async () => {
     if (!supabase) {
       setToast({ type: "error", message: "Supabase env missing" })
       return
     }
 
+    const nextErrors: typeof errors = {}
+
+    const businessName = String(settings.business_name ?? "").trim()
+    if (!businessName) nextErrors.business_name = "Business name is required."
+
+    const contactEmail = String(settings.contact_email ?? "").trim()
+    const emailOk = Boolean(contactEmail) && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)
+    if (!emailOk) nextErrors.contact_email = "Valid email is required."
+
     const routing = settings.leadgen_routing ?? null
     if (routing) {
       const radius = Number(routing.radius_miles)
       if (!Number.isFinite(radius) || radius < 1 || radius > 50) {
-        setToast({ type: "error", message: "LeadGen Routing: radius must be 1–50 miles" })
-        return
+        nextErrors.radius_miles = "Radius must be 1–50 miles."
       }
       if (routing.active && !String(routing.dealer_address ?? "").trim()) {
-        setToast({ type: "error", message: "LeadGen Routing: dealer address required when active" })
-        return
+        nextErrors.dealer_address = "Address is required when routing is active."
       }
+      if (routing.active && !String(routing.city_fallback ?? "").trim()) {
+        nextErrors.city = "City is required when routing is active."
+      }
+    }
+
+    setErrors(nextErrors)
+    if (Object.keys(nextErrors).length > 0) {
+      setToast({ type: "error", message: "Please fix the highlighted fields." })
+      return
     }
 
     setSaving(true)
@@ -118,6 +152,11 @@ export default function SettingsPage() {
       sync_crm_webhooks: settings.sync_crm_webhooks,
       fallback_email: settings.fallback_email,
       webhook_url: settings.webhook_url,
+      business_name: businessName,
+      contact_email: contactEmail,
+      contact_phone: String(settings.contact_phone ?? "").trim() || null,
+      contact_whatsapp: String(settings.contact_whatsapp ?? "").trim() || null,
+      vertical: String(settings.vertical ?? "car_dealer").trim() || "car_dealer",
       leadgen_routing: routing,
       updated_at: new Date().toISOString(),
     }
@@ -134,31 +173,30 @@ export default function SettingsPage() {
         sync_crm_webhooks: Boolean(data.sync_crm_webhooks),
         fallback_email: data.fallback_email ?? "",
         webhook_url: data.webhook_url ?? "",
+        business_name: data.business_name ?? "",
+        contact_email: data.contact_email ?? "",
+        contact_phone: data.contact_phone ?? "",
+        contact_whatsapp: data.contact_whatsapp ?? "",
+        vertical: data.vertical ?? "car_dealer",
         leadgen_routing: data.leadgen_routing ?? defaultSettings.leadgen_routing,
         updated_at: data.updated_at,
       })
-      setToast({ type: "success", message: "Settings saved" })
+      setToast({ type: "success", message: "Onboarding complete" })
     }
     setSaving(false)
   }
-
-  const toggles = [
-    { key: "autopause_on_errors" as const, label: "Auto-pause on errors" },
-    { key: "notify_on_anomalies" as const, label: "Notify ops on anomalies" },
-    { key: "sync_crm_webhooks" as const, label: "Sync CRM webhooks" },
-  ]
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.16em] text-white/50">Org</p>
-          <h1 className="text-3xl font-semibold text-white">Settings</h1>
-          <p className="text-sm text-white/60">Configure rollout, safety, and routing preferences.</p>
+          <p className="text-xs uppercase tracking-[0.16em] text-white/50">Setup</p>
+          <h1 className="text-3xl font-semibold text-white">Onboarding</h1>
+          <p className="text-sm text-white/60">Identity + contact + routing. Ready in under 3 minutes.</p>
         </div>
         <Button variant="primary" size="sm" className="gap-2" onClick={handleSave} disabled={saving}>
           <CheckCircle size={16} />
-          {saving ? "Saving..." : "Save changes"}
+          {saving ? "Saving..." : "Save & Continue"}
         </Button>
       </div>
 
@@ -170,22 +208,22 @@ export default function SettingsPage() {
           delta={envConfigured ? "Ready" : "Action"}
         />
         <StatCard
-          label="Safety"
-          value={settings.autopause_on_errors ? "Auto-pause on" : "Guardrail pending"}
-          helper="Stops campaigns after anomalies"
-          delta="Guardrails"
+          label="Vertical"
+          value="car_dealer"
+          helper="Stored (hidden input)"
+          delta="Default"
         />
         <StatCard
-          label="Notifications"
-          value={settings.notify_on_anomalies ? "Ops notified" : "Muted"}
-          helper="Slack/Email routing"
-          delta="Live"
+          label="Routing"
+          value={settings.leadgen_routing?.active ? "Active" : "Inactive"}
+          helper="LeadGen Routing"
+          delta={settings.leadgen_routing?.active ? "Enabled" : "Disabled"}
         />
       </div>
 
       <Card>
         <CardHeader
-          title="Controls"
+          title="Step 1: Business Info"
           description={
             loading
               ? "Loading config..."
@@ -195,59 +233,69 @@ export default function SettingsPage() {
           }
         />
         <CardContent className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-2">
-            {toggles.map((toggle) => {
-              const enabled = settings[toggle.key]
-              return (
-                <button
-                  key={toggle.key}
-                  className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left"
-                  onClick={() => toggleSetting(toggle.key)}
-                  type="button"
-                  disabled={!supabase}
-                >
-                  <div>
-                    <p className="font-semibold text-white">{toggle.label}</p>
-                    <p className="text-xs text-white/50">{enabled ? "Enabled" : "Disabled"}</p>
-                  </div>
-                  {enabled ? <ToggleRight className="text-emerald-300" /> : <ToggleLeft className="text-white/40" />}
-                </button>
-              )
-            })}
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="space-y-2">
-              <p className="text-xs uppercase tracking-[0.12em] text-white/50">Fallback email</p>
-              <Input
-                placeholder="alerts@company.com"
-                value={settings.fallback_email}
-                onChange={(e) => setSettings((prev) => ({ ...prev, fallback_email: e.target.value }))}
-                disabled={!supabase}
-              />
-              <p className="text-xs text-white/50">Used when routing alerts fails.</p>
-            </div>
-            <div className="space-y-2">
-              <p className="text-xs uppercase tracking-[0.12em] text-white/50">Webhook URL</p>
-              <Input
-                placeholder="https://hooks.slack.com/..."
-                value={settings.webhook_url}
-                onChange={(e) => setSettings((prev) => ({ ...prev, webhook_url: e.target.value }))}
-                disabled={!supabase}
-              />
-              <p className="text-xs text-white/50">Delivery target for anomalies and pauses.</p>
-            </div>
+          <div className="space-y-2">
+            <p className="text-xs uppercase tracking-[0.12em] text-white/50">Business name</p>
+            <Input
+              placeholder="Example Auto Mall"
+              value={String(settings.business_name ?? "")}
+              onChange={(e) => {
+                setSettings((prev) => ({ ...prev, business_name: e.target.value }))
+                setErrors((prev) => ({ ...prev, business_name: undefined }))
+              }}
+              disabled={!supabase}
+            />
+            {errors.business_name ? <p className="text-xs text-rose-300">{errors.business_name}</p> : null}
           </div>
 
           <Card>
-            <CardHeader
-              title="LeadGen Routing"
-              description="Dealer routing settings for Craigslist LeadGen (stored in org_settings.leadgen_routing)."
-            />
+            <CardHeader title="Step 2: Contact Info" description="Primary point of contact for notifications and support." />
             <CardContent className="space-y-3">
               <div className="grid gap-3 md:grid-cols-2">
                 <div className="space-y-2">
-                  <p className="text-xs uppercase tracking-[0.12em] text-white/50">Dealer address</p>
+                  <p className="text-xs uppercase tracking-[0.12em] text-white/50">Contact email</p>
+                  <Input
+                    placeholder="owner@dealer.com"
+                    value={String(settings.contact_email ?? "")}
+                    onChange={(e) => {
+                      setSettings((prev) => ({ ...prev, contact_email: e.target.value }))
+                      setErrors((prev) => ({ ...prev, contact_email: undefined }))
+                    }}
+                    disabled={!supabase}
+                  />
+                  {errors.contact_email ? <p className="text-xs text-rose-300">{errors.contact_email}</p> : null}
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-[0.12em] text-white/50">Contact phone (optional)</p>
+                  <Input
+                    placeholder="+1 305 555 0101"
+                    value={String(settings.contact_phone ?? "")}
+                    onChange={(e) => setSettings((prev) => ({ ...prev, contact_phone: e.target.value }))}
+                    disabled={!supabase}
+                  />
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-[0.12em] text-white/50">Contact WhatsApp (optional)</p>
+                  <Input
+                    placeholder="+1 305 555 0101"
+                    value={String(settings.contact_whatsapp ?? "")}
+                    onChange={(e) => setSettings((prev) => ({ ...prev, contact_whatsapp: e.target.value }))}
+                    disabled={!supabase}
+                  />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader title="Step 3: Location & Radius" description="Uses existing LeadGen Routing config (no auto-start)." />
+            <CardContent className="space-y-3">
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="space-y-2">
+                  <p className="text-xs uppercase tracking-[0.12em] text-white/50">Address</p>
                   <Input
                     placeholder="123 Main St, Miami, FL"
                     value={settings.leadgen_routing?.dealer_address ?? ""}
@@ -264,7 +312,7 @@ export default function SettingsPage() {
                     }
                     disabled={!supabase}
                   />
-                  <p className="text-xs text-white/50">Required when Active is enabled.</p>
+                  {errors.dealer_address ? <p className="text-xs text-rose-300">{errors.dealer_address}</p> : <p className="text-xs text-white/50">Required when Active is enabled.</p>}
                 </div>
 
                 <div className="space-y-2">
@@ -285,16 +333,17 @@ export default function SettingsPage() {
                           active: Boolean(prev.leadgen_routing?.active ?? false),
                         },
                       }))
+                      setErrors((prev) => ({ ...prev, radius_miles: undefined }))
                     }}
                     disabled={!supabase}
                   />
-                  <p className="text-xs text-white/50">1–50 miles.</p>
+                  {errors.radius_miles ? <p className="text-xs text-rose-300">{errors.radius_miles}</p> : <p className="text-xs text-white/50">1–50 miles.</p>}
                 </div>
               </div>
 
               <div className="grid gap-3 md:grid-cols-2">
                 <div className="space-y-2">
-                  <p className="text-xs uppercase tracking-[0.12em] text-white/50">City fallback</p>
+                  <p className="text-xs uppercase tracking-[0.12em] text-white/50">City</p>
                   <Input
                     placeholder="miami"
                     value={settings.leadgen_routing?.city_fallback ?? ""}
@@ -311,7 +360,7 @@ export default function SettingsPage() {
                     }
                     disabled={!supabase}
                   />
-                  <p className="text-xs text-white/50">Used when Command OS command omits a city.</p>
+                  {errors.city ? <p className="text-xs text-rose-300">{errors.city}</p> : <p className="text-xs text-white/50">Used when a command omits a city.</p>}
                 </div>
 
                 <button
