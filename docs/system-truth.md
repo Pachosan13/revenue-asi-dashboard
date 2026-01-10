@@ -135,6 +135,39 @@ from public.leads
 where source = 'craigslist'
   and created_at > now() - interval '60 minutes';
 
+## Programs UI (clickable, auditable)
+
+Canonical endpoints (Next.js):
+
+- `GET /api/programs/list` — known programs + health summary
+- `GET /api/programs/[key]` — program detail:
+  - health: routing_active, worker_health (claimed/done last 15m), last_success_at
+  - throughput: tasks last 60m by status + top_errors
+  - output: leads last 60m/24h (if `public.leads.source` exists; in this repo it does via migrations)
+  - events: last 20 task rows (best available evidence; task transitions are not separately logged in repo-truth)
+
+Program ON definition (Craigslist):
+
+- **Disabled**: `routing_active=false` OR (no tasks last 60m)
+- **Degraded**: `routing_active=true` AND `failed > 0` AND `done = 0` in last 60m
+- **Live**: `routing_active=true` AND `done > 0` in last 60m
+
+Verification SQL (Programs endpoints backing data):
+
+-- tasks last 15m (worker health evidence)
+select status, count(*) as n
+from lead_hunter.craigslist_tasks_v1
+where created_at > now() - interval '15 minutes'
+group by 1
+order by 1;
+
+-- last success (done)
+select created_at
+from lead_hunter.craigslist_tasks_v1
+where status='done'
+order by created_at desc
+limit 1;
+
 ## Lead truth surfaces (UI + Command OS)
 
 Leads UI and Command OS must use the same DB truth:
