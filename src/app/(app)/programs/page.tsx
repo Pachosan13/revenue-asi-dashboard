@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { RefreshCw } from "lucide-react"
 
-import { Card, CardContent, CardHeader, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Button, Badge } from "@/components/ui-custom"
+import { Card, CardContent, CardHeader, Button, Badge } from "@/components/ui-custom"
 
 type ProgramRow = {
   key: string
@@ -15,8 +15,11 @@ type ProgramRow = {
     worker_health?: boolean
     last_success_at?: string | null
   }
-  throughput?: { tasks_last_60m?: { total?: number } }
-  output?: { leads_last_60m?: number }
+  kpis?: {
+    leads_last_60m?: number
+    tasks_success_rate_60m?: number | null
+    time_to_first_touch_avg_minutes?: number | null
+  }
 }
 
 export default function ProgramsPage() {
@@ -56,7 +59,9 @@ export default function ProgramsPage() {
         <div>
           <p className="text-xs uppercase tracking-[0.16em] text-white/40">LeadGen</p>
           <h1 className="text-3xl font-semibold text-white">Programs</h1>
-          <p className="text-sm text-white/60">Lead generation sources (scraping + ingestion). Not outbound campaigns.</p>
+          <p className="text-sm text-white/60">
+            Programs generate leads (supply). Campaigns decide what to do with them.
+          </p>
         </div>
         <Button variant="secondary" size="sm" className="gap-2" onClick={load} disabled={loading}>
           <RefreshCw size={14} /> Refresh
@@ -71,7 +76,10 @@ export default function ProgramsPage() {
       </div>
 
       <Card>
-        <CardHeader title="Programs" description="Click into a program for health + throughput + output." />
+        <CardHeader
+          title="Program Health"
+          description="Programs generate supply. They do not contact leads."
+        />
         <CardContent className="space-y-4">
           {error ? (
             <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
@@ -79,42 +87,54 @@ export default function ProgramsPage() {
             </div>
           ) : null}
 
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>Program</TableHeaderCell>
-                <TableHeaderCell>Status</TableHeaderCell>
-                <TableHeaderCell>Routing</TableHeaderCell>
-                <TableHeaderCell>Worker</TableHeaderCell>
-                <TableHeaderCell className="text-right">60m tasks</TableHeaderCell>
-                <TableHeaderCell className="text-right">60m leads</TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {rows.map((p) => (
-                <TableRow key={p.key} className="transition hover:bg-white/5">
-                  <TableCell className="text-white font-semibold">
-                    <Link href={`/programs/${encodeURIComponent(p.key)}`} className="hover:underline">
-                      {p.name}
-                    </Link>
-                    <div className="text-[11px] text-white/45">{p.key}</div>
-                  </TableCell>
-                  <TableCell className="capitalize">{p.status}</TableCell>
-                  <TableCell>{p.health?.routing_active ? "on" : "off"}</TableCell>
-                  <TableCell>{p.health?.worker_health ? "ok" : "—"}</TableCell>
-                  <TableCell className="text-right">{p.throughput?.tasks_last_60m?.total ?? "—"}</TableCell>
-                  <TableCell className="text-right">{p.output?.leads_last_60m ?? "—"}</TableCell>
-                </TableRow>
-              ))}
-              {!rows.length && !loading ? (
-                <TableRow>
-                  <TableCell colSpan={6} className="text-sm text-white/60">
-                    No programs found.
-                  </TableCell>
-                </TableRow>
-              ) : null}
-            </TableBody>
-          </Table>
+          <div className="grid gap-4 md:grid-cols-2">
+            {rows.map((p) => {
+              const badge =
+                p.status === "live" ? "LIVE" : p.status === "degraded" ? "DEGRADED" : "OFF"
+              const leads60 = p.kpis?.leads_last_60m
+              const sr = p.kpis?.tasks_success_rate_60m
+              const ttf = p.kpis?.time_to_first_touch_avg_minutes
+              return (
+                <Card key={p.key}>
+                  <CardHeader
+                    title={
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-white font-semibold">
+                          <Link href={`/programs/${encodeURIComponent(p.key)}`} className="hover:underline">
+                            {p.name}
+                          </Link>
+                          <div className="text-[11px] text-white/45">{p.key}</div>
+                        </div>
+                        <Badge variant="outline">{badge}</Badge>
+                      </div>
+                    as any}
+                    description="Programs generate supply. They do not contact leads."
+                  />
+                  <CardContent className="grid gap-2 text-sm text-white/70">
+                    <div className="flex items-center justify-between">
+                      <span>leads_last_60m</span>
+                      <span className="text-white">{leads60 ?? "N/A"}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span>tasks_success_rate_60m</span>
+                      <span className="text-white">
+                        {typeof sr === "number" ? `${(sr * 100).toFixed(1)}%` : "N/A"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span>time_to_first_touch_avg</span>
+                      <span className="text-white">
+                        {typeof ttf === "number" ? `${ttf}m` : "N/A"}
+                      </span>
+                    </div>
+                  </CardContent>
+                </Card>
+              )
+            })}
+            {!rows.length && !loading ? (
+              <div className="text-sm text-white/60">No programs found.</div>
+            ) : null}
+          </div>
         </CardContent>
       </Card>
     </div>

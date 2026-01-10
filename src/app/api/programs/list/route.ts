@@ -18,6 +18,72 @@ function safeRadiusMi(value: any, fallback = 10) {
   return Number.isFinite(n) && n > 0 ? n : fallback
 }
 
+async function computeTimeToFirstTouchAvgMinutes(args: {
+  supabase: any
+  accountId: string
+  source: string
+  maxLeads?: number
+}): Promise<number | null> {
+  const maxLeads = Math.min(Math.max(Number(args.maxLeads ?? 200), 1), 500)
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+
+  const { data: leads, error: lErr } = await args.supabase
+    .from("leads")
+    .select("id,created_at")
+    .eq("account_id", args.accountId)
+    .eq("source", args.source)
+    .gte("created_at", since24h)
+    .order("created_at", { ascending: false })
+    .limit(maxLeads)
+
+  if (lErr) return null
+  const leadRows = Array.isArray(leads) ? leads : []
+  if (!leadRows.length) return null
+
+  const leadIds = leadRows.map((r: any) => String(r.id)).filter(Boolean)
+  const leadCreatedAtById = new Map<string, string>()
+  for (const r of leadRows) {
+    if (r?.id && r?.created_at) leadCreatedAtById.set(String(r.id), String(r.created_at))
+  }
+
+  const { data: trs, error: trErr } = await args.supabase
+    .from("touch_runs")
+    .select("lead_id,created_at")
+    .eq("account_id", args.accountId)
+    .in("lead_id", leadIds)
+    .gte("created_at", since24h)
+    .order("created_at", { ascending: true })
+    .limit(5000)
+
+  if (trErr) return null
+  const trRows = Array.isArray(trs) ? trs : []
+  if (!trRows.length) return null
+
+  const firstTouchAtByLead = new Map<string, string>()
+  for (const tr of trRows) {
+    const lid = tr?.lead_id ? String(tr.lead_id) : ""
+    const createdAt = tr?.created_at ? String(tr.created_at) : ""
+    if (!lid || !createdAt) continue
+    if (!firstTouchAtByLead.has(lid)) firstTouchAtByLead.set(lid, createdAt)
+  }
+
+  let sum = 0
+  let n = 0
+  for (const [lid, firstTouchAt] of firstTouchAtByLead.entries()) {
+    const leadCreatedAt = leadCreatedAtById.get(lid)
+    if (!leadCreatedAt) continue
+    const a = new Date(leadCreatedAt).getTime()
+    const b = new Date(firstTouchAt).getTime()
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue
+    const minutes = Math.max(0, (b - a) / 60000)
+    sum += minutes
+    n += 1
+  }
+
+  if (!n) return null
+  return Number((sum / n).toFixed(1))
+}
+
 export async function GET(req: NextRequest) {
   try {
     const { supabase, accountId } = await getAccountContextOrThrow(req)
@@ -101,6 +167,18 @@ export async function GET(req: NextRequest) {
     const live = routingActive && counts.done > 0
     const status = live ? "live" : degraded ? "degraded" : disabled ? "disabled" : "disabled"
 
+    const tasksDone = counts.done
+    const tasksFailed = counts.failed
+    const tasksSuccessRate60m =
+      tasksDone + tasksFailed > 0 ? Number((tasksDone / (tasksDone + tasksFailed)).toFixed(3)) : null
+
+    const timeToFirstTouchAvgMinutes = await computeTimeToFirstTouchAvgMinutes({
+      supabase,
+      accountId,
+      source: "craigslist",
+      maxLeads: 200,
+    })
+
     return NextResponse.json({
       ok: true,
       programs: [
@@ -118,6 +196,11 @@ export async function GET(req: NextRequest) {
           },
           throughput: { tasks_last_60m: { ...counts, total: recent.length } },
           output: { leads_last_60m: leads60 ?? 0 },
+          kpis: {
+            leads_last_60m: leads60 ?? 0,
+            tasks_success_rate_60m: tasksSuccessRate60m,
+            time_to_first_touch_avg_minutes: timeToFirstTouchAvgMinutes,
+          },
         },
       ],
     })

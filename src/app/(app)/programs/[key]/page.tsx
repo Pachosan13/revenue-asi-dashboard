@@ -31,6 +31,11 @@ type ProgramDetail = {
     listings_last_60m: number | null
     listings_last_24h: number | null
   }
+  kpis?: {
+    leads_last_60m?: number
+    tasks_success_rate_60m?: number | null
+    time_to_first_touch_avg_minutes?: number | null
+  }
   events: any[]
 }
 
@@ -136,7 +141,9 @@ export default function ProgramDetailPage() {
               {data?.status ?? "—"}
             </Badge>
           </div>
-          <p className="text-sm text-white/60">Health + throughput + output from real DB tables.</p>
+          <p className="text-sm text-white/60">
+            Programs generate leads (supply). Campaigns decide what to do with them.
+          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -167,41 +174,48 @@ export default function ProgramDetailPage() {
         </div>
       ) : null}
 
-      {/* 3 cards: Health / Throughput / Output */}
-      <div className="grid gap-4 md:grid-cols-3">
-        <Card>
-          <CardHeader title="Health" description="Routing + worker activity." />
-          <CardContent className="space-y-2 text-sm text-white/70">
-            <div>routing_active: {String(Boolean(data?.health?.routing_active))}</div>
-            <div>worker_health: {String(Boolean(data?.health?.worker_health))}</div>
-            <div>last_success_at: {data?.health?.last_success_at ?? "N/A"}</div>
-            <div>next_action: {data?.health?.next_action ?? "—"}</div>
-          </CardContent>
-        </Card>
+      <Card>
+        <CardHeader
+          title="Program Health"
+          description="Programs generate supply. They do not contact leads."
+        />
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline">
+              {(data?.status ?? "disabled") === "live"
+                ? "LIVE"
+                : (data?.status ?? "disabled") === "degraded"
+                  ? "DEGRADED"
+                  : "OFF"}
+            </Badge>
+          </div>
 
-        <Card>
-          <CardHeader title="Throughput" description="Tasks in last 60m." />
-          <CardContent className="space-y-2 text-sm text-white/70">
-            <div>queued: {data?.throughput?.tasks_last_60m?.queued ?? "—"}</div>
-            <div>claimed: {data?.throughput?.tasks_last_60m?.claimed ?? "—"}</div>
-            <div>done: {data?.throughput?.tasks_last_60m?.done ?? "—"}</div>
-            <div>failed: {data?.throughput?.tasks_last_60m?.failed ?? "—"}</div>
-            <div className="pt-2 text-xs text-white/50">
-              top_errors: {(data?.throughput?.top_errors ?? []).slice(0, 3).map((e) => `${e.error}(${e.count})`).join(", ") || "—"}
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
+              <div className="text-xs uppercase tracking-[0.16em] text-white/40">leads_last_60m</div>
+              <div className="mt-1 text-2xl font-semibold text-white">
+                {data?.kpis?.leads_last_60m ?? "N/A"}
+              </div>
             </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader title="Output" description="Leads created." />
-          <CardContent className="space-y-2 text-sm text-white/70">
-            <div>leads_last_60m: {data?.output?.leads_last_60m ?? "—"}</div>
-            <div>leads_last_24h: {data?.output?.leads_last_24h ?? "—"}</div>
-            <div>listings_last_60m: {data?.output?.listings_last_60m ?? "N/A"}</div>
-            <div>listings_last_24h: {data?.output?.listings_last_24h ?? "N/A"}</div>
-          </CardContent>
-        </Card>
-      </div>
+            <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
+              <div className="text-xs uppercase tracking-[0.16em] text-white/40">tasks_success_rate_60m</div>
+              <div className="mt-1 text-2xl font-semibold text-white">
+                {typeof data?.kpis?.tasks_success_rate_60m === "number"
+                  ? `${(data.kpis.tasks_success_rate_60m * 100).toFixed(1)}%`
+                  : "N/A"}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
+              <div className="text-xs uppercase tracking-[0.16em] text-white/40">time_to_first_touch_avg</div>
+              <div className="mt-1 text-2xl font-semibold text-white">
+                {typeof data?.kpis?.time_to_first_touch_avg_minutes === "number"
+                  ? `${data.kpis.time_to_first_touch_avg_minutes}m`
+                  : "N/A"}
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Recent events */}
       <Card>
