@@ -374,18 +374,18 @@ async function listRecentLeads(args: {
 
   if (nextErr) {
     // Fallback: base leads table only.
-    let query = supabase
-      .from("leads")
-      .select("*")
-      .eq("account_id", args.account_id)
-      .order("created_at", { ascending: false })
+  let query = supabase
+    .from("leads")
+    .select("*")
+    .eq("account_id", args.account_id)
+    .order("created_at", { ascending: false })
 
-    if (args.status) query = query.eq("status", args.status)
-    if (args.state) query = query.eq("state", args.state)
+  if (args.status) query = query.eq("status", args.status)
+  if (args.state) query = query.eq("state", args.state)
 
-    const { data, error } = await query.limit(limit)
-    if (error) throw new Error(`Error listing recent leads: ${error.message}`)
-    return { leads: data ?? [] }
+  const { data, error } = await query.limit(limit)
+  if (error) throw new Error(`Error listing recent leads: ${error.message}`)
+  return { leads: data ?? [] }
   }
 
   const leadIdsOrdered = (nextRows ?? [])
@@ -553,6 +553,8 @@ type KnownIntent =
   | "campaign.toggle"
   | "campaign.toggle.bulk"
   | "campaign.metrics"
+  | "program.list"
+  | "program.status"
   | "orchestrator.run"
   | "dispatcher.run"
   | "enrichment.run"
@@ -607,6 +609,17 @@ interface CampaignListArgs {
   account_id?: string
   limit?: number
   status?: string
+  query_text?: string
+}
+
+interface ProgramListArgs {
+  account_id?: string
+}
+
+interface ProgramStatusArgs {
+  account_id?: string
+  program: string
+  city?: string
 }
 
 interface CampaignInspectArgs {
@@ -680,6 +693,17 @@ function isLeadNextActionArgs(args: Record<string, any>): args is LeadNextAction
 function isCampaignListArgs(args: Record<string, any>): args is CampaignListArgs {
   if (args.limit !== undefined && typeof args.limit !== "number") return false
   if (args.status !== undefined && typeof args.status !== "string") return false
+  if (args.query_text !== undefined && typeof args.query_text !== "string") return false
+  return true
+}
+
+function isProgramListArgs(_args: Record<string, any>): _args is ProgramListArgs {
+  return true
+}
+
+function isProgramStatusArgs(args: Record<string, any>): args is ProgramStatusArgs {
+  if (typeof args.program !== "string" || !args.program.trim()) return false
+  if (args.city !== undefined && typeof args.city !== "string") return false
   return true
 }
 
@@ -2044,6 +2068,37 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
 
         const accountId = requireAccountId(args, intent)
 
+        // Guardrail: if user is asking about LeadGen programs (Craigslist/LeadGen/autopilot),
+        // do NOT list outbound campaigns. Redirect to program.* intents instead.
+        const q = (typeof args.query_text === "string" ? args.query_text : "").trim().toLowerCase()
+        const mentionsPrograms =
+          q.includes("craigslist") ||
+          q.includes("leadgen") ||
+          q.includes("programa") ||
+          q.includes("programas") ||
+          q.includes("autopilot")
+
+        if (mentionsPrograms) {
+          return {
+            ok: true,
+            intent,
+            args,
+            data: {
+              message:
+                "Craigslist/LeadGen no es una campaign outbound (public.campaigns). Usa program.list o program.status.",
+              suggested_commands: [
+                "lista programas leadgen",
+                "qué de craigslist está activo?",
+                "program status craigslist miami",
+              ],
+              suggested_intents: [
+                { intent: "program.list", args: { account_id: accountId } },
+                { intent: "program.status", args: { account_id: accountId, program: "craigslist", city: "miami" } },
+              ],
+            },
+          }
+        }
+
         const limit = args.limit
         const [legacy, running, filtered] = await Promise.all([
           listCampaigns({ account_id: accountId, limit, status: "active" }),
@@ -2211,6 +2266,187 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
               is_active: Boolean(c.is_active),
               status: c.status ?? null,
             })),
+          },
+        }
+      }
+
+      case "program.list": {
+        if (!isProgramListArgs(args)) {
+          return { ok: false, intent, args, data: { error: "program.list acepta {}" } }
+        }
+
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+
+        // org_settings is a singleton table in repo-truth (no account_id column).
+        const { data: orgSettings, error: osErr } = await supabase
+          .from("org_settings")
+          .select("leadgen_routing")
+          .limit(1)
+          .maybeSingle()
+        if (osErr) return { ok: false, intent, args, data: { error: osErr.message } }
+
+        const routing = (orgSettings as any)?.leadgen_routing as any | null | undefined
+        const routingActive = String(routing?.active ?? "").trim() === "true" || routing?.active === true
+        const radius = Number(routing?.radius_miles)
+        const radiusMi = Number.isFinite(radius) && radius > 0 ? radius : 10
+        const city = String(routing?.city_fallback ?? "miami").trim().toLowerCase() || "miami"
+
+        const since60m = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+        const since15m = new Date(Date.now() - 15 * 60 * 1000).toISOString()
+
+        const [{ count: taskCount, error: taskErr }, { count: leadCount, error: leadErr }, enc24Res] = await Promise.all([
+          supabase
+            .schema("lead_hunter")
+            .from("craigslist_tasks_v1")
+            .select("id", { count: "exact", head: true })
+            .eq("account_id", accountId)
+            .eq("city", city)
+            .gte("created_at", since60m),
+          supabase
+            .from("leads")
+            .select("id", { count: "exact", head: true })
+            .eq("account_id", accountId)
+            .eq("source", "craigslist")
+            .gte("created_at", since60m),
+          supabase
+            .schema("lead_hunter")
+            .from("enc24_autopilot_settings")
+            .select("enabled,country,updated_at")
+            .eq("account_id", accountId)
+            .maybeSingle(),
+        ])
+
+        if (taskErr) return { ok: false, intent, args, data: { error: taskErr.message } }
+        if (leadErr) return { ok: false, intent, args, data: { error: leadErr.message } }
+
+        const programs: any[] = []
+
+        programs.push({
+          name: `Craigslist ${city.charAt(0).toUpperCase() + city.slice(1)} ${radiusMi}mi`,
+          key: `craigslist:${city}:${radiusMi}mi`,
+          enabled: routingActive,
+          last_60m_tasks: taskCount ?? 0,
+          last_60m_leads: leadCount ?? 0,
+        })
+
+        if (!(enc24Res as any)?.error) {
+          const row = (enc24Res as any)?.data
+          if (row) {
+            programs.push({
+              name: `Encuentra24 Autopilot ${String(row.country ?? "PA")}`,
+              key: "enc24:autos_usados",
+              enabled: Boolean(row.enabled),
+              updated_at: row.updated_at ?? null,
+            })
+          }
+        }
+
+        return { ok: true, intent, args, data: { message: "LeadGen programs list.", programs } }
+      }
+
+      case "program.status": {
+        if (!isProgramStatusArgs(args)) {
+          return { ok: false, intent, args, data: { error: "program.status requiere program y opcional city" } }
+        }
+
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+
+        const program = String(args.program ?? "").trim().toLowerCase()
+        if (program !== "craigslist" && program !== "enc24" && program !== "encuentra24") {
+          return { ok: false, intent, args, data: { error: `Programa no soportado: ${program}` } }
+        }
+
+        if (program === "enc24" || program === "encuentra24") {
+          const { data, error } = await supabase
+            .schema("lead_hunter")
+            .from("enc24_autopilot_settings")
+            .select("enabled,country,interval_minutes,max_new_per_tick,start_hour,end_hour,updated_at")
+            .eq("account_id", accountId)
+            .maybeSingle()
+          if (error) return { ok: false, intent, args, data: { error: error.message } }
+          const enabled = Boolean((data as any)?.enabled)
+          return {
+            ok: true,
+            intent,
+            args,
+            data: {
+              program: "enc24",
+              autopilot_enabled: enabled,
+              settings: data ?? null,
+              next_action: enabled ? "Autopilot enabled. Monitor results." : "Use 'enc24.autos_usados.autopilot.start' to enable.",
+            },
+          }
+        }
+
+        // craigslist status
+        const { data: orgSettings, error: osErr } = await supabase
+          .from("org_settings")
+          .select("leadgen_routing")
+          .limit(1)
+          .maybeSingle()
+        if (osErr) return { ok: false, intent, args, data: { error: osErr.message } }
+
+        const routing = (orgSettings as any)?.leadgen_routing as any | null | undefined
+        const routingActive = String(routing?.active ?? "").trim() === "true" || routing?.active === true
+
+        const city =
+          (typeof args.city === "string" && args.city.trim()
+            ? args.city
+            : (routing?.city_fallback ?? "miami"))?.toString().trim().toLowerCase() || "miami"
+
+        const since60m = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+        const since15m = new Date(Date.now() - 15 * 60 * 1000).toISOString()
+
+        const [{ count: tasks60 }, { count: leads60 }, { data: healthRows, error: healthErr }] = await Promise.all([
+          supabase
+            .schema("lead_hunter")
+            .from("craigslist_tasks_v1")
+            .select("id", { count: "exact", head: true })
+            .eq("account_id", accountId)
+            .eq("city", city)
+            .gte("created_at", since60m),
+          supabase
+            .from("leads")
+            .select("id", { count: "exact", head: true })
+            .eq("account_id", accountId)
+            .eq("source", "craigslist")
+            .gte("created_at", since60m),
+          supabase
+            .schema("lead_hunter")
+            .from("craigslist_tasks_v1")
+            .select("status,created_at")
+            .eq("account_id", accountId)
+            .eq("city", city)
+            .in("status", ["claimed", "done"])
+            .gte("created_at", since15m)
+            .limit(5),
+        ])
+
+        if (healthErr) return { ok: false, intent, args, data: { error: healthErr.message } }
+
+        const workerHealth = Array.isArray(healthRows) && healthRows.length > 0
+        const autopilotEnabled = routingActive && (tasks60 ?? 0) > 0
+
+        let nextAction = "OK."
+        if (!routingActive) nextAction = "Activa LeadGen Routing (org_settings.leadgen_routing.active=true) en Onboarding."
+        else if (!workerHealth) nextAction = "Corre el worker local (services/craigslist-hunter/worker.js) y verifica que reclame tasks."
+        else if ((leads60 ?? 0) === 0) nextAction = "Hay actividad de tasks pero 0 leads recientes: revisa logs/evidence (posible bloqueo 403/503)."
+
+        return {
+          ok: true,
+          intent,
+          args,
+          data: {
+            program: "craigslist",
+            city,
+            routing_active: routingActive,
+            autopilot_enabled: autopilotEnabled,
+            worker_health: workerHealth,
+            last_60m_tasks: tasks60 ?? 0,
+            last_60m_leads: leads60 ?? 0,
+            next_action: nextAction,
           },
         }
       }

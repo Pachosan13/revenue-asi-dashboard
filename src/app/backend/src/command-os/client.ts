@@ -30,6 +30,8 @@ export type CommandOsIntent =
   | "campaign.toggle"
   | "campaign.toggle.bulk"
   | "campaign.metrics"
+  | "program.list"
+  | "program.status"
   | "orchestrator.run"
   | "dispatcher.run"
   | "enrichment.run"
@@ -95,6 +97,8 @@ INTENTS SOPORTADOS EN ESTE BUILD
 - "campaign.toggle" - Activar/desactivar campaña
 - "campaign.toggle.bulk" - Activar/desactivar campañas en lote (requiere confirm=true)
 - "campaign.metrics" - Métricas de una campaña
+- "program.list" - Listar LeadGen programs (Craigslist, etc)
+- "program.status" - Ver status de un LeadGen program específico
 - "orchestrator.run" - Ejecutar orchestrator manualmente
 - "dispatcher.run" - Ejecutar dispatcher manualmente
 - "enrichment.run" - Ejecutar enrichment manualmente
@@ -108,6 +112,10 @@ REGLA CRÍTICA: "último lead"
 REGLAS DE SEGURIDAD
 - Acciones masivas o peligrosas deben usar confirm (si aplica) con false por defecto.
 - No inventes campos. Usa solo lo que el usuario te dio + context.
+
+REGLA: CRAIGSLIST ≠ CAMPAIGN
+- Craigslist es un LeadGen Program, NO una fila en public.campaigns.
+- Si el usuario pregunta por Craigslist, usa program.status o program.list (no campaign.list).
 
 CÓMO ELEGIR
 - Ver info => lead.inspect, lead.inspect.latest, lead.list.recents, campaign.inspect, campaign.list, campaign.metrics, system.status, system.metrics, touch.list, touch.inspect, appointment.list, appointment.inspect
@@ -130,6 +138,8 @@ EJEMPLOS DE USO
 - "mueve el lead <uuid> a qualified" => lead.update { lead_id, lead_state: "qualified" }
 - "suprime el lead <uuid>" => lead.update { lead_id, suppress: true }
 - "reactiva el lead <uuid>" => lead.update { lead_id, suppress: false }
+- "lista programas leadgen" => program.list {}
+- "qué de craigslist está activo?" => program.status { program: "craigslist" }
 - "prende encuentra24" => enc24.autos_usados.autopilot.start
 - "apaga encuentra24" => enc24.autos_usados.autopilot.stop
 - "status encuentra24" => enc24.autos_usados.autopilot.status
@@ -216,8 +226,39 @@ function tryRuleBasedCommandOs(input: { message: string; context?: any }): Comma
     return {
       version: COMMAND_OS_VERSION,
       intent: "campaign.list",
-      args: { status: "active", limit: 50 },
+      args: { status: "active", limit: 50, query_text: raw },
       explanation: "rule_based_match: campaign.list active",
+      confidence: 1,
+    }
+  }
+
+  // LeadGen programs
+  const mentionsCraigslist = m.includes("craigslist")
+  const wantsPrograms =
+    (m.includes("programa") || m.includes("programas") || m.includes("leadgen")) &&
+    (m.includes("lista") || m.includes("listame") || m.includes("muestrame") || m.includes("muéstrame"))
+
+  if (wantsPrograms) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "program.list",
+      args: {},
+      explanation: "rule_based_match: program.list",
+      confidence: 1,
+    }
+  }
+
+  const wantsCraigslistStatus =
+    mentionsCraigslist &&
+    (m.includes("activo") || m.includes("activa") || m.includes("prendid") || m.includes("status") || m.includes("estado"))
+
+  if (wantsCraigslistStatus) {
+    const city = m.includes("miami") ? "miami" : undefined
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "program.status",
+      args: { program: "craigslist", ...(city ? { city } : null) },
+      explanation: "rule_based_match: program.status craigslist",
       confidence: 1,
     }
   }

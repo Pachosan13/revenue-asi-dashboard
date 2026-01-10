@@ -104,6 +104,39 @@ function fallbackAssistantMessage(execution: any) {
     return `Listo. Actualicé ${n} campañas.\n${lines.join("\n")}`
   }
 
+  if (intent === "program.list") {
+    const rows = Array.isArray(data?.programs) ? data.programs : []
+    if (!rows.length) return "No encontré programas LeadGen configurados."
+    const lines = rows.slice(0, 10).map((p: any, i: number) => {
+      const name = safeStr(p?.name, "Program")
+      const key = safeStr(p?.key, "")
+      const enabled = Boolean(p?.enabled)
+      const tasks = safeNum(p?.last_60m_tasks, NaN)
+      const leads = safeNum(p?.last_60m_leads, NaN)
+      const stats =
+        Number.isFinite(tasks) || Number.isFinite(leads)
+          ? ` • 60m: ${Number.isFinite(tasks) ? `${tasks} tasks` : ""}${Number.isFinite(tasks) && Number.isFinite(leads) ? ", " : ""}${Number.isFinite(leads) ? `${leads} leads` : ""}`
+          : ""
+      return `${i + 1}) ${name}${key ? ` • ${key}` : ""} • ${enabled ? "enabled" : "disabled"}${stats}`
+    })
+    return `LeadGen programs:\n${lines.join("\n")}\n\nDime: “qué de craigslist está activo?”`
+  }
+
+  if (intent === "program.status") {
+    const program = safeStr(data?.program, "program")
+    if (program === "craigslist") {
+      const city = safeStr(data?.city, "—")
+      const routing = Boolean(data?.routing_active)
+      const health = Boolean(data?.worker_health)
+      const tasks60 = safeNum(data?.last_60m_tasks, 0)
+      const leads60 = safeNum(data?.last_60m_leads, 0)
+      const next = safeStr(data?.next_action, "")
+      return `Craigslist (${city}):\n- routing_active: ${routing}\n- worker_health: ${health}\n- last_60m: ${tasks60} tasks, ${leads60} leads\n${next ? `\nNext: ${next}` : ""}`
+    }
+    const next = safeStr(data?.next_action, "")
+    return `Program status (${program}).${next ? ` Next: ${next}` : ""}`
+  }
+
   if (intent === "system.status") {
     const checks = Array.isArray(data?.checks) ? data.checks : []
     if (!checks.length) return "Sistema OK. (sin checks detallados)"
