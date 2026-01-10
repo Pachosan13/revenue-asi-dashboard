@@ -850,16 +850,119 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
         const accountId = requireAccountId(args, intent)
         const supabase = getSupabaseAdmin()
 
-        const city = typeof args.city === "string" ? args.city.trim() : ""
+        // LeadGen Routing settings (stored as JSON in org_settings.leadgen_routing)
+        const { data: orgSettings, error: orgErr } = await supabase
+          .from("org_settings")
+          .select("leadgen_routing")
+          .limit(1)
+          .maybeSingle()
+
+        if (orgErr) {
+          return { ok: false, intent, args, data: { error: "Failed to load org_settings.leadgen_routing", details: orgErr.message } }
+        }
+
+        const routing = (orgSettings as any)?.leadgen_routing ?? null
+        const routingActive = routing?.active === true
+        const routingCityFallback = typeof routing?.city_fallback === "string" ? routing.city_fallback.trim() : ""
+        const routingAddress = typeof routing?.dealer_address === "string" ? routing.dealer_address.trim() : ""
+        const routingRadius = Number(routing?.radius_miles)
+
+        const override = args?.override === true
+
+        if (!routingActive && !override) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: {
+              error: "Routing disabled in Settings. Enable it or confirm override.",
+              hint: "Set Settings → LeadGen Routing → Active=true, or re-run with 'override'.",
+            },
+          }
+        }
+
+        if (!routingAddress || !Number.isFinite(routingRadius)) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: {
+              error: "Missing LeadGen Routing settings. Please set dealer address + radius in Settings.",
+              required: ["leadgen_routing.dealer_address", "leadgen_routing.radius_miles"],
+            },
+          }
+        }
+
+        if (routingRadius < 1 || routingRadius > 50) {
+          return { ok: false, intent, args, data: { error: "Invalid radius_miles in Settings (must be 1–50)." } }
+        }
+
+        const cityRaw = typeof args.city === "string" ? args.city.trim() : ""
+        const city = cityRaw || routingCityFallback
         const site = typeof args.site === "string" ? args.site.trim().toLowerCase() : ""
 
         if (!city) {
           return { ok: false, intent, args, data: { error: "city required (example: 'Miami, FL')" } }
         }
 
+        const cityKey = city.toLowerCase().trim()
+        const campaign_key = `craigslist_${cityKey}_${routingRadius}mi`
+        const campaign_name = `Craigslist · ${cityKey.charAt(0).toUpperCase()}${cityKey.slice(1)} · ${routingRadius}mi · LeadGen`
+
+        // Duplicate-run protection: treat campaign as RUNNING if there are queued/claimed tasks for this city recently.
+        const confirm = typeof args?.confirm === "string" ? String(args.confirm).trim().toLowerCase() : ""
+        const { data: runningTasks, error: runErr } = await supabase
+          .schema("lead_hunter")
+          .from("craigslist_tasks_v1")
+          .select("id,status,created_at")
+          .eq("account_id", accountId)
+          .eq("city", cityKey)
+          .in("status", ["queued", "claimed"])
+          .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString())
+          .limit(1)
+
+        if (runErr) {
+          return { ok: false, intent, args, data: { error: "Failed to check running state", details: runErr.message } }
+        }
+
+        const isRunning = Boolean((runningTasks ?? []).length)
+        if (isRunning && !confirm) {
+          return {
+            ok: false,
+            intent,
+            args: { ...args, city: cityKey, campaign_key, campaign_name },
+            data: {
+              error: `Ya tienes '${campaign_name}' andando.`,
+              prompt:
+                "¿Quieres crear otra adicional o dejarla como está? (responde: crear / dejar / apagar-y-recrear)",
+              options: ["crear", "dejar", "apagar-y-recrear"],
+              running: true,
+            },
+          }
+        }
+
+        if (isRunning && confirm === "dejar") {
+          return {
+            ok: true,
+            intent,
+            args: { ...args, city: cityKey, campaign_key, campaign_name },
+            data: { skipped: true, reason: "duplicate_running_leave", campaign_key, campaign_name },
+          }
+        }
+
+        if (isRunning && confirm === "apagar-y-recrear") {
+          await supabase
+            .schema("lead_hunter")
+            .from("craigslist_tasks_v1")
+            .update({ status: "failed", last_error: "stopped_by_user", updated_at: new Date().toISOString() })
+            .eq("account_id", accountId)
+            .eq("city", cityKey)
+            .eq("status", "queued")
+        }
+
         const { data: taskId, error: enqErr } = await supabase
           .schema("lead_hunter")
-          .rpc("enqueue_craigslist_discover_v1", { p_account_id: accountId, p_city: city })
+          .rpc("enqueue_craigslist_discover_v1", { p_account_id: accountId, p_city: cityKey })
 
         if (enqErr) {
           return { ok: false, intent, args, data: { error: "enqueue_craigslist_discover_v1 failed", details: enqErr.message } }
@@ -875,11 +978,17 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
         return {
           ok: true,
           intent,
-          args: { account_id: accountId, city, site: site || null },
+          args: { account_id: accountId, city: cityKey, site: site || null, campaign_key, campaign_name },
           data: {
             enqueued_task_id: taskId ?? null,
             ssv: ssvErr ? { error: ssvErr.message } : (ssv ?? null),
             note: ssv ? null : "SSV empty until worker inserts leads.",
+            leadgen_routing: {
+              dealer_address: routingAddress,
+              radius_miles: routingRadius,
+              city_fallback: routingCityFallback || null,
+              active: routingActive,
+            },
           },
         }
       }
