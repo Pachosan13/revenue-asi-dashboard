@@ -197,21 +197,16 @@ export default function CampaignDetailPage() {
   const handleToggleActive = useCallback(
     async (desired: boolean) => {
       if (!campaign || !campaign.id || campaign.id === "new") return
-      const nextStatus = desired ? "active" : "paused"
-      const { data, error } = await supabase
-        .from("campaigns")
-        .update({ is_active: desired, status: nextStatus })
-        .eq("id", campaign.id)
-        .select("id,is_active,status")
-        .maybeSingle()
-      if (error) {
-        console.error("campaign.toggle failed", error)
-      } else if (data && Boolean((data as any).is_active) !== desired) {
-        console.warn("campaign.toggle inconsistent response; rendering from is_active", {
-          campaign_id: campaign.id,
-          desired_is_active: desired,
-          got: { is_active: (data as any).is_active, status: (data as any).status },
-        })
+      const res = await fetch("/api/campaigns/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ campaign_id: campaign.id, is_active: desired }),
+      })
+
+      const json = await res.json().catch(() => null)
+      if (!res.ok || json?.ok !== true) {
+        console.error("campaign.toggle failed", json?.data?.error ?? json?.error ?? "unknown error")
       }
       await reloadCampaign()
     },

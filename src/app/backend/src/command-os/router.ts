@@ -415,6 +415,22 @@ async function listCampaigns(args: { account_id: string; limit?: number; status?
   return { campaigns: data ?? [] }
 }
 
+async function listCampaignsRunning(args: { account_id: string; limit?: number }): Promise<{ campaigns: any[] }> {
+  const supabase = getSupabaseAdmin()
+  const limit = Math.min(Math.max(args.limit ?? 20, 1), 100)
+
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("account_id", args.account_id)
+    .eq("is_active", true)
+    .order("created_at", { ascending: false })
+    .limit(limit)
+
+  if (error) throw new Error(`Error listando campañas running: ${error.message}`)
+  return { campaigns: data ?? [] }
+}
+
 async function inspectCampaign(args: { account_id: string; campaign_id?: string; campaign_name?: string }) {
   const supabase = getSupabaseAdmin()
 
@@ -477,6 +493,7 @@ type KnownIntent =
   | "campaign.inspect"
   | "campaign.create"
   | "campaign.toggle"
+  | "campaign.toggle.bulk"
   | "campaign.metrics"
   | "orchestrator.run"
   | "dispatcher.run"
@@ -541,6 +558,13 @@ interface CampaignCreateArgs {
   notes?: string
 }
 
+interface CampaignToggleBulkArgs {
+  account_id?: string
+  apply_to: "status_active" | "is_active_true" | "all"
+  set_active: boolean
+  confirm?: boolean
+}
+
 function isLeadInspectArgs(args: Record<string, any>): args is LeadInspectArgs {
   const hasSelector =
     (typeof args.lead_id === "string" && args.lead_id.length > 0) ||
@@ -595,6 +619,14 @@ function isCampaignInspectArgs(args: Record<string, any>): args is CampaignInspe
 
 function isCampaignCreateArgs(args: Record<string, any>): args is CampaignCreateArgs {
   return typeof args.name === "string" && args.name.length > 0
+}
+
+function isCampaignToggleBulkArgs(args: Record<string, any>): args is CampaignToggleBulkArgs {
+  const applyToOk = args.apply_to === "status_active" || args.apply_to === "is_active_true" || args.apply_to === "all"
+  if (!applyToOk) return false
+  if (typeof args.set_active !== "boolean") return false
+  if (args.confirm !== undefined && typeof args.confirm !== "boolean") return false
+  return true
 }
 
 // ---------- ROUTER PRINCIPAL COMMAND OS ----------
@@ -1865,13 +1897,27 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
 
         const accountId = requireAccountId(args, intent)
 
-        const result = await listCampaigns({
-          account_id: accountId,
-          limit: args.limit,
-          status: args.status,
-        })
+        const limit = args.limit
+        const [legacy, running, filtered] = await Promise.all([
+          listCampaigns({ account_id: accountId, limit, status: "active" }),
+          listCampaignsRunning({ account_id: accountId, limit }),
+          args.status ? listCampaigns({ account_id: accountId, limit, status: args.status }) : Promise.resolve({ campaigns: [] }),
+        ])
 
-        return { ok: true, intent, args, data: { message: "Campañas recientes obtenidas.", campaigns: result.campaigns } }
+        return {
+          ok: true,
+          intent,
+          args,
+          data: {
+            message: "Campañas obtenidas.",
+            // Legacy: status='active'
+            campaigns_status_active: legacy.campaigns,
+            // Real running truth: is_active=true
+            campaigns_running: running.campaigns,
+            // If user asked explicit status, we return it too (optional)
+            ...(args.status ? { campaigns_filtered: filtered.campaigns } : null),
+          },
+        }
       }
 
       case "campaign.inspect": {
@@ -1960,6 +2006,65 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
           intent,
           args,
           data: { message: `Campaña ${isActive ? "activada" : "desactivada"}`, campaign: reread ?? updated },
+        }
+      }
+
+      case "campaign.toggle.bulk": {
+        if (!isCampaignToggleBulkArgs(args)) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: { error: "campaign.toggle.bulk requiere apply_to, set_active, confirm?: boolean" },
+          }
+        }
+
+        const accountId = requireAccountId(args, intent)
+        const applyTo = args.apply_to
+        const setActive = args.set_active
+        const confirm = args.confirm === true
+
+        if (!confirm) {
+          return {
+            ok: false,
+            intent,
+            args,
+            data: {
+              error:
+                "Confirmación requerida. Repite el comando con confirm=true (ej: 'confirmado todo') para aplicar el cambio.",
+              required: { confirm: true },
+            },
+          }
+        }
+
+        const nextStatus = setActive ? "active" : "paused"
+
+        let q = getSupabaseAdmin()
+          .from("campaigns")
+          .update({ is_active: setActive, status: nextStatus })
+          .eq("account_id", accountId)
+
+        if (applyTo === "status_active") q = q.eq("status", "active")
+        if (applyTo === "is_active_true") q = q.eq("is_active", true)
+
+        const { data, error } = await q.select("id,name,is_active,status")
+        if (error) return { ok: false, intent, args, data: { error: error.message } }
+
+        const changed = Array.isArray(data) ? data : []
+
+        return {
+          ok: true,
+          intent,
+          args,
+          data: {
+            count_updated: changed.length,
+            changed_campaigns: changed.map((c: any) => ({
+              id: c.id,
+              name: c.name ?? null,
+              is_active: Boolean(c.is_active),
+              status: c.status ?? null,
+            })),
+          },
         }
       }
 

@@ -74,6 +74,32 @@ function fallbackAssistantMessage(execution: any) {
     return `Leads recientes:\n${lines.join("\n")}\n\nDime: “inspecciona el #1”.`
   }
 
+  if (intent === "campaign.list") {
+    const running = Array.isArray(data?.campaigns_running) ? data.campaigns_running : []
+    const legacy = Array.isArray(data?.campaigns_status_active) ? data.campaigns_status_active : []
+    const rows = running.length ? running : legacy
+    if (!rows.length) return "No encontré campañas running en esta cuenta."
+    const lines = rows.slice(0, 15).map((c: any, i: number) => {
+      const name = safeStr(c?.name, "Untitled")
+      const id = safeStr(c?.id, "")
+      const st = Boolean(c?.is_active) ? "running" : safeStr(c?.status, "paused")
+      return `${i + 1}) ${name}${id ? ` • ${id}` : ""} • ${st}`
+    })
+    return `Campañas running (is_active=true):\n${lines.join("\n")}\n\nTip: “pausa todas” para detenerlas.`
+  }
+
+  if (intent === "campaign.toggle.bulk") {
+    const n = safeNum(data?.count_updated, 0)
+    const changed = Array.isArray(data?.changed_campaigns) ? data.changed_campaigns : []
+    if (!n) return "No cambié campañas. (0 actualizadas)"
+    const lines = changed.slice(0, 15).map((c: any, i: number) => {
+      const name = safeStr(c?.name, "Untitled")
+      const st = Boolean(c?.is_active) ? "running" : "paused"
+      return `${i + 1}) ${name} • ${st}`
+    })
+    return `Listo. Actualicé ${n} campañas.\n${lines.join("\n")}`
+  }
+
   if (intent === "system.status") {
     const checks = Array.isArray(data?.checks) ? data.checks : []
     if (!checks.length) return "Sistema OK. (sin checks detallados)"

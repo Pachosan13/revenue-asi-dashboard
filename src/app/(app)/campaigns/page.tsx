@@ -121,6 +121,7 @@ export default function CampaignsPage() {
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([])
   const [runtimeError, setRuntimeError] = useState<string | null>(null)
   const [accountId, setAccountId] = useState<string | null>(null)
+  const [confirmPauseAll, setConfirmPauseAll] = useState(false)
 
   // -------------------------------
   // Load campaigns + KPIs
@@ -170,7 +171,7 @@ export default function CampaignsPage() {
     }
     setAccountId(accountId)
 
-    const [{ data: outbound, error: oErr }, { data: kpis }, { data: orgSettings }, { data: lastDiscover, error: ldErr }] =
+    const [{ data: outbound, error: oErr }, { data: kpis }, { data: orgSettings }, { data: clRecent, error: ldErr }] =
       await Promise.all([
         supabase
           .from("campaigns")
@@ -183,13 +184,13 @@ export default function CampaignsPage() {
         supabase
           .schema("lead_hunter")
           .from("craigslist_tasks_v1")
-          .select("status,last_error,created_at,updated_at")
+          .select("status,task_type,created_at,updated_at")
           .eq("account_id", accountId)
           .eq("city", "miami")
-          .eq("task_type", "discover")
+          .in("status", ["queued", "claimed"])
+          .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString())
           .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle(),
+          .limit(50),
       ])
 
     if (oErr) {
@@ -240,12 +241,9 @@ export default function CampaignsPage() {
     const radiusMi = Number.isFinite(radius) && radius > 0 ? radius : 10
     const programName = `Craigslist · Miami · ${radiusMi}mi · LeadGen`
 
-    const isStoppedByUser =
-      String((lastDiscover as any)?.last_error ?? "").trim() === "stopped_by_user" &&
-      String((lastDiscover as any)?.status ?? "").trim() === "failed"
-
-    const enabled = Boolean(lastDiscover) && !isStoppedByUser
-    const lastStartedAt = typeof (lastDiscover as any)?.created_at === "string" ? (lastDiscover as any).created_at : null
+    const clRows = Array.isArray(clRecent) ? clRecent : []
+    const enabled = clRows.some((t: any) => t?.status === "queued" || t?.status === "claimed")
+    const lastStartedAt = clRows.length > 0 ? (clRows[0] as any)?.created_at ?? null : null
 
     setPrograms([
       {
@@ -287,30 +285,33 @@ export default function CampaignsPage() {
 
   const toggleOutbound = useCallback(
     async (campaignId: string, desired: boolean) => {
-      if (!supabase || !accountId) return
-      const nextStatus = desired ? "active" : "paused"
-      const { data, error } = await supabase
-        .from("campaigns")
-        .update({ is_active: desired, status: nextStatus })
-        .eq("id", campaignId)
-        .eq("account_id", accountId)
-        .select("id,is_active,status")
-        .maybeSingle()
-
-      if (error) {
-        console.warn("campaign.toggle failed", { campaign_id: campaignId, error: error.message })
-      } else if (data && Boolean((data as any).is_active) !== desired) {
-        console.warn("campaign.toggle inconsistent response; rendering from is_active", {
-          campaign_id: campaignId,
-          desired_is_active: desired,
-          got: { is_active: (data as any).is_active, status: (data as any).status },
+      try {
+        await fetch("/api/campaigns/toggle", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ campaign_id: campaignId, is_active: desired }),
         })
+      } finally {
+        await loadCampaigns()
       }
-
-      await loadCampaigns()
     },
-    [supabase, accountId, loadCampaigns],
+    [loadCampaigns],
   )
+
+  const pauseAllRunning = useCallback(async () => {
+    try {
+      await fetch("/api/campaigns/toggle-bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ apply_to: "is_active_true", set_active: false, confirm: true }),
+      })
+    } finally {
+      setConfirmPauseAll(false)
+      await loadCampaigns()
+    }
+  }, [loadCampaigns])
 
   useEffect(() => {
     loadCampaigns()
@@ -365,9 +366,9 @@ export default function CampaignsPage() {
       {/* HEADER */}
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-xs uppercase tracking-[0.16em] text-white/40">Command Center</p>
-          <h1 className="text-3xl font-semibold text-white">Programs &amp; Campaigns</h1>
-          <p className="text-sm text-white/60">Trustworthy controls for LeadGen sources and outbound cadences.</p>
+          <p className="text-xs uppercase tracking-[0.16em] text-white/40">LeadGen</p>
+          <h1 className="text-3xl font-semibold text-white">LeadGen</h1>
+          <p className="text-sm text-white/60">Programs (sources) + outbound cadences. Same truth as Command OS.</p>
         </div>
 
         {/* ⭐️ RESTORED BUTTON — EXACT SPOT WHERE IT BELONGS */}
@@ -405,7 +406,7 @@ export default function CampaignsPage() {
 
       {/* LeadGen Programs */}
       <Card>
-        <CardHeader title="LeadGen Programs" description="Lead generation sources (scraping + ingestion). Not outbound cadences." />
+        <CardHeader title="Programs" description="Lead generation sources (scraping + ingestion). Not outbound cadences." />
         <CardContent className="space-y-4">
           <Table>
             <TableHead>
@@ -452,7 +453,7 @@ export default function CampaignsPage() {
       <Card>
         <CardHeader
           title="Outbound Campaigns"
-          description="Outbound campaigns live in campaigns table. is_active is the only source of truth."
+          description="Outbound cadences live in campaigns table. is_active is the only runtime truth."
           action={
             <div className="flex items-center gap-2 text-sm text-white/60">
               <Filter size={16} />
@@ -462,6 +463,28 @@ export default function CampaignsPage() {
         />
 
         <CardContent className="space-y-4">
+          <div className="flex items-center justify-end gap-2">
+            {!confirmPauseAll ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setConfirmPauseAll(true)}
+                disabled={summary.running === 0}
+              >
+                Pause all running
+              </Button>
+            ) : (
+              <div className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                <span>Confirm pause all running?</span>
+                <Button variant="secondary" size="sm" onClick={pauseAllRunning}>
+                  Confirm
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => setConfirmPauseAll(false)}>
+                  Cancel
+                </Button>
+              </div>
+            )}
+          </div>
           {runtimeError ? (
             <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 flex items-center justify-between gap-3">
               <div>

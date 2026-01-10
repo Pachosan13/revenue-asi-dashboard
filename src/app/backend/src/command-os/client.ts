@@ -27,6 +27,7 @@ export type CommandOsIntent =
   | "campaign.inspect"
   | "campaign.create"
   | "campaign.toggle"
+  | "campaign.toggle.bulk"
   | "campaign.metrics"
   | "orchestrator.run"
   | "dispatcher.run"
@@ -90,6 +91,7 @@ INTENTS SOPORTADOS EN ESTE BUILD
 - "campaign.inspect" - Ver detalle de campaña
 - "campaign.create" - Crear nueva campaña
 - "campaign.toggle" - Activar/desactivar campaña
+- "campaign.toggle.bulk" - Activar/desactivar campañas en lote (requiere confirm=true)
 - "campaign.metrics" - Métricas de una campaña
 - "orchestrator.run" - Ejecutar orchestrator manualmente
 - "dispatcher.run" - Ejecutar dispatcher manualmente
@@ -108,6 +110,7 @@ REGLAS DE SEGURIDAD
 CÓMO ELEGIR
 - Ver info => lead.inspect, lead.inspect.latest, lead.list.recents, campaign.inspect, campaign.list, campaign.metrics, system.status, system.metrics, touch.list, touch.inspect, appointment.list, appointment.inspect
 - Cambiar => lead.update, lead.enroll, campaign.toggle, system.kill_switch
+- Cambios masivos => campaign.toggle.bulk (confirm=false por defecto)
 - Simular/Ejecutar => touch.simulate, orchestrator.run, dispatcher.run, enrichment.run
 - Control => campaign.toggle, system.kill_switch
 
@@ -206,6 +209,36 @@ function tryRuleBasedCommandOs(input: { message: string; context?: any }): Comma
       intent: "campaign.list",
       args: { status: "active", limit: 50 },
       explanation: "rule_based_match: campaign.list active",
+      confidence: 1,
+    }
+  }
+
+  // “pausa todas” => campaign.toggle.bulk (confirm=false by default)
+  const isPauseAll =
+    (m.includes("pausa") || m.includes("pausar") || m.includes("pause")) &&
+    (m.includes("todas") || m.includes("todo") || m.includes("all"))
+
+  if (isPauseAll) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "campaign.toggle.bulk",
+      args: { apply_to: "is_active_true", set_active: false, confirm: false },
+      explanation: "rule_based_match: campaign.toggle.bulk pause all running (confirm required)",
+      confidence: 1,
+    }
+  }
+
+  // “confirmado todo” / “confirmo” => campaign.toggle.bulk confirm=true (same defaults)
+  const isConfirmAll =
+    (m.includes("confirmado") || m.includes("confirmo") || m.includes("confirmar") || m === "confirmado todo") &&
+    (m.includes("todo") || m.includes("todas") || m.includes("all"))
+
+  if (isConfirmAll) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "campaign.toggle.bulk",
+      args: { apply_to: "is_active_true", set_active: false, confirm: true },
+      explanation: "rule_based_match: campaign.toggle.bulk confirm pause all running",
       confidence: 1,
     }
   }
