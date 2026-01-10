@@ -108,6 +108,33 @@ Definition is in migrations:
 
 UI copy may present both under a single **LeadGen** page, but the internal distinction above remains required for correctness.
 
+## Command OS: Programs vs Campaigns
+
+- `campaign.list` lists **only outbound campaigns** from `public.campaigns`.
+  - If the user asks about **Craigslist/LeadGen/autopilot**, Command OS should redirect them to `program.list` / `program.status` (Craigslist is not a campaign row).
+- `program.list` lists LeadGen programs (e.g. Craigslist, Encuentra24 autopilot if configured).
+- `program.status` returns status for a specific program (e.g. Craigslist Miami), including a concrete `next_action`.
+
+### Verification SQL (LeadGen programs)
+
+-- routing active (org_settings is a singleton table in repo-truth)
+select leadgen_routing
+from public.org_settings
+limit 1;
+
+-- tasks last 60m (Craigslist)
+select status, task_type, count(*) as n
+from lead_hunter.craigslist_tasks_v1
+where created_at > now() - interval '60 minutes'
+group by 1,2
+order by 1,2;
+
+-- leads from craigslist last 60m
+select count(*) as leads_last_60m
+from public.leads
+where source = 'craigslist'
+  and created_at > now() - interval '60 minutes';
+
 ## Lead truth surfaces (UI + Command OS)
 
 Leads UI and Command OS must use the same DB truth:
