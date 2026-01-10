@@ -456,6 +456,8 @@ type KnownIntent =
   | "system.status"
   | "system.metrics"
   | "system.kill_switch"
+  | "craigslist.cto.start"
+  | "craigslist.cto.stop"
   | "enc24.autos_usados.start"
   | "enc24.autos_usados.voice_start"
   | "enc24.autos_usados.autopilot.start"
@@ -840,6 +842,78 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
             window_utc: { start: startIso, end: endIso },
             total: typeof count === "number" ? count : leads.length,
             leads,
+          },
+        }
+      }
+
+      case "craigslist.cto.start": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+
+        const city = typeof args.city === "string" ? args.city.trim() : ""
+        const site = typeof args.site === "string" ? args.site.trim().toLowerCase() : ""
+
+        if (!city) {
+          return { ok: false, intent, args, data: { error: "city required (example: 'Miami, FL')" } }
+        }
+
+        const { data: taskId, error: enqErr } = await supabase
+          .schema("lead_hunter")
+          .rpc("enqueue_craigslist_discover_v1", { p_account_id: accountId, p_city: city })
+
+        if (enqErr) {
+          return { ok: false, intent, args, data: { error: "enqueue_craigslist_discover_v1 failed", details: enqErr.message } }
+        }
+
+        // SSV (Supply Velocity) via view (UTC day boundaries). Timezone mapping per city is UNRESOLVED in repo.
+        const { data: ssv, error: ssvErr } = await supabase
+          .from("v_craigslist_ssv_v0")
+          .select("city,listings_today,avg_last_7_days")
+          .eq("city", city)
+          .maybeSingle()
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId, city, site: site || null },
+          data: {
+            enqueued_task_id: taskId ?? null,
+            ssv: ssvErr ? { error: ssvErr.message } : (ssv ?? null),
+            note: ssv ? null : "SSV empty until worker inserts leads.",
+          },
+        }
+      }
+
+      case "craigslist.cto.stop": {
+        const accountId = requireAccountId(args, intent)
+        const supabase = getSupabaseAdmin()
+
+        const city = typeof args.city === "string" ? args.city.trim() : ""
+        if (!city) {
+          return { ok: false, intent, args, data: { error: "city required (example: 'Miami, FL')" } }
+        }
+
+        // "Stop" = fail any queued tasks for this city/account so the worker stops consuming new work.
+        const { data: stopped, error: stopErr } = await supabase
+          .schema("lead_hunter")
+          .from("craigslist_tasks_v1")
+          .update({ status: "failed", last_error: "stopped_by_user", updated_at: new Date().toISOString() })
+          .eq("account_id", accountId)
+          .eq("city", city)
+          .eq("status", "queued")
+          .select("id")
+
+        if (stopErr) {
+          return { ok: false, intent, args, data: { error: "Failed to stop queued tasks", details: stopErr.message } }
+        }
+
+        return {
+          ok: true,
+          intent,
+          args: { account_id: accountId, city },
+          data: {
+            stopped_queued_tasks: (stopped ?? []).length,
+            note: "Stop sets queued tasks to failed; claimed tasks continue until worker finishes them.",
           },
         }
       }
