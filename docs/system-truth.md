@@ -101,6 +101,11 @@ Definition is in migrations:
 `last_touch_run_at` is derived from `max(public.touch_runs.created_at)` per (account_id, campaign_id).  
 24h counts are derived from `public.touch_runs.created_at` within the last 24 hours.
 
+## Programs vs Campaigns (UI semantics)
+
+- **LeadGen Programs**: lead generation sources (scraping + ingestion). Example: Craigslist V0. They are controlled via Command OS start/stop and **do not** live in `public.campaigns`.
+- **Outbound Campaigns**: outbound cadences that live in `public.campaigns`. The **only** enable/disable truth is `campaigns.is_active` (UI must not derive from `status`).
+
 ## Executable Lead Requirements (minimum)
 
 These are the minimum fields required for a lead to be eligible for scheduling/execution.
@@ -247,4 +252,6 @@ Server-side validation exists as a DB CHECK constraint (radius 1–50; if `activ
 - Local dev: normalized OpenAI env lookup (`OPENAI_API_KEY` → `OPEN_AI_KEY` → legacy `OPEN_API_KEY`) and added a debug endpoint (`/api/debug/openai-env`) that returns only existence/len/prefix (no secrets).
 - Campaigns UI: added a demo “Craigslist Miami” row that reflects `lead_hunter.craigslist_tasks_v1` state and can start/stop via Command OS (`prende/apaga craigslist miami`).
 - Settings: added `org_settings.leadgen_routing` (dealer_address + radius_miles + city_fallback + active) and wired Craigslist LeadGen start to require it (or explicit override), with duplicate-run confirmation.
+- Campaigns UI: separated LeadGen Programs from Outbound Campaigns; outbound enable/disable truth is `campaigns.is_active` and UI re-reads after toggles.
+- Command OS: `campaign.toggle` now keeps `campaigns.is_active` and `campaigns.status` consistent and returns the re-read row.
 
