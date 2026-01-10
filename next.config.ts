@@ -3,13 +3,13 @@ import { config as dotenvConfig } from "dotenv";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-// Load env vars from supabase/.env.local for local dev.
-// This avoids needing a repo-root `.env.local` file (often gitignored / blocked).
+// Load env vars from supabase/.env(.local) for local dev.
+// We do NOT override existing process.env (Next's .env.local should win).
 try {
   const supaEnv = resolve(process.cwd(), "supabase", ".env.local");
-  if (existsSync(supaEnv)) {
-    dotenvConfig({ path: supaEnv, override: true });
-  }
+  const supaEnv2 = resolve(process.cwd(), "supabase", ".env");
+  if (existsSync(supaEnv2)) dotenvConfig({ path: supaEnv2, override: false });
+  if (existsSync(supaEnv)) dotenvConfig({ path: supaEnv, override: false });
 } catch {
   // ignore
 }
