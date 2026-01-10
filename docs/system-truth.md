@@ -228,6 +228,17 @@ The Settings UI reads/writes `public.org_settings` via Supabase PostgREST.
 - UI: `src/app/(app)/settings/page.tsx`
 - Storage: `public.org_settings`
 
+## Onboarding v1
+
+Onboarding v1 is implemented as the Settings UI flow that captures:
+
+- Business identity: `business_name` (required by UI)
+- Primary contact: `contact_email` (required by UI), plus optional `contact_phone`, `contact_whatsapp`
+- Operational context: `vertical` (stored, default `"car_dealer"`, hidden in UI)
+- LeadGen Routing: `org_settings.leadgen_routing` (existing)
+
+Onboarding does **not** start any LeadGen program and does **not** configure campaigns.
+
 ### LeadGen Routing (MVP)
 
 LeadGen routing is stored as JSON in `org_settings.leadgen_routing`:
@@ -252,6 +263,7 @@ Server-side validation exists as a DB CHECK constraint (radius 1–50; if `activ
 - Local dev: normalized OpenAI env lookup (`OPENAI_API_KEY` → `OPEN_AI_KEY` → legacy `OPEN_API_KEY`) and added a debug endpoint (`/api/debug/openai-env`) that returns only existence/len/prefix (no secrets).
 - Campaigns UI: added a demo “Craigslist Miami” row that reflects `lead_hunter.craigslist_tasks_v1` state and can start/stop via Command OS (`prende/apaga craigslist miami`).
 - Settings: added `org_settings.leadgen_routing` (dealer_address + radius_miles + city_fallback + active) and wired Craigslist LeadGen start to require it (or explicit override), with duplicate-run confirmation.
+- Onboarding v1: added `business_name`, `contact_email`, `contact_phone`, `contact_whatsapp`, `vertical` to `public.org_settings` and updated the Settings UI to a 3-step onboarding flow (identity + contact + routing).
 - Campaigns UI: separated LeadGen Programs from Outbound Campaigns; outbound enable/disable truth is `campaigns.is_active` and UI re-reads after toggles.
 - Command OS: `campaign.toggle` now keeps `campaigns.is_active` and `campaigns.status` consistent and returns the re-read row.
 
