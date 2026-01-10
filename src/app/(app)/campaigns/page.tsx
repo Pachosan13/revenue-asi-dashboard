@@ -112,10 +112,7 @@ function colorizeRate(rate: number) {
 export default function CampaignsPage() {
   const router = useRouter()
   const supabase = useMemo(() => {
-    const hasEnv =
-      process.env.NEXT_PUBLIC_SUPABASE_URL &&
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-    return hasEnv ? supabaseBrowser() : null
+    return supabaseBrowser()
   }, [])
 
   const [query, setQuery] = useState("")
@@ -125,6 +122,7 @@ export default function CampaignsPage() {
   const [loading, setLoading] = useState(true)
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([])
   const [runtimeError, setRuntimeError] = useState<string | null>(null)
+  const [accountId, setAccountId] = useState<string | null>(null)
 
   // -------------------------------
   // Load campaigns + KPIs
@@ -170,8 +168,9 @@ export default function CampaignsPage() {
       setLoading(false)
       return
     }
+    setAccountId(accountId)
 
-    const [{ data: runtime, error: rErr }, { data: kpis }] = await Promise.all([
+    const [{ data: runtime, error: rErr }, { data: kpis }, { data: clTasks }] = await Promise.all([
       supabase
         .from("v_campaign_runtime_status_v1")
         .select("campaign_id,name,type,campaign_status,is_running,last_touch_run_at")
@@ -180,6 +179,14 @@ export default function CampaignsPage() {
         .order("last_touch_run_at", { ascending: false })
         .limit(200),
       supabase.from("campaign_funnel_overview").select("*"),
+      supabase
+        .schema("lead_hunter")
+        .from("craigslist_tasks_v1")
+        .select("status,task_type,created_at")
+        .eq("account_id", accountId)
+        .eq("city", "miami")
+        .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString())
+        .limit(2000),
     ])
 
     if (rErr) {
@@ -225,9 +232,55 @@ export default function CampaignsPage() {
       } as CampaignRow
     })
 
-    setCampaigns(mapped)
+    const clRows = clTasks ?? []
+    const clQueuedOrClaimed = clRows.some((t: any) => t?.status === "queued" || t?.status === "claimed")
+    const clClaimed = clRows.some((t: any) => t?.status === "claimed")
+    const clLast = clRows
+      .map((t: any) => (typeof t?.created_at === "string" ? t.created_at : null))
+      .filter(Boolean)
+      .sort()
+      .slice(-1)[0] as string | undefined
+
+    const craigslistMiami: CampaignRow = {
+      id: "craigslist:miami",
+      name: "Craigslist Miami",
+      type: "outbound",
+      status: clQueuedOrClaimed ? "live" : "paused",
+      campaign_status: clQueuedOrClaimed ? "active" : "paused",
+      is_running: Boolean(clClaimed),
+      created_at: clLast ?? "",
+      kpis: null,
+    }
+
+    setCampaigns([craigslistMiami, ...mapped])
     setLoading(false)
   }, [supabase])
+
+  const startCraigslistMiami = useCallback(async () => {
+    try {
+      await fetch("/api/command-os", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: "prende craigslist miami" }),
+        credentials: "include",
+      })
+    } finally {
+      await loadCampaigns()
+    }
+  }, [loadCampaigns])
+
+  const stopCraigslistMiami = useCallback(async () => {
+    try {
+      await fetch("/api/command-os", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: "apaga craigslist miami" }),
+        credentials: "include",
+      })
+    } finally {
+      await loadCampaigns()
+    }
+  }, [loadCampaigns])
 
   useEffect(() => {
     loadCampaigns()
@@ -393,6 +446,7 @@ export default function CampaignsPage() {
                 <TableHeaderCell className="text-right">Errors</TableHeaderCell>
                 <TableHeaderCell className="text-right">Touches</TableHeaderCell>
                 <TableHeaderCell className="text-right">Last activity</TableHeaderCell>
+                <TableHeaderCell className="text-right">Actions</TableHeaderCell>
               </TableRow>
             </TableHead>
 
@@ -405,20 +459,25 @@ export default function CampaignsPage() {
                   <TableRow
                     key={c.id}
                     className="cursor-pointer transition hover:bg-white/5"
-                    onClick={() => router.push(`/campaigns/${c.id}`)}
+                    onClick={() => {
+                      if (c.id.startsWith("craigslist:")) return
+                      router.push(`/campaigns/${c.id}`)
+                    }}
                   >
                     {/* Name + type + status */}
                     <TableCell>
                       <div className="space-y-1">
                         <p className="font-semibold text-white flex items-center gap-2">
                           {c.name}
-                          <Link
-                            href={`/leads?campaign_id=${c.id}`}
-                            onClick={(e) => e.stopPropagation()}
-                            className="text-emerald-300 hover:text-emerald-200 inline-flex items-center gap-1 text-xs"
-                          >
-                            Inbox <ArrowUpRight size={12} />
-                          </Link>
+                          {!c.id.startsWith("craigslist:") ? (
+                            <Link
+                              href={`/leads?campaign_id=${c.id}`}
+                              onClick={(e) => e.stopPropagation()}
+                              className="text-emerald-300 hover:text-emerald-200 inline-flex items-center gap-1 text-xs"
+                            >
+                              Inbox <ArrowUpRight size={12} />
+                            </Link>
+                          ) : null}
                         </p>
                         <div className="flex items-center gap-2">
                           <Badge variant="outline" className="capitalize">
@@ -473,6 +532,34 @@ export default function CampaignsPage() {
                     {/* Last touch */}
                     <TableCell className="text-right text-white/50">
                       {k?.last_touch_at ? new Date(k.last_touch_at).toLocaleString() : "--"}
+                    </TableCell>
+
+                    {/* Actions */}
+                    <TableCell className="text-right">
+                      {c.id === "craigslist:miami" ? (
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              startCraigslistMiami()
+                            }}
+                          >
+                            Start
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              stopCraigslistMiami()
+                            }}
+                          >
+                            Stop
+                          </Button>
+                        </div>
+                      ) : null}
                     </TableCell>
 
                   </TableRow>

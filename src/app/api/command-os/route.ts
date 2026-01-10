@@ -3,16 +3,30 @@ import OpenAI from "openai"
 import { callCommandOs } from "@/app/backend/src/command-os/client"
 import { handleCommandOsIntent } from "@/app/backend/src/command-os/router"
 import { getAccountContext } from "@/app/api/_lib/getAccountId"
+import { getOpenAiEnvDebug, getOpenAiKey } from "@/app/api/_lib/openaiEnv"
 
 export const dynamic = "force-dynamic"
+export const runtime = "nodejs"
 
 type CommandOsBody = {
   message: string
   context?: Record<string, any>
 }
 
+let _openaiEnvLogged = false
+
+function logOpenAiEnvOnceDevOnly() {
+  if (_openaiEnvLogged) return
+  _openaiEnvLogged = true
+  if (process.env.NODE_ENV === "production") return
+
+  // Never log full secrets.
+  console.log("OPENAI_ENV", getOpenAiEnvDebug())
+}
+
 function getOpenAIClient() {
-  const key = process.env.OPENAI_API_KEY ?? process.env.OPEN_API_KEY
+  logOpenAiEnvOnceDevOnly()
+  const { key } = getOpenAiKey()
   if (!key) return null
   return new OpenAI({ apiKey: key })
 }
@@ -159,7 +173,43 @@ export async function POST(req: NextRequest) {
     }
 
     // 1) OpenAI #1 → intent + args (JSON)
-    const command = await callCommandOs({ message, context })
+    // If OpenAI is down/misconfigured, allow DB-only fallbacks for critical commands.
+    let command: any
+    try {
+      command = await callCommandOs({ message, context })
+    } catch (e: any) {
+      const msg = e?.message ?? ""
+      const m = message
+        .toString()
+        .trim()
+        .toLowerCase()
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+
+      const isSystemStatus =
+        m === "system.status" ||
+        m === "system status" ||
+        m === "status del sistema" ||
+        m === "estado del sistema" ||
+        (m.includes("status") && m.includes("sistema")) ||
+        (m.includes("estado") && m.includes("sistema"))
+
+      const isCampaignsPrendidasAhora =
+        (m.includes("campan") || m.includes("campaign")) &&
+        (m.includes("prendid") || m.includes("activa") || m.includes("activas") || m.includes("encend"))
+
+      if (isSystemStatus || isCampaignsPrendidasAhora) {
+        command = {
+          version: "v1",
+          intent: isSystemStatus ? "system.status" : "campaign.list",
+          args: isSystemStatus ? {} : { status: "active", limit: 50 },
+          explanation: "fallback_no_openai_parse",
+          confidence: 1,
+        }
+      } else {
+        throw new Error(msg || "Command OS parse error")
+      }
+    }
 
     // 2) Router → ejecución real (DB, etc)
     const execution = await handleCommandOsIntent(command)

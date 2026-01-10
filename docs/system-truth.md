@@ -27,6 +27,20 @@ How often orchestrator / dispatch-engine are executed (cron, pg_cron, external s
 
 Rationale: this repo contains the functions and DB migrations, but there is no authoritative, versioned scheduler config in code that proves “runs every N minutes”.
 
+## Local Dev (Next.js) — OpenAI env + fallbacks
+
+- Command OS uses OpenAI in two places:
+  - **Intent parse**: `src/app/backend/src/command-os/client.ts` (`callCommandOs` → OpenAI `chat.completions` when no rule-based match)
+  - **Assistant phrasing**: `src/app/api/command-os/route.ts` (`llmAssistantMessage` → OpenAI `chat.completions`)
+- Local dev key lookup (trimmed):
+  - Prefer `OPENAI_API_KEY`
+  - Fallback `OPEN_AI_KEY`
+  - Legacy fallback `OPEN_API_KEY` (exists in some supabase env files)
+- Local dev env loading note:
+  - `next.config.ts` loads `supabase/.env` + `supabase/.env.local` as **non-overriding** supplements (repo-root `.env.local` wins).
+- If OpenAI is missing/down:
+  - `system.status` and “campañas prendidas/activas ahora” use DB-only rule-based parsing (no OpenAI required).
+
 ## Email (fail-closed until Elastic is configured)
 
 Email must not be scheduled or dispatched unless ElasticEmail is configured.
@@ -105,4 +119,108 @@ These are the minimum fields required for a lead to be eligible for scheduling/e
   - **voice/sms/whatsapp**: must have a valid `leads.phone` (current cadence/orchestrator behavior depends on phone availability elsewhere in the pipeline).
   - **email**: must have a valid email address available to the dispatcher (`lead_enriched.email` is used by `dispatch-touch-email`), but email scheduling is disabled unless `EMAIL_READY`.
 
+## Lead sources
+
+### Craigslist (US) V0
+
+- **Collector execution**: local worker (see below). Edge web fetch is not reliable for Craigslist (403/503).
+- **Trigger**: Command OS intent `craigslist.cto.start` (rule-based phrase: “prende craigslist …”). See:
+  - `src/app/backend/src/command-os/client.ts`
+  - `src/app/backend/src/command-os/router.ts`
+- **Queue**: `lead_hunter.craigslist_tasks_v1` (discover/detail). See: `supabase/migrations/20260109120000_lead_hunter_craigslist_tasks_v1.sql`
+- **Worker**: `services/craigslist-hunter/worker.js`
+- **Storage**: worker inserts into `public.leads` with:
+  - `source = 'craigslist'`
+  - `country = 'US'`
+  - `external_id = posting_id` (numeric id from URL)
+- **Dedupe**:
+  - Detail tasks: DB-enforced by unique index on `(account_id, external_id)` (migration adds if missing).
+  - Leads: DB-enforced by unique index on `(account_id, source, external_id)` (migration adds if missing).
+- **SSV (Supply Velocity)**: `public.v_craigslist_ssv_v0` (UTC day boundaries). Timezone mapping per US city is **UNRESOLVED**.
+
+#### Craigslist V0 verified state (cloud)
+
+Verified against Supabase Cloud (`project_ref=cdrrlkxgurckuyceiguo`) on **2026-01-09**:
+
+- **Latest discover (miami)**:
+
+```sql
+select id, status, last_error, created_at
+from lead_hunter.craigslist_tasks_v1
+where task_type='discover' and city='miami'
+order by created_at desc limit 1;
+```
+
+Result:
+- `id=33e1a53a-f141-4e99-9508-c1ab4abd8c39` `status=done` `last_error=NULL` `created_at=2026-01-09 21:36:43.883651+00`
+
+- **Detail tasks breakdown (miami, last 60m)**:
+
+```sql
+select status, task_type, count(*)
+from lead_hunter.craigslist_tasks_v1
+where city='miami' and created_at > now() - interval '60 minutes'
+group by 1,2 order by 1,2;
+```
+
+Result:
+- `claimed|detail|2`
+- `done|detail|32`
+- `done|discover|2`
+- `failed|detail|16`
+
+- **Leads inserted (miami, last 60m)**:
+
+```sql
+select count(*) as leads_last_60m
+from public.leads
+where source='craigslist' and city='miami'
+and created_at > now() - interval '60 minutes';
+```
+
+Result:
+- `leads_last_60m=35`
+
+#### Ops: enqueue + run worker + verify
+
+- **Enqueue discover (SQL)**:
+
+```sql
+select lead_hunter.enqueue_craigslist_discover_v1('<account_id>'::uuid, 'miami') as enqueued_task_id;
+```
+
+- **Run worker (cloud/headless)**:
+  - Required env:
+    - `SUPABASE_URL` (cloud project URL)
+    - `SUPABASE_SERVICE_ROLE_KEY`
+    - `WORKER_ID` (string identifier used in `claimed_by`)
+  - Optional runtime knobs (see `services/craigslist-hunter/worker.js`):
+    - `CL_HEADLESS` (default `"0"`)
+    - `CL_SLOWMO` (default `"150"`)
+    - `CL_HARD_TIMEOUT_MS` (default `"15000"`)
+    - `CL_WAIT_SELECTOR_MS` (default `"12000"`)
+    - `CL_JITTER_MIN_MS` (default `"2000"`)
+    - `CL_JITTER_MAX_MS` (default `"4000"`)
+    - `CL_SCREENSHOT_DIR` (default `"/tmp"`)
+    - `CL_MAX_DISCOVER` (default `"50"`)
+    - `CL_LOG_EVIDENCE` (default `"1"`)
+
+#### Known failure modes (observed) + evidence
+
+- `blocked_403` / `blocked_503`: Craigslist blocks navigation; worker logs `EVIDENCE { screenshot, html }` when `CL_LOG_EVIDENCE=1`.
+- `detail_missing_dom`: listing loads but expected DOM is missing; worker logs `EVIDENCE` and fails task.
+- `goto_timeout`: worker closes the page, resets, and fails the task to avoid hanging.
+
+#### Guardrails
+
+- No Edge Function scraping: Command OS only enqueues; worker is the only component that fetches Craigslist HTML.
+- DB enforces dedupe and worker is idempotent via upserts (tasks and leads).
+
+## Changelog
+
+- Added Craigslist (US) V0 collector + SSV view + minimal `public.leads` columns/indexes required for `(account_id, source, external_id)` ingestion. See: `supabase/migrations/20260109090000_public_leads_source_external_id_v1.sql`, `supabase/migrations/20260109090100_v_craigslist_ssv_v0.sql`.
+- Updated Craigslist SSV timestamp to use `coalesce(first_seen_at, created_at)` and made `first_seen_at` nullable to avoid “now” contamination on existing rows. See: `supabase/migrations/20260109100000_fix_first_seen_at_safe.sql`, `supabase/migrations/20260109100100_v_craigslist_ssv_v0_fix.sql`.
+- Moved Craigslist execution from Edge web fetch to queued tasks + local worker. See: `supabase/migrations/20260109120000_lead_hunter_craigslist_tasks_v1.sql`, `services/craigslist-hunter/worker.js`.
+- Verified Craigslist V0 end-to-end on cloud (discover ok, detail tasks created, leads inserted) and documented required env + failure evidence behavior. See: `docs/system-truth.md` (Craigslist V0 verified state).
+- Local dev: normalized OpenAI env lookup (`OPENAI_API_KEY` → `OPEN_AI_KEY` fallback) and added DB-only fallbacks for status/campaigns when OpenAI is down.
 

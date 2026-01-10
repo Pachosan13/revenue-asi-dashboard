@@ -1,5 +1,6 @@
 // app/backend/src/command-os/client.ts
 import OpenAI from "openai"
+import { getOpenAiEnvDebug, getOpenAiKey } from "@/app/api/_lib/openaiEnv"
 
 export const COMMAND_OS_VERSION = "v1"
 
@@ -134,13 +135,24 @@ FIN >>>
 // ✅ CAMBIO CLAVE: OpenAI "lazy" (no se instancia en import-time)
 // Esto evita que next build reviente al "collect page data"
 let _openai: OpenAI | null = null
+let _openaiEnvLogged = false
+
+function logOpenAiEnvOnceDevOnly() {
+  if (_openaiEnvLogged) return
+  _openaiEnvLogged = true
+  if (process.env.NODE_ENV === "production") return
+
+  // Never log full secrets.
+  console.log("OPENAI_ENV", getOpenAiEnvDebug())
+}
+
 function getOpenAI(): OpenAI {
   if (_openai) return _openai
 
-  // Support both env names (some envs use OPEN_API_KEY by mistake)
-  const key = process.env.OPENAI_API_KEY ?? process.env.OPEN_API_KEY
+  logOpenAiEnvOnceDevOnly()
+  const { key } = getOpenAiKey()
   if (!key) {
-    throw new Error("Missing credentials. Please set OPENAI_API_KEY (or OPEN_API_KEY) environment variable.")
+    throw new Error("Missing credentials. Please set OPENAI_API_KEY (or OPEN_AI_KEY / OPEN_API_KEY) environment variable.")
   }
 
   _openai = new OpenAI({ apiKey: key })
@@ -163,6 +175,40 @@ function norm(value: string): string {
 function tryRuleBasedCommandOs(input: { message: string; context?: any }): CommandOsResponse | null {
   const raw = input.message ?? ""
   const m = norm(raw)
+
+  // system.status (DB-only via router; no LLM required)
+  const isSystemStatus =
+    m === "system.status" ||
+    m === "system status" ||
+    m === "status del sistema" ||
+    m === "estado del sistema" ||
+    (m.includes("status") && m.includes("sistema")) ||
+    (m.includes("estado") && m.includes("sistema"))
+
+  if (isSystemStatus) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "system.status",
+      args: {},
+      explanation: "rule_based_match: system.status",
+      confidence: 1,
+    }
+  }
+
+  // “que campañas estan prendidas ahora?” => campaign.list { status:"active" }
+  const isCampaignsPrendidasAhora =
+    (m.includes("campan") || m.includes("campaign")) &&
+    (m.includes("prendid") || m.includes("activa") || m.includes("activas") || m.includes("encend"))
+
+  if (isCampaignsPrendidasAhora) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "campaign.list",
+      args: { status: "active", limit: 50 },
+      explanation: "rule_based_match: campaign.list active",
+      confidence: 1,
+    }
+  }
 
   // must mention enc24/encuentra24 for these shortcuts
   const mentionsEnc24 =
@@ -269,11 +315,56 @@ function tryRuleBasedCommandOs(input: { message: string; context?: any }): Comma
   return null
 }
 
+/**
+ * Craigslist V0 shortcuts (deterministic)
+ * - "prende craigslist miami fl" => craigslist.cto.start { city: "Miami, FL" }
+ * - "apaga craigslist miami fl" => craigslist.cto.stop { city: "Miami, FL" }
+ *
+ * City parsing is best-effort (no external geo mapping). If missing, router should return an error.
+ */
+function tryRuleBasedCraigslist(input: { message: string; context?: any }): CommandOsResponse | null {
+  const raw = input.message ?? ""
+  const m = norm(raw)
+
+  if (!m.includes("craigslist")) return null
+
+  const isStop =
+    m === "apaga craigslist" ||
+    m.startsWith("apaga craigslist ") ||
+    m.startsWith("apaga el craigslist") ||
+    m.startsWith("deten craigslist") ||
+    ((m.includes("apaga") || m.includes("deten") || m.includes("para")) && m.includes("craigslist"))
+
+  const isStart =
+    m === "prende craigslist" ||
+    m.startsWith("prende craigslist ") ||
+    m.startsWith("enciende craigslist") ||
+    (m.includes("prende") || m.includes("enciende")) && m.includes("craigslist")
+
+  if (!isStart && !isStop) return null
+
+  // Best-effort city extraction: everything after "craigslist" (preserve raw casing).
+  // UNRESOLVED: full US geo normalization (city->site mapping) is not in repo; caller may pass args.site explicitly.
+  const rawAfter = raw.toLowerCase().includes("craigslist")
+    ? raw.split(/craigslist/i)[1] ?? ""
+    : ""
+  const cityRaw = rawAfter.replace(/^(\\s+en\\s+)?/i, "").trim()
+  const city = cityRaw ? cityRaw.replace(/\s+/g, " ").trim() : null
+
+  return {
+    version: COMMAND_OS_VERSION,
+    intent: isStop ? "craigslist.cto.stop" : "craigslist.cto.start",
+    args: city ? { city } : {},
+    explanation: isStop ? "rule_based_match: craigslist stop" : "rule_based_match: craigslist start",
+    confidence: 1,
+  }
+}
+
 export async function callCommandOs(input: {
   message: string
   context?: any
 }): Promise<CommandOsResponse> {
-  const ruleBased = tryRuleBasedCommandOs(input)
+  const ruleBased = tryRuleBasedCommandOs(input) ?? tryRuleBasedCraigslist(input)
   if (ruleBased) {
     // auto-inject account_id desde context si existe
     const ctxAccountId =
@@ -285,16 +376,30 @@ export async function callCommandOs(input: {
     return ruleBased
   }
 
+  // If OpenAI is missing/misconfigured, keep Command OS usable.
+  const { key } = getOpenAiKey()
+  if (!key) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "system.status",
+      args: {},
+      explanation: "fallback_no_openai_key",
+      confidence: 1,
+    }
+  }
+
   const openai = getOpenAI()
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-5.1",
-    messages: [
-      {
-        role: "system",
-        content:
-          COMMAND_OS_PROMPT_V1 +
-          `
+  let completion: any
+  try {
+    completion = await openai.chat.completions.create({
+      model: "gpt-5.1",
+      messages: [
+        {
+          role: "system",
+          content:
+            COMMAND_OS_PROMPT_V1 +
+            `
 
 A partir de ahora SIEMPRE responde SOLO con un JSON válido con esta forma exacta:
 {
@@ -306,10 +411,19 @@ A partir de ahora SIEMPRE responde SOLO con un JSON válido con esta forma exact
 }
 No escribas nada fuera de ese JSON.
 `,
-      },
-      { role: "user", content: JSON.stringify(input) },
-    ],
-  })
+        },
+        { role: "user", content: JSON.stringify(input) },
+      ],
+    })
+  } catch (e: any) {
+    return {
+      version: COMMAND_OS_VERSION,
+      intent: "system.status",
+      args: {},
+      explanation: `fallback_openai_error:${String(e?.message ?? "unknown")}`,
+      confidence: 1,
+    }
+  }
 
   const raw = completion.choices[0].message?.content?.trim() || "{}"
 
