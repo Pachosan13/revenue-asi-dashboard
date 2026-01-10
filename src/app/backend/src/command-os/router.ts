@@ -899,32 +899,48 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
         // -------------------------
         // B) CAMPAIGN ON (full_funnel)
         // -------------------------
-        // We must not invent which campaign represents autos outbound.
-        // Attempt inference by key/name containing 'autos' (and city if present). Otherwise return candidates for confirmation.
-        const likeCity = city ? `%${city}%` : null
-        const { data: allCampaigns, error: cErr } = await supabase
-          .from("campaigns")
-          .select("id,name,campaign_key,is_active,status,type")
-          .eq("account_id", accountId)
-          .order("created_at", { ascending: false })
-          .limit(200)
+        // Canonical rule: ONLY campaign_key is trusted for autos outbound.
+        // - Must start with: autos_outbound_
+        // - Never activate multiple campaigns.
+        const AUTOS_OUTBOUND_PREFIX = "autos_outbound_"
+        const normKeyPart = (v: string) =>
+          v
+            .toString()
+            .trim()
+            .toLowerCase()
+            .normalize("NFKD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[^a-z0-9]+/g, "_")
+            .replace(/^_+|_+$/g, "")
 
-        if (cErr) {
-          return { ok: false, intent, args, data: { error: "Failed to load campaigns", details: cErr.message } }
+        const cityKey = city ? normKeyPart(city) : ""
+        const expectedKey = cityKey ? `${AUTOS_OUTBOUND_PREFIX}${cityKey}` : ""
+
+        // If city is provided, we require exact match to avoid accidental multi-activations.
+        let autosOutbound: any[] = []
+        if (expectedKey) {
+          const { data, error } = await supabase
+            .from("campaigns")
+            .select("id,name,campaign_key,is_active,status,type")
+            .eq("account_id", accountId)
+            .eq("campaign_key", expectedKey)
+            .limit(5)
+          if (error) return { ok: false, intent, args, data: { error: "Failed to load autos outbound campaign", details: error.message } }
+          autosOutbound = Array.isArray(data) ? data : []
+        } else {
+          const { data, error } = await supabase
+            .from("campaigns")
+            .select("id,name,campaign_key,is_active,status,type")
+            .eq("account_id", accountId)
+            .ilike("campaign_key", `${AUTOS_OUTBOUND_PREFIX}%`)
+            .order("created_at", { ascending: false })
+            .limit(50)
+          if (error) return { ok: false, intent, args, data: { error: "Failed to load autos outbound campaigns", details: error.message } }
+          autosOutbound = Array.isArray(data) ? data : []
         }
 
-        const campaigns = Array.isArray(allCampaigns) ? allCampaigns : []
-        const autosCandidates = campaigns.filter((c: any) => {
-          const key = String(c?.campaign_key ?? "").toLowerCase()
-          const name = String(c?.name ?? "").toLowerCase()
-          const looksAutos = key.includes("autos") || name.includes("autos")
-          if (!looksAutos) return false
-          if (!likeCity) return true
-          return key.includes(city!) || name.includes(city!)
-        })
-
-        if (autosCandidates.length === 1) {
-          const target = autosCandidates[0]
+        if (autosOutbound.length === 1) {
+          const target = autosOutbound[0]
           const { data: upd, error: updErr } = await supabase
             .from("campaigns")
             .update({ is_active: true, status: "active" })
@@ -933,12 +949,7 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
             .select("id,name,campaign_key,is_active,status,type")
             .maybeSingle()
           if (updErr) {
-            return {
-              ok: false,
-              intent,
-              args,
-              data: { error: "Failed to enable autos outbound campaign", details: updErr.message },
-            }
+            return { ok: false, intent, args, data: { error: "Failed to enable autos outbound campaign", details: updErr.message } }
           }
 
           return {
@@ -955,7 +966,22 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
           }
         }
 
-        const candidatesForConfirm = autosCandidates.length ? autosCandidates : campaigns.slice(0, 20)
+        if (autosOutbound.length === 0) {
+          return {
+            ok: true,
+            intent,
+            args,
+            data: {
+              program_on,
+              campaign_on: false,
+              next_steps: expectedKey
+                ? `needs_setup: create an autos outbound campaign with campaign_key='${expectedKey}'`
+                : `needs_setup: create exactly one autos outbound campaign with campaign_key starting '${AUTOS_OUTBOUND_PREFIX}'`,
+              leadgen: { routing_active_set: program_on === true, city, enqueue: leadgen_exec, enc24: enc24_exec, note: leadgen_note || null },
+              outbound_candidates: [],
+            },
+          }
+        }
 
         return {
           ok: true,
@@ -965,9 +991,9 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
             program_on,
             campaign_on: "needs_confirmation",
             next_steps:
-              "No puedo inferir con certeza cuál campaign representa autos outbound. Confirma cuál campaign activar (id/name/campaign_key).",
+              "Multiple autos outbound campaigns found. Keep exactly one per market/city, or confirm which one should be used.",
             leadgen: { routing_active_set: program_on === true, city, enqueue: leadgen_exec, enc24: enc24_exec, note: leadgen_note || null },
-            outbound_candidates: candidatesForConfirm.map((c: any) => ({
+            outbound_candidates: autosOutbound.map((c: any) => ({
               id: c.id,
               name: c.name ?? null,
               campaign_key: c.campaign_key ?? null,
@@ -1060,31 +1086,46 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
         }
 
         // -------------------------
-        // Campaign OFF (full_funnel): infer autos outbound campaign or request confirmation.
+        // Campaign OFF (full_funnel): canonical rule uses campaign_key only (autos_outbound_*)
         // -------------------------
-        const { data: allCampaigns, error: cErr } = await supabase
-          .from("campaigns")
-          .select("id,name,campaign_key,is_active,status,type")
-          .eq("account_id", accountId)
-          .order("created_at", { ascending: false })
-          .limit(200)
+        const AUTOS_OUTBOUND_PREFIX = "autos_outbound_"
+        const normKeyPart = (v: string) =>
+          v
+            .toString()
+            .trim()
+            .toLowerCase()
+            .normalize("NFKD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[^a-z0-9]+/g, "_")
+            .replace(/^_+|_+$/g, "")
 
-        if (cErr) {
-          return { ok: false, intent, args, data: { error: "Failed to load campaigns", details: cErr.message } }
+        const cityKey = city ? normKeyPart(city) : ""
+        const expectedKey = cityKey ? `${AUTOS_OUTBOUND_PREFIX}${cityKey}` : ""
+
+        let autosOutbound: any[] = []
+        if (expectedKey) {
+          const { data, error } = await supabase
+            .from("campaigns")
+            .select("id,name,campaign_key,is_active,status,type")
+            .eq("account_id", accountId)
+            .eq("campaign_key", expectedKey)
+            .limit(5)
+          if (error) return { ok: false, intent, args, data: { error: "Failed to load autos outbound campaign", details: error.message } }
+          autosOutbound = Array.isArray(data) ? data : []
+        } else {
+          const { data, error } = await supabase
+            .from("campaigns")
+            .select("id,name,campaign_key,is_active,status,type")
+            .eq("account_id", accountId)
+            .ilike("campaign_key", `${AUTOS_OUTBOUND_PREFIX}%`)
+            .order("created_at", { ascending: false })
+            .limit(50)
+          if (error) return { ok: false, intent, args, data: { error: "Failed to load autos outbound campaigns", details: error.message } }
+          autosOutbound = Array.isArray(data) ? data : []
         }
 
-        const campaigns = Array.isArray(allCampaigns) ? allCampaigns : []
-        const autosCandidates = campaigns.filter((c: any) => {
-          const key = String(c?.campaign_key ?? "").toLowerCase()
-          const name = String(c?.name ?? "").toLowerCase()
-          const looksAutos = key.includes("autos") || name.includes("autos")
-          if (!looksAutos) return false
-          if (!city) return true
-          return key.includes(city) || name.includes(city)
-        })
-
-        if (autosCandidates.length === 1) {
-          const target = autosCandidates[0]
+        if (autosOutbound.length === 1) {
+          const target = autosOutbound[0]
           const { data: upd, error: updErr } = await supabase
             .from("campaigns")
             .update({ is_active: false, status: "paused" })
@@ -1093,12 +1134,7 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
             .select("id,name,campaign_key,is_active,status,type")
             .maybeSingle()
           if (updErr) {
-            return {
-              ok: false,
-              intent,
-              args,
-              data: { error: "Failed to disable autos outbound campaign", details: updErr.message },
-            }
+            return { ok: false, intent, args, data: { error: "Failed to disable autos outbound campaign", details: updErr.message } }
           }
 
           return {
@@ -1115,7 +1151,23 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
           }
         }
 
-        const candidatesForConfirm = autosCandidates.length ? autosCandidates : campaigns.slice(0, 20)
+        if (autosOutbound.length === 0) {
+          return {
+            ok: true,
+            intent,
+            args,
+            data: {
+              program_on: false,
+              campaign_on: false,
+              next_steps: expectedKey
+                ? `needs_setup: create an autos outbound campaign with campaign_key='${expectedKey}'`
+                : `needs_setup: create exactly one autos outbound campaign with campaign_key starting '${AUTOS_OUTBOUND_PREFIX}'`,
+              leadgen: { routing_active_set: false, city, stop: leadgen_stop, enc24: enc24_stop },
+              outbound_candidates: [],
+            },
+          }
+        }
+
         return {
           ok: true,
           intent,
@@ -1124,9 +1176,9 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
             program_on: false,
             campaign_on: "needs_confirmation",
             next_steps:
-              "No puedo inferir con certeza cuál campaign representa autos outbound para apagar. Confirma cuál campaign pausar (id/name/campaign_key).",
+              "Multiple autos outbound campaigns found. Keep exactly one per market/city, or confirm which one should be used.",
             leadgen: { routing_active_set: false, city, stop: leadgen_stop, enc24: enc24_stop },
-            outbound_candidates: candidatesForConfirm.map((c: any) => ({
+            outbound_candidates: autosOutbound.map((c: any) => ({
               id: c.id,
               name: c.name ?? null,
               campaign_key: c.campaign_key ?? null,
