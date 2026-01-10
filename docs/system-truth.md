@@ -222,5 +222,6 @@ select lead_hunter.enqueue_craigslist_discover_v1('<account_id>'::uuid, 'miami')
 - Updated Craigslist SSV timestamp to use `coalesce(first_seen_at, created_at)` and made `first_seen_at` nullable to avoid “now” contamination on existing rows. See: `supabase/migrations/20260109100000_fix_first_seen_at_safe.sql`, `supabase/migrations/20260109100100_v_craigslist_ssv_v0_fix.sql`.
 - Moved Craigslist execution from Edge web fetch to queued tasks + local worker. See: `supabase/migrations/20260109120000_lead_hunter_craigslist_tasks_v1.sql`, `services/craigslist-hunter/worker.js`.
 - Verified Craigslist V0 end-to-end on cloud (discover ok, detail tasks created, leads inserted) and documented required env + failure evidence behavior. See: `docs/system-truth.md` (Craigslist V0 verified state).
-- Local dev: normalized OpenAI env lookup (`OPENAI_API_KEY` → `OPEN_AI_KEY` fallback) and added DB-only fallbacks for status/campaigns when OpenAI is down.
+- Local dev: normalized OpenAI env lookup (`OPENAI_API_KEY` → `OPEN_AI_KEY` → legacy `OPEN_API_KEY`) and added a debug endpoint (`/api/debug/openai-env`) that returns only existence/len/prefix (no secrets).
+- Campaigns UI: added a demo “Craigslist Miami” row that reflects `lead_hunter.craigslist_tasks_v1` state and can start/stop via Command OS (`prende/apaga craigslist miami`).
 
