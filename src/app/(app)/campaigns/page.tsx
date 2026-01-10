@@ -45,24 +45,20 @@ type CampaignKPI = {
   last_touch_at: string | null
 }
 
+type LeadGenProgramRow = {
+  key: string
+  name: string
+  enabled: boolean
+  last_started_at: string | null
+}
+
 type CampaignRow = {
   id: string
   name: string
   type: CampaignType
-  status: CampaignStatus
-  campaign_status: string
-  is_running: boolean
+  is_active: boolean
   created_at: string
   kpis: CampaignKPI | null
-}
-
-type RuntimeRow = {
-  campaign_id: string | null
-  name: string | null
-  type: string | null
-  campaign_status: string | null
-  is_running: boolean | null
-  last_touch_run_at: string | null
 }
 
 type LeadgenRouting = {
@@ -83,12 +79,6 @@ const typeCopy: Record<CampaignType, string> = {
   whatsapp: "WhatsApp",
   sms: "SMS",
   email: "Email",
-}
-
-const statusMap: Record<string, CampaignStatus> = {
-  active: "live",
-  paused: "paused",
-  draft: "draft",
 }
 
 const statusStyles: Record<CampaignStatus, string> = {
@@ -127,6 +117,7 @@ export default function CampaignsPage() {
   const [type, setType] = useState<CampaignType | "all">("all")
 
   const [loading, setLoading] = useState(true)
+  const [programs, setPrograms] = useState<LeadGenProgramRow[]>([])
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([])
   const [runtimeError, setRuntimeError] = useState<string | null>(null)
   const [accountId, setAccountId] = useState<string | null>(null)
@@ -138,6 +129,7 @@ export default function CampaignsPage() {
   const loadCampaigns = useCallback(async () => {
     if (!supabase) {
       setCampaigns([])
+      setPrograms([])
       setRuntimeError("Missing Supabase client configuration")
       setLoading(false)
       return
@@ -171,35 +163,47 @@ export default function CampaignsPage() {
     const accountId = membership?.account_id ? String(membership.account_id) : null
     if (!accountId) {
       setCampaigns([])
+      setPrograms([])
       setRuntimeError("No account membership")
       setLoading(false)
       return
     }
     setAccountId(accountId)
 
-    const [{ data: runtime, error: rErr }, { data: kpis }, { data: clTasks }, { data: orgSettings }] = await Promise.all([
-      supabase
-        .from("v_campaign_runtime_status_v1")
-        .select("campaign_id,name,type,campaign_status,is_running,last_touch_run_at")
-        .eq("account_id", accountId)
-        .order("is_running", { ascending: false })
-        .order("last_touch_run_at", { ascending: false })
-        .limit(200),
-      supabase.from("campaign_funnel_overview").select("*"),
-      supabase
-        .schema("lead_hunter")
-        .from("craigslist_tasks_v1")
-        .select("status,task_type,created_at")
-        .eq("account_id", accountId)
-        .eq("city", "miami")
-        .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString())
-        .limit(2000),
-      supabase.from("org_settings").select("leadgen_routing").limit(1).maybeSingle(),
-    ])
+    const [{ data: outbound, error: oErr }, { data: kpis }, { data: orgSettings }, { data: lastDiscover, error: ldErr }] =
+      await Promise.all([
+        supabase
+          .from("campaigns")
+          .select("id,name,type,is_active,created_at")
+          .eq("account_id", accountId)
+          .order("created_at", { ascending: false })
+          .limit(200),
+        supabase.from("campaign_funnel_overview").select("*"),
+        supabase.from("org_settings").select("leadgen_routing").limit(1).maybeSingle(),
+        supabase
+          .schema("lead_hunter")
+          .from("craigslist_tasks_v1")
+          .select("status,last_error,created_at,updated_at")
+          .eq("account_id", accountId)
+          .eq("city", "miami")
+          .eq("task_type", "discover")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      ])
 
-    if (rErr) {
+    if (oErr) {
       setCampaigns([])
-      setRuntimeError(`Runtime view query failed: ${rErr.message}`)
+      setPrograms([])
+      setRuntimeError(`Failed to load campaigns: ${oErr.message}`)
+      setLoading(false)
+      return
+    }
+
+    if (ldErr) {
+      setCampaigns([])
+      setPrograms([])
+      setRuntimeError(`Failed to load LeadGen program state: ${ldErr.message}`)
       setLoading(false)
       return
     }
@@ -209,13 +213,7 @@ export default function CampaignsPage() {
       kpiMap.set(row.campaign_id, row)
     })
 
-    const mapped = (runtime ?? []).map((row: RuntimeRow) => {
-      const campaign_status = String(row?.campaign_status ?? "").toLowerCase().trim()
-      const is_running = Boolean(row?.is_running)
-
-      // “Live” is enabled campaigns (campaign_status='active'), not necessarily running.
-      const mappedStatus = statusMap[campaign_status] ?? "draft"
-
+    const mappedOutbound = (outbound ?? []).map((row: any) => {
       const rawType = String(row?.type ?? "outbound").toLowerCase().trim()
       const mappedType =
         rawType === "outbound" ||
@@ -228,44 +226,36 @@ export default function CampaignsPage() {
           : ("outbound" as CampaignType)
 
       return {
-        id: String(row.campaign_id ?? ""),
+        id: String(row.id),
         name: row.name ?? "Untitled",
         type: mappedType,
-        status: mappedStatus,
-        campaign_status,
-        is_running,
-        // view is our runtime truth; use last_touch_run_at for activity sorting
-        created_at: row.last_touch_run_at ?? "",
-        kpis: row.campaign_id ? kpiMap.get(String(row.campaign_id)) ?? null : null,
+        is_active: Boolean(row.is_active),
+        created_at: row.created_at ?? "",
+        kpis: row.id ? kpiMap.get(String(row.id)) ?? null : null,
       } as CampaignRow
     })
-
-    const clRows = clTasks ?? []
-    const clQueuedOrClaimed = clRows.some((t: any) => t?.status === "queued" || t?.status === "claimed")
-    const clClaimed = clRows.some((t: any) => t?.status === "claimed")
-    const clLast = clRows
-      .map((t: any) => (typeof t?.created_at === "string" ? t.created_at : null))
-      .filter(Boolean)
-      .sort()
-      .slice(-1)[0] as string | undefined
 
     const routing = (orgSettings as any)?.leadgen_routing as LeadgenRouting | null | undefined
     const radius = Number(routing?.radius_miles)
     const radiusMi = Number.isFinite(radius) && radius > 0 ? radius : 10
-    const name = `Craigslist · Miami · ${radiusMi}mi · LeadGen`
+    const programName = `Craigslist · Miami · ${radiusMi}mi · LeadGen`
 
-    const craigslistMiami: CampaignRow = {
-      id: "craigslist:miami",
-      name,
-      type: "outbound",
-      status: clQueuedOrClaimed ? "live" : "paused",
-      campaign_status: clQueuedOrClaimed ? "active" : "paused",
-      is_running: Boolean(clClaimed),
-      created_at: clLast ?? "",
-      kpis: null,
-    }
+    const isStoppedByUser =
+      String((lastDiscover as any)?.last_error ?? "").trim() === "stopped_by_user" &&
+      String((lastDiscover as any)?.status ?? "").trim() === "failed"
 
-    setCampaigns([craigslistMiami, ...mapped])
+    const enabled = Boolean(lastDiscover) && !isStoppedByUser
+    const lastStartedAt = typeof (lastDiscover as any)?.created_at === "string" ? (lastDiscover as any).created_at : null
+
+    setPrograms([
+      {
+        key: "craigslist:miami",
+        name: programName,
+        enabled,
+        last_started_at: lastStartedAt,
+      },
+    ])
+    setCampaigns(mappedOutbound)
     setLoading(false)
   }, [supabase])
 
@@ -295,6 +285,33 @@ export default function CampaignsPage() {
     }
   }, [loadCampaigns])
 
+  const toggleOutbound = useCallback(
+    async (campaignId: string, desired: boolean) => {
+      if (!supabase || !accountId) return
+      const nextStatus = desired ? "active" : "paused"
+      const { data, error } = await supabase
+        .from("campaigns")
+        .update({ is_active: desired, status: nextStatus })
+        .eq("id", campaignId)
+        .eq("account_id", accountId)
+        .select("id,is_active,status")
+        .maybeSingle()
+
+      if (error) {
+        console.warn("campaign.toggle failed", { campaign_id: campaignId, error: error.message })
+      } else if (data && Boolean((data as any).is_active) !== desired) {
+        console.warn("campaign.toggle inconsistent response; rendering from is_active", {
+          campaign_id: campaignId,
+          desired_is_active: desired,
+          got: { is_active: (data as any).is_active, status: (data as any).status },
+        })
+      }
+
+      await loadCampaigns()
+    },
+    [supabase, accountId, loadCampaigns],
+  )
+
   useEffect(() => {
     loadCampaigns()
   }, [loadCampaigns])
@@ -306,7 +323,8 @@ export default function CampaignsPage() {
   const filtered = useMemo(() => {
     return campaigns.filter((c) => {
       const matchesQuery = !query || c.name.toLowerCase().includes(query.toLowerCase())
-      const matchesStatus = status === "all" || c.status === status
+      const derivedStatus: CampaignStatus = c.is_active ? "live" : "paused"
+      const matchesStatus = status === "all" || derivedStatus === status
       const matchesType = type === "all" || c.type === type
       return matchesQuery && matchesStatus && matchesType
     })
@@ -317,8 +335,8 @@ export default function CampaignsPage() {
   // -------------------------------
 
   const summary = useMemo(() => {
-    const live = campaigns.filter((c) => c.campaign_status === "active").length
-    const running = campaigns.filter((c) => c.is_running === true).length
+    const live = campaigns.filter((c) => c.is_active === true).length
+    const running = live
     const avgReply =
       campaigns.length > 0
         ? (
@@ -347,13 +365,9 @@ export default function CampaignsPage() {
       {/* HEADER */}
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-xs uppercase tracking-[0.16em] text-white/40">
-            Outbound Command Center
-          </p>
-          <h1 className="text-3xl font-semibold text-white">Campaigns</h1>
-          <p className="text-sm text-white/60">
-            Control throughput, copy, errors & funnel health in real time.
-          </p>
+          <p className="text-xs uppercase tracking-[0.16em] text-white/40">Command Center</p>
+          <h1 className="text-3xl font-semibold text-white">Programs &amp; Campaigns</h1>
+          <p className="text-sm text-white/60">Trustworthy controls for LeadGen sources and outbound cadences.</p>
         </div>
 
         {/* ⭐️ RESTORED BUTTON — EXACT SPOT WHERE IT BELONGS */}
@@ -370,7 +384,7 @@ export default function CampaignsPage() {
         <StatCard
           label="Live"
           value={`${summary.live} active`}
-          helper="Enabled campaigns"
+          helper="Enabled outbound campaigns"
           delta={`${summary.running} running`}
         />
 
@@ -389,11 +403,56 @@ export default function CampaignsPage() {
         />
       </div>
 
-      {/* Filters */}
+      {/* LeadGen Programs */}
+      <Card>
+        <CardHeader title="LeadGen Programs" description="Lead generation sources (scraping + ingestion). Not outbound cadences." />
+        <CardContent className="space-y-4">
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableHeaderCell>Program</TableHeaderCell>
+                <TableHeaderCell>Type</TableHeaderCell>
+                <TableHeaderCell>Status</TableHeaderCell>
+                <TableHeaderCell className="text-right">Last start</TableHeaderCell>
+                <TableHeaderCell className="text-right">Actions</TableHeaderCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {programs.map((p) => (
+                <TableRow key={p.key} className="transition hover:bg-white/5">
+                  <TableCell className="text-white font-semibold">{p.name}</TableCell>
+                  <TableCell>
+                    <Badge variant="outline">LeadGen Program</Badge>
+                  </TableCell>
+                  <TableCell>
+                    <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs ${p.enabled ? statusStyles.live : statusStyles.paused}`}>
+                      <span className="h-2 w-2 rounded-full bg-current" />
+                      {p.enabled ? "Enabled" : "Disabled"}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-right text-white/60">{p.last_started_at ? new Date(p.last_started_at).toLocaleString() : "--"}</TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex justify-end gap-2">
+                      <Button variant="secondary" size="sm" onClick={() => startCraigslistMiami()}>
+                        Start
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => stopCraigslistMiami()}>
+                        Stop
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      {/* Outbound Campaigns */}
       <Card>
         <CardHeader
-          title="Programs"
-          description="Filter by status, type, or search"
+          title="Outbound Campaigns"
+          description="Outbound campaigns live in campaigns table. is_active is the only source of truth."
           action={
             <div className="flex items-center gap-2 text-sm text-white/60">
               <Filter size={16} />
@@ -406,15 +465,10 @@ export default function CampaignsPage() {
           {runtimeError ? (
             <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 flex items-center justify-between gap-3">
               <div>
-                <div className="font-semibold">Runtime data unavailable</div>
+                <div className="font-semibold">Data unavailable</div>
                 <div className="text-rose-200/80">{runtimeError}</div>
               </div>
-              <Button
-                variant="secondary"
-                size="sm"
-                className="gap-2"
-                onClick={() => loadCampaigns()}
-              >
+              <Button variant="secondary" size="sm" className="gap-2" onClick={() => loadCampaigns()}>
                 <RefreshCw size={14} /> Retry
               </Button>
             </div>
@@ -424,12 +478,7 @@ export default function CampaignsPage() {
           <div className="grid gap-3 md:grid-cols-[1.2fr,1fr,1fr]">
             <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 shadow-inner">
               <Search size={16} className="text-white/40" />
-              <Input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search campaigns"
-                className="border-none bg-transparent px-0 text-sm"
-              />
+              <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search campaigns" className="border-none bg-transparent px-0 text-sm" />
             </div>
 
             <Select value={type} onChange={(e) => setType(e.target.value as any)}>
@@ -445,11 +494,9 @@ export default function CampaignsPage() {
               <option value="all">All statuses</option>
               <option value="live">Live</option>
               <option value="paused">Paused</option>
-              <option value="draft">Draft</option>
             </Select>
           </div>
 
-          {/* Table */}
           <Table>
             <TableHead>
               <TableRow>
@@ -464,121 +511,63 @@ export default function CampaignsPage() {
             </TableHead>
 
             <TableBody>
-
               {filtered.map((c) => {
                 const k = c.kpis
+                const derivedStatus: CampaignStatus = c.is_active ? "live" : "paused"
 
                 return (
-                  <TableRow
-                    key={c.id}
-                    className="cursor-pointer transition hover:bg-white/5"
-                    onClick={() => {
-                      if (c.id.startsWith("craigslist:")) return
-                      router.push(`/campaigns/${c.id}`)
-                    }}
-                  >
-                    {/* Name + type + status */}
+                  <TableRow key={c.id} className="cursor-pointer transition hover:bg-white/5" onClick={() => router.push(`/campaigns/${c.id}`)}>
                     <TableCell>
                       <div className="space-y-1">
                         <p className="font-semibold text-white flex items-center gap-2">
                           {c.name}
-                          {!c.id.startsWith("craigslist:") ? (
-                            <Link
-                              href={`/leads?campaign_id=${c.id}`}
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-emerald-300 hover:text-emerald-200 inline-flex items-center gap-1 text-xs"
-                            >
-                              Inbox <ArrowUpRight size={12} />
-                            </Link>
-                          ) : null}
+                          <Link href={`/leads?campaign_id=${c.id}`} onClick={(e) => e.stopPropagation()} className="text-emerald-300 hover:text-emerald-200 inline-flex items-center gap-1 text-xs">
+                            Inbox <ArrowUpRight size={12} />
+                          </Link>
                         </p>
                         <div className="flex items-center gap-2">
-                          <Badge variant="outline" className="capitalize">
-                            {typeCopy[c.type]}
-                          </Badge>
-
-                          <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs ${statusStyles[c.status]}`}>
+                          <Badge variant="outline">Outbound Campaign</Badge>
+                          <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs ${statusStyles[derivedStatus]}`}>
                             <span className="h-2 w-2 rounded-full bg-current" />
-                            {c.status}
+                            {derivedStatus}
                           </span>
-
-                          {c.is_running ? (
-                            <Badge variant="success" className="text-xs">
-                              Running
-                            </Badge>
-                          ) : null}
                         </div>
                       </div>
                     </TableCell>
 
-                    {/* Funnel summary */}
                     <TableCell className="text-white/80">
                       {k ? (
                         <div className="space-y-1 text-sm">
                           <p>Attempting: {k.leads_attempting}</p>
                           <p>Engaged: {k.leads_engaged}</p>
                           <p>Booked: {k.leads_booked}</p>
-                          <p className="text-xs text-white/40">
-                            Show {k.leads_booked_show} / No-show {k.leads_booked_no_show}
-                          </p>
+                          <p className="text-xs text-white/40">Show {k.leads_booked_show} / No-show {k.leads_booked_no_show}</p>
                         </div>
                       ) : (
                         <span className="text-white/40">No data</span>
                       )}
                     </TableCell>
 
-                    {/* Reply rate */}
-                    <TableCell className={`text-right text-sm font-semibold ${colorizeRate(k?.reply_rate ?? 0)}`}>
-                      {pct(k?.reply_rate)}
-                    </TableCell>
+                    <TableCell className={`text-right text-sm font-semibold ${colorizeRate(k?.reply_rate ?? 0)}`}>{pct(k?.reply_rate)}</TableCell>
+                    <TableCell className="text-right text-rose-300">{pct(k?.error_rate)}</TableCell>
+                    <TableCell className="text-right text-white/70">{k?.total_touches ?? 0}</TableCell>
+                    <TableCell className="text-right text-white/50">{k?.last_touch_at ? new Date(k.last_touch_at).toLocaleString() : "--"}</TableCell>
 
-                    {/* Error rate */}
-                    <TableCell className="text-right text-rose-300">
-                      {pct(k?.error_rate)}
-                    </TableCell>
-
-                    {/* Total touches */}
-                    <TableCell className="text-right text-white/70">
-                      {k?.total_touches ?? 0}
-                    </TableCell>
-
-                    {/* Last touch */}
-                    <TableCell className="text-right text-white/50">
-                      {k?.last_touch_at ? new Date(k.last_touch_at).toLocaleString() : "--"}
-                    </TableCell>
-
-                    {/* Actions */}
                     <TableCell className="text-right">
-                      {c.id === "craigslist:miami" ? (
-                        <div className="flex justify-end gap-2">
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              startCraigslistMiami()
-                            }}
-                          >
-                            Start
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              stopCraigslistMiami()
-                            }}
-                          >
-                            Stop
-                          </Button>
-                        </div>
-                      ) : null}
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          toggleOutbound(c.id, !c.is_active)
+                        }}
+                      >
+                        Toggle
+                      </Button>
                     </TableCell>
-
                   </TableRow>
                 )
               })}
-
             </TableBody>
           </Table>
         </CardContent>
