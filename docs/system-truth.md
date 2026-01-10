@@ -116,7 +116,43 @@ Leads UI and Command OS must use the same DB truth:
 - Lead enrichment: `public.lead_enriched` (view; defined in `supabase/migrations/20251231182100_lead_enriched_view_v1.sql`)
 - Multichannel aggregates: `public.multichannel_lead_signals` (view; defined in `supabase/migrations/20251231170000_public_ui_support_v1.sql`)
 - Campaign/enrichment join: `public.v_lead_with_enrichment_and_campaign_v1` (view; defined in `supabase/migrations/20251231170000_public_ui_support_v1.sql`)
-- Next-action / priority: `public.lead_next_action_view_v5` (**UNRESOLVED** definition in this repo; the view is referenced by code but no migration defines it here)
+- Next-action / priority: `public.lead_next_action_view_v5` (versioned; see Canonical Lead Next Action View section)
+
+## Canonical Lead Next Action View
+
+- **View**: `public.lead_next_action_view_v5`
+- **Versioned in**: `supabase/migrations/20260110220000_lead_next_action_view_v5.sql`
+- **Fields (minimum contract)**:
+  - `lead_id`
+  - `campaign_id`
+  - `lead_state`
+  - `priority_score`
+  - `next_action`
+  - `next_action_at`
+- **Compatibility fields (used by existing code paths)**:
+  - `recommended_action` (alias of `next_action`)
+  - `recommended_delay_minutes`
+  - `recommended_channel`
+  - `effective_channel`
+
+### Verification SQL (no secrets)
+
+-- view exists
+select 1
+from information_schema.views
+where table_schema='public'
+  and table_name='lead_next_action_view_v5';
+
+-- sample
+select *
+from public.lead_next_action_view_v5
+limit 5;
+
+-- campaign mismatches should be 0
+select count(*)
+from public.campaigns
+where (is_active = true and status <> 'active')
+   or (is_active = false and status = 'active');
 
 ## Executable Lead Requirements (minimum)
 
