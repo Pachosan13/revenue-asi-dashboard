@@ -1928,25 +1928,39 @@ export async function handleCommandOsIntent(cmd: CommandOsResponse): Promise<Com
           finalCampaignId = campaign.id as string
         }
 
-        // Runtime contract: campaigns are enabled/disabled via campaigns.status, not campaigns.is_active.
-        // Quick check:
-        //   rg "from\\(\"campaigns\"\\).*\\.eq\\(\"status\",\\s*\"active\"\\)" -n supabase/functions touch-orchestrator*
         const nextStatus = isActive ? "active" : "paused"
 
         const supabase = getSupabaseAdmin()
-        const { data, error } = await supabase
+        const { data: updated, error: updErr } = await supabase
           .from("campaigns")
-          .update({ status: nextStatus })
+          .update({ status: nextStatus, is_active: isActive })
           .eq("id", finalCampaignId)
           .eq("account_id", accountId)
           .select()
           .single()
 
-        if (error) {
-          return { ok: false, intent, args, data: { error: error.message } }
+        if (updErr) {
+          return { ok: false, intent, args, data: { error: updErr.message } }
         }
 
-        return { ok: true, intent, args, data: { message: `Campaña ${isActive ? "activada" : "desactivada"}`, campaign: data } }
+        // Re-read to ensure we return the DB truth.
+        const { data: reread, error: rrErr } = await supabase
+          .from("campaigns")
+          .select()
+          .eq("id", finalCampaignId)
+          .eq("account_id", accountId)
+          .single()
+
+        if (rrErr) {
+          return { ok: false, intent, args, data: { error: rrErr.message } }
+        }
+
+        return {
+          ok: true,
+          intent,
+          args,
+          data: { message: `Campaña ${isActive ? "activada" : "desactivada"}`, campaign: reread ?? updated },
+        }
       }
 
       case "campaign.metrics": {
