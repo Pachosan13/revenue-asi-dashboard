@@ -179,7 +179,7 @@ export default function CampaignsPage() {
           .eq("account_id", accountId)
           .order("created_at", { ascending: false })
           .limit(200),
-        supabase.from("campaign_funnel_overview").select("*"),
+      supabase.from("campaign_funnel_overview").select("*"),
         supabase.from("org_settings").select("leadgen_routing").limit(1).maybeSingle(),
         supabase
           .schema("lead_hunter")
@@ -239,7 +239,8 @@ export default function CampaignsPage() {
     const routing = (orgSettings as any)?.leadgen_routing as LeadgenRouting | null | undefined
     const radius = Number(routing?.radius_miles)
     const radiusMi = Number.isFinite(radius) && radius > 0 ? radius : 10
-    const programName = `Craigslist · Miami · ${radiusMi}mi · LeadGen`
+    const city = String(routing?.city_fallback ?? "miami").trim().toLowerCase() || "miami"
+    const programName = `Craigslist · ${city.charAt(0).toUpperCase() + city.slice(1)} · ${radiusMi}mi · LeadGen`
 
     const clRows = Array.isArray(clRecent) ? clRecent : []
     const enabled = clRows.some((t: any) => t?.status === "queued" || t?.status === "claimed")
@@ -247,7 +248,7 @@ export default function CampaignsPage() {
 
     setPrograms([
       {
-        key: "craigslist:miami",
+        key: `craigslist:${city}:${radiusMi}mi`,
         name: programName,
         enabled,
         last_started_at: lastStartedAt,
@@ -421,7 +422,11 @@ export default function CampaignsPage() {
             <TableBody>
               {programs.map((p) => (
                 <TableRow key={p.key} className="transition hover:bg-white/5">
-                  <TableCell className="text-white font-semibold">{p.name}</TableCell>
+                  <TableCell className="text-white font-semibold">
+                    <Link href={`/programs/${encodeURIComponent(p.key)}`} className="hover:underline">
+                      {p.name}
+                    </Link>
+                  </TableCell>
                   <TableCell>
                     <Badge variant="outline">LeadGen Program</Badge>
                   </TableCell>
