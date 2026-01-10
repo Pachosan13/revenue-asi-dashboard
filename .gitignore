@@ -45,6 +45,9 @@ yarn-error.log*
 .env
 .env.*.local
 
+# craigslist worker artifacts (do not commit)
+services/**/.cl-user-data/
+
 # local voice test artifacts (do not commit)
 *.wav
 *.m4a
