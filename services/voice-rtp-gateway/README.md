@@ -1,27 +1,47 @@
 # revenue-asi-voice-gateway (Fly.io)
 
-WS gateway bridging **Telnyx Call Control Streaming** ↔ **OpenAI Realtime**.
+WS gateway bridging **Twilio Media Streams** (primary) / **Telnyx Call Control Streaming** (fallback) ↔ **OpenAI Realtime**.
 
 ## Endpoints
 
 - `GET /healthz` → `200 ok`
+- `WS /twilio`
+  - No token required.
 - `WS /telnyx?token=VOICE_GATEWAY_TOKEN`
   - If token missing/wrong: closes with code **1008**.
 
 ## Env vars
 
-- `VOICE_GATEWAY_TOKEN` (**required**): shared token required in `?token=...`.
+- `VOICE_GATEWAY_TOKEN` (required for `/telnyx`): shared token required in `?token=...`.
+- `VOICE_CARRIER_PRIMARY` (optional): `"twilio" | "telnyx"` (default: `"twilio"`).
 - `OPENAI_API_KEY` (**required**): OpenAI key for Realtime WS.
 - `OPENAI_REALTIME_URL` (optional): override OpenAI realtime WS URL.
 - `OPENAI_REALTIME_MODEL` (optional): model used when `OPENAI_REALTIME_URL` not set.
 - `SUPABASE_VOICE_HANDOFF_URL` (optional): Edge endpoint URL to receive HOT handoff.
 - `SUPABASE_VOICE_HANDOFF_TOKEN` (optional): bearer token for the handoff endpoint (if required).
 
+## Twilio
+
+### WS endpoint
+
+- `WS /twilio` (no token)
+
+### TwiML example
+
+```xml
+<Response>
+  <Connect>
+    <Stream url="wss://revenue-asi-voice-gateway.fly.dev/twilio"/>
+  </Connect>
+</Response>
+```
+
 ## Run locally
 
 ```bash
 cd services/voice-rtp-gateway
 export VOICE_GATEWAY_TOKEN="devtoken"
+export VOICE_CARRIER_PRIMARY="twilio"
 export OPENAI_API_KEY="..."
 npm install
 npm run dev

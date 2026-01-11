@@ -6,6 +6,8 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 8080;
 const VOICE_GATEWAY_TOKEN = String(process.env.VOICE_GATEWAY_TOKEN ?? "").trim();
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY ?? "").trim();
 const VOICE_TEST_MODE = String(process.env.VOICE_TEST_MODE ?? "").trim() === "1" || String(process.env.VOICE_TEST_MODE ?? "").trim().toLowerCase() === "true";
+const VOICE_CARRIER_PRIMARY_RAW = String(process.env.VOICE_CARRIER_PRIMARY ?? "twilio").trim().toLowerCase();
+const VOICE_CARRIER_PRIMARY = (VOICE_CARRIER_PRIMARY_RAW === "telnyx" || VOICE_CARRIER_PRIMARY_RAW === "twilio") ? VOICE_CARRIER_PRIMARY_RAW : "twilio";
 
 // OpenAI Realtime WS
 const OPENAI_REALTIME_MODEL = String(process.env.OPENAI_REALTIME_MODEL ?? "gpt-4o-realtime-preview").trim();
@@ -422,16 +424,137 @@ async function playDeterministicLine(session, text) {
       return;
     }
     try {
-      session.telnyx.ws.send(JSON.stringify({ event: "media", media: { payload: frame } }));
+      sendCarrierMedia(session, frame);
     } catch {}
   }, 20);
+}
+
+function sendCarrierMedia(session, frameB64) {
+  if (session?.twilio?.ws && session.twilio.streamSid) {
+    session.twilio.ws.send(JSON.stringify({ event: "media", streamSid: session.twilio.streamSid, media: { payload: frameB64 } }));
+    return;
+  }
+  if (session?.telnyx?.ws) {
+    session.telnyx.ws.send(JSON.stringify({ event: "media", media: { payload: frameB64 } }));
+  }
 }
 
 // ──────────────────────────────────────────────────────────────
 // Session + state machine
 // ──────────────────────────────────────────────────────────────
 const sessions = new Map(); // stream_id -> session
+const twilioSessions = new Map(); // streamSid -> session
 const testSessions = new Map(); // session_id -> { session_id, stage, source, qual, testMock, emittedAvailability, busy }
+
+function makeBaseSession() {
+  return {
+    session_id: crypto.randomUUID(),
+    stream_id: null,
+    call_control_id: null,
+    client_state: null,
+
+    telnyx: null,
+    twilio: null,
+    openai: null,
+
+    // behavior state
+    source: "encuentra24",
+    stage: "greet",
+    stageRepeats: 0,
+    qual: { available: null, urgent: null },
+
+    speaking: false,
+    lastSpeakAt: 0,
+    speaking_until: 0,
+    inSpeech: false,
+    speechStartAt: 0,
+    lastVadAt: 0,
+    _lastVadIgnoredAt: 0,
+    dropAudioUntil: 0,
+    lastUserTurnAt: 0,
+    lastCancelAt: 0,
+    lastBargeInAt: 0,
+    rmsAboveSince: 0,
+
+    textBuf: "",
+    _lastUserText: "",
+    _lastBotPrompt: "",
+    _pendingSpeak: null,
+    _pendingQueue: null,
+  };
+}
+
+function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr }) {
+  // aggressive barge-in on inbound track (normalized RMS + cooldown)
+  const _enc = String(enc || "PCMU").toUpperCase();
+  const _sr = Number(sr || 8000);
+
+  let rms = 0;
+  try {
+    if (_enc === "L16") {
+      const be = Buffer.from(String(payloadB64), "base64");
+      const le = pcm16beToPcm16le(be);
+      rms = pcm16leRms(le);
+    } else {
+      const mulaw = Buffer.from(String(payloadB64), "base64");
+      const pcm16_8k = mulawToPcm16LEBytes(mulaw);
+      rms = pcm16leRms(pcm16_8k);
+    }
+  } catch {}
+
+  const rmsNorm = rms / 32768;
+  const now = nowMs();
+  const speakingRecently = sess.speaking && (now - sess.lastSpeakAt < SPEAKING_RECENT_MS);
+  const sinceLastCancelMs = sess.lastCancelAt ? (now - sess.lastCancelAt) : null;
+  const debounced = sess.lastBargeInAt && (now - sess.lastBargeInAt < BARGE_IN_DEBOUNCE_MS);
+
+  // Sustain requirement: RMS must be above threshold for a short window to avoid micro-spikes.
+  if (isInbound && speakingRecently && rmsNorm >= BARGE_IN_RMS) {
+    if (!sess.rmsAboveSince) sess.rmsAboveSince = now;
+  } else {
+    sess.rmsAboveSince = 0;
+  }
+
+  const sustainedOk = sess.rmsAboveSince && (now - sess.rmsAboveSince >= BARGE_IN_SUSTAIN_MS);
+
+  if (
+    isInbound &&
+    speakingRecently &&
+    sustainedOk &&
+    !debounced &&
+    (!sinceLastCancelMs || sinceLastCancelMs >= MIN_CANCEL_INTERVAL_MS)
+  ) {
+    sess.lastBargeInAt = now;
+    jlog({ event: "BARGE_IN_TRIGGER", reason: "rms", rms: rmsNorm, sinceLastCancelMs });
+    try { sess.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
+    sess.lastCancelAt = now;
+    jlog({ event: "AI_CANCEL_SENT" });
+    stopOutboundPlayback(sess);
+    sess.speaking = false;
+    sess.dropAudioUntil = now + DROP_AUDIO_MS;
+    jlog({ event: "OUTBOUND_AUDIO_DROPPED", bufferFrames: 0, approxMs: DROP_AUDIO_MS });
+    sess.rmsAboveSince = 0;
+  }
+
+  // Send audio to OpenAI
+  if (sess.openai?.ws?.readyState === WebSocket.OPEN) {
+    let pcm16le;
+    if (_enc === "L16") {
+      const be = Buffer.from(String(payloadB64), "base64");
+      const le = pcm16beToPcm16le(be);
+      pcm16le = _sr === 8000 ? pcm16leUpsample2x(le) : le;
+    } else {
+      const mulaw = Buffer.from(String(payloadB64), "base64");
+      const pcm16_8k = mulawToPcm16LEBytes(mulaw);
+      pcm16le = pcm16leUpsample2x(pcm16_8k);
+    }
+
+    sess.openai.ws.send(JSON.stringify({
+      type: "input_audio_buffer.append",
+      audio: Buffer.from(pcm16le).toString("base64"),
+    }));
+  }
+}
 
 function normalizeText(s) {
   return String(s || "")
@@ -1565,6 +1688,7 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = VOICE_TEST_MODE ? null : new WebSocketServer({ server, path: "/telnyx" });
+const wssTwilio = VOICE_TEST_MODE ? null : new WebSocketServer({ server, path: "/twilio" });
 
 wss?.on("connection", (ws, req) => {
   const u = new URL(req.url || "/telnyx", "http://localhost");
@@ -1574,40 +1698,8 @@ wss?.on("connection", (ws, req) => {
     return closeWsPolicy(ws, "unauthorized");
   }
 
-  const session = {
-    session_id: crypto.randomUUID(),
-    stream_id: null,
-    call_control_id: null,
-    client_state: null,
-
-    telnyx: { ws, lastMediaAt: 0, media_format: { encoding: "PCMU", sample_rate: 8000, channels: 1 } },
-    openai: null,
-
-    // behavior state
-    source: "encuentra24",
-    stage: "greet",
-    stageRepeats: 0,
-    qual: { available: null, urgent: null },
-
-    speaking: false,
-    lastSpeakAt: 0,
-    speaking_until: 0,
-    inSpeech: false,
-    speechStartAt: 0,
-    lastVadAt: 0,
-    _lastVadIgnoredAt: 0,
-    dropAudioUntil: 0,
-    lastUserTurnAt: 0,
-    lastCancelAt: 0,
-    lastBargeInAt: 0,
-    rmsAboveSince: 0,
-
-    textBuf: "",
-    _lastUserText: "",
-    _lastBotPrompt: "",
-    _pendingSpeak: null,
-    _pendingQueue: null,
-  };
+  const session = makeBaseSession();
+  session.telnyx = { ws, lastMediaAt: 0, media_format: { encoding: "PCMU", sample_rate: 8000, channels: 1 } };
 
   jlog({ event: "WS_CONNECT", session_id: session.session_id, path: u.pathname });
 
@@ -1708,7 +1800,6 @@ wss?.on("connection", (ws, req) => {
         });
       }
 
-      // aggressive barge-in on inbound track (normalized RMS + cooldown)
       const track = String((msg?.media ?? {})?.track ?? "");
       // IMPORTANT: do NOT treat empty track as inbound. Telnyx sends inbound/outbound explicitly.
       // Treating "" as inbound causes false barge-in from non-user audio/noise.
@@ -1717,71 +1808,7 @@ wss?.on("connection", (ws, req) => {
       const enc = String(sess.telnyx?.media_format?.encoding || "PCMU").toUpperCase();
       const sr = Number(sess.telnyx?.media_format?.sample_rate || 8000);
 
-      let rms = 0;
-      try {
-        if (enc === "L16") {
-          const be = Buffer.from(String(payloadB64), "base64");
-          const le = pcm16beToPcm16le(be);
-          rms = pcm16leRms(le);
-        } else {
-          const mulaw = Buffer.from(String(payloadB64), "base64");
-          const pcm16_8k = mulawToPcm16LEBytes(mulaw);
-          rms = pcm16leRms(pcm16_8k);
-        }
-      } catch {}
-
-      const rmsNorm = rms / 32768;
-      const now = nowMs();
-      const speakingRecently = sess.speaking && (now - sess.lastSpeakAt < SPEAKING_RECENT_MS);
-      const sinceLastCancelMs = sess.lastCancelAt ? (now - sess.lastCancelAt) : null;
-      const debounced = sess.lastBargeInAt && (now - sess.lastBargeInAt < BARGE_IN_DEBOUNCE_MS);
-
-      // Sustain requirement: RMS must be above threshold for a short window to avoid micro-spikes.
-      if (isInbound && speakingRecently && rmsNorm >= BARGE_IN_RMS) {
-        if (!sess.rmsAboveSince) sess.rmsAboveSince = now;
-      } else {
-        sess.rmsAboveSince = 0;
-      }
-
-      const sustainedOk = sess.rmsAboveSince && (now - sess.rmsAboveSince >= BARGE_IN_SUSTAIN_MS);
-
-      if (
-        isInbound &&
-        speakingRecently &&
-        sustainedOk &&
-        !debounced &&
-        (!sinceLastCancelMs || sinceLastCancelMs >= MIN_CANCEL_INTERVAL_MS)
-      ) {
-        sess.lastBargeInAt = now;
-        jlog({ event: "BARGE_IN_TRIGGER", reason: "rms", rms: rmsNorm, sinceLastCancelMs });
-        try { sess.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
-        sess.lastCancelAt = now;
-        jlog({ event: "AI_CANCEL_SENT" });
-        stopOutboundPlayback(sess);
-        sess.speaking = false;
-        sess.dropAudioUntil = now + DROP_AUDIO_MS;
-        jlog({ event: "OUTBOUND_AUDIO_DROPPED", bufferFrames: 0, approxMs: DROP_AUDIO_MS });
-        sess.rmsAboveSince = 0;
-      }
-
-      // Send audio to OpenAI
-      if (sess.openai?.ws?.readyState === WebSocket.OPEN) {
-        let pcm16le;
-        if (enc === "L16") {
-          const be = Buffer.from(String(payloadB64), "base64");
-          const le = pcm16beToPcm16le(be);
-          pcm16le = sr === 8000 ? pcm16leUpsample2x(le) : le;
-        } else {
-          const mulaw = Buffer.from(String(payloadB64), "base64");
-          const pcm16_8k = mulawToPcm16LEBytes(mulaw);
-          pcm16le = pcm16leUpsample2x(pcm16_8k);
-        }
-
-        sess.openai.ws.send(JSON.stringify({
-          type: "input_audio_buffer.append",
-          audio: Buffer.from(pcm16le).toString("base64"),
-        }));
-      }
+      handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr });
       return;
     }
 
@@ -1803,11 +1830,130 @@ wss?.on("connection", (ws, req) => {
   });
 });
 
+wssTwilio?.on("connection", (ws) => {
+  jlog({ event: "TWILIO_WS_CONNECT" });
+
+  let lastStreamSid = null;
+  let lastCallSid = null;
+
+  const cleanup = (streamSid, reason) => {
+    const sid = streamSid ? String(streamSid) : null;
+    const sess = sid ? twilioSessions.get(sid) : null;
+    if (!sess) return;
+    jlog({ event: "TWILIO_CLEANUP", streamSid: sid, reason: String(reason || "") });
+    stopOutboundPlayback(sess);
+    try { sess.openai?.ws?.close(); } catch {}
+    try { ws.close(); } catch {}
+    twilioSessions.delete(sid);
+  };
+
+  ws.on("message", (data) => {
+    const raw = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
+    const msg = safeJsonParse(raw);
+    if (!msg || typeof msg !== "object") {
+      jlog({ event: "TWILIO_UNKNOWN", raw_len: raw.length });
+      return;
+    }
+
+    const ev = msg.event ?? null;
+    if (!ev) {
+      jlog({ event: "TWILIO_UNKNOWN", keys: Object.keys(msg).slice(0, 20) });
+      return;
+    }
+
+    if (ev === "start") {
+      const streamSid = msg?.start?.streamSid ?? null;
+      const callSid = msg?.start?.callSid ?? null;
+      const mf = msg?.start?.mediaFormat ?? null;
+      const mediaFormat = mf && typeof mf === "object"
+        ? {
+            encoding: "PCMU",
+            sample_rate: mf.sampleRate ?? 8000,
+            channels: mf.channels ?? 1,
+          }
+        : { encoding: "PCMU", sample_rate: 8000, channels: 1 };
+
+      if (!streamSid) {
+        jlog({ event: "TWILIO_START_MISSING_STREAMSID", callSid: callSid ?? null });
+        return;
+      }
+
+      const session = makeBaseSession();
+      session.stream_id = String(streamSid || "");
+      session.call_control_id = callSid ? String(callSid) : null;
+      session.twilio = { ws, streamSid: String(streamSid), callSid: callSid ? String(callSid) : null, lastMediaAt: 0, media_format: mediaFormat };
+
+      lastStreamSid = String(streamSid);
+      lastCallSid = callSid ? String(callSid) : null;
+
+      twilioSessions.set(String(streamSid), session);
+
+      jlog({
+        event: "TWILIO_START",
+        streamSid: String(streamSid),
+        callSid: callSid ? String(callSid) : null,
+        media_format: mediaFormat,
+      });
+
+      if (!OPENAI_API_KEY) {
+        jlog({ event: "OPENAI_MISSING_KEY", session_id: session.session_id });
+        return;
+      }
+      openaiConnect(session);
+      return;
+    }
+
+    if (ev === "media") {
+      const streamSid = msg.streamSid ?? lastStreamSid ?? null;
+      const payloadB64 = msg?.media?.payload ?? null;
+      if (!streamSid || !payloadB64) return;
+
+      const sess = twilioSessions.get(String(streamSid));
+      if (!sess) {
+        jlog({ event: "TWILIO_MEDIA_NO_SESSION", streamSid: String(streamSid) });
+        return;
+      }
+
+      sess.twilio.lastMediaAt = nowMs();
+
+      if (!sess._loggedFirstMedia) {
+        sess._loggedFirstMedia = true;
+        jlog({
+          event: "TWILIO_MEDIA_FIRST",
+          session_id: sess.session_id,
+          streamSid: String(streamSid),
+          payload_b64_len: String(payloadB64).length,
+          media_format: sess.twilio.media_format,
+        });
+      }
+
+      // Twilio Media Streams inbound is PCMU 8k; do not transcode.
+      handleInboundAudioToOpenAi(sess, { payloadB64, isInbound: true, enc: "PCMU", sr: 8000 });
+      return;
+    }
+
+    if (ev === "stop") {
+      const streamSid = msg.streamSid ?? lastStreamSid ?? null;
+      jlog({ event: "TWILIO_STOP", streamSid: streamSid ? String(streamSid) : null, callSid: lastCallSid });
+      cleanup(streamSid, "stop");
+      return;
+    }
+
+    jlog({ event: "TWILIO_EVT", twilio_event: String(ev) });
+  });
+
+  ws.on("close", (code, reason) => {
+    jlog({ event: "TWILIO_WS_CLOSE", code, reason: String(reason || ""), streamSid: lastStreamSid, callSid: lastCallSid });
+    cleanup(lastStreamSid, "ws_close");
+  });
+});
+
 server.listen(PORT, () => {
   jlog({
     event: "BOOT",
     port: PORT,
-    path: VOICE_TEST_MODE ? "/voice-test" : "/telnyx",
+    carrier_primary: VOICE_CARRIER_PRIMARY,
+    paths: VOICE_TEST_MODE ? ["/voice-test"] : ["/twilio", "/telnyx"],
     has_token: Boolean(VOICE_GATEWAY_TOKEN),
     has_openai_key: Boolean(OPENAI_API_KEY),
     has_telnyx_api_key: Boolean(TELNYX_API_KEY),
