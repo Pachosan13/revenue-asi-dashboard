@@ -1739,21 +1739,21 @@ async function runOpenAiVoiceTest(args) {
 // HTTP + WS server
 // ──────────────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
-  if (req.url?.startsWith("/go.swml")) {
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-
-<Response>
-
-  <Say voice="en-US">Hello Pacho. The gateway is connected.</Say>
-
-  <Pause length="8"/>
-
-</Response>`;
+  if (req.url === "/go.swml" && (req.method === "GET" || req.method === "POST")) {
+    const swml = {
+      version: "1.0.0",
+      sections: {
+        main: [
+          { say: { text: "Hello Pacho. The gateway is connected.", voice: "en-US" } },
+          { pause: { length: 8 } },
+        ],
+      },
+    };
     res.writeHead(200, {
-      "Content-Type": "application/xml; charset=utf-8",
+      "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
     });
-    res.end(xml);
+    res.end(JSON.stringify(swml));
     return;
   }
 
