@@ -8,6 +8,7 @@ const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY ?? "").trim();
 const VOICE_TEST_MODE = String(process.env.VOICE_TEST_MODE ?? "").trim() === "1" || String(process.env.VOICE_TEST_MODE ?? "").trim().toLowerCase() === "true";
 const VOICE_CARRIER_PRIMARY_RAW = String(process.env.VOICE_CARRIER_PRIMARY ?? "twilio").trim().toLowerCase();
 const VOICE_CARRIER_PRIMARY = (VOICE_CARRIER_PRIMARY_RAW === "telnyx" || VOICE_CARRIER_PRIMARY_RAW === "twilio") ? VOICE_CARRIER_PRIMARY_RAW : "twilio";
+const OPENAI_TEXT_MODEL = String(process.env.OPENAI_TEXT_MODEL ?? "gpt-4.1-mini").trim();
 
 // OpenAI Realtime WS
 const OPENAI_REALTIME_MODEL = String(process.env.OPENAI_REALTIME_MODEL ?? "gpt-4o-realtime-preview").trim();
@@ -772,7 +773,157 @@ async function emitPromptForStage(session, stage) {
     jlog({ event: "TEST_TEMPLATE_AUDIO_FAIL", session_id: session.session_id, stage: stg, err: framesRes.error });
     return;
   }
-  jlog({ event: "TEST_TEMPLATE_EMIT", session_id: session.session_id, stage: stg, text: safe, frames: framesRes.mulawFramesB64.length });
+  // VOICE_TEST_MODE: disable template emits (we use AI text + guardrails + TTS instead).
+  if (!VOICE_TEST_MODE) {
+    jlog({ event: "TEST_TEMPLATE_EMIT", session_id: session.session_id, stage: stg, text: safe, frames: framesRes.mulawFramesB64.length });
+  }
+}
+
+function updateTestChecklistFromUserText(session, userText) {
+  session.qual = session.qual || {};
+  const t = String(userText || "").trim();
+  const tl = t.toLowerCase();
+
+  // owner
+  if (session.qual.owner == null) {
+    if (/\b(i am the owner|i'm the owner|yes,? i'm the owner|yes i am|i own it)\b/i.test(t)) session.qual.owner = true;
+    else if (/\b(not the owner|i'm not the owner|i am not the owner|no,? i'm not)\b/i.test(t)) session.qual.owner = false;
+  }
+
+  // available
+  if (session.qual.available == null) {
+    if (/\b(sold|already sold|not available|no longer available)\b/i.test(t)) session.qual.available = false;
+    else if (/\b(yes|yeah|yep|still available|available)\b/i.test(t)) session.qual.available = true;
+  }
+
+  // location
+  if (!session.qual.location) {
+    const m = t.match(/\b(?:in|located in|near|around)\s+([A-Za-z][A-Za-z\s]{1,40})\b/i);
+    if (m && m[1]) session.qual.location = m[1].trim().slice(0, 60);
+  }
+
+  // when
+  if (!session.qual.when) {
+    if (/\b(today|tomorrow|this afternoon|this morning|tonight)\b/i.test(t)) session.qual.when = t.slice(0, 80);
+    const tm = t.match(/\b(\d{1,2}(:\d{2})?\s?(am|pm))\b/i);
+    if (!session.qual.when && tm) session.qual.when = tm[0];
+  }
+
+  // phone
+  if (!session.qual.phone) {
+    const digits = tl.replace(/[^\d]/g, "");
+    if (digits.length >= 7 && digits.length <= 15) {
+      session.qual.phone = digits;
+    }
+  }
+}
+
+function nextTestQuestion(session) {
+  const q = session?.qual || {};
+  if (q.owner == null) return "Are you the owner of the car?";
+  if (q.available == null) return "Is the car still available?";
+  if (!q.location) return "What area are you located in?";
+  if (!q.when) return "What time today works best to see it?";
+  if (!q.phone) return "What’s the best phone number to reach you?";
+  return "Does today or tomorrow work better to meet?";
+}
+
+function validateAiTestReply(session, draft) {
+  let t = String(draft || "").replace(/\s+/g, " ").trim();
+  // Remove obvious buying advice / negotiation / pricing content
+  const forbidden = /(recommend|you should buy|good deal|worth it|price|budget|financing|loan|interest rate|trade[- ]?in)/i;
+  if (forbidden.test(t)) t = "";
+
+  // Enforce English (simple heuristic: if it looks Spanish, fall back)
+  const looksSpanish = /[áéíóúñ]|\\b(hola|gracias|carro|dueñ|anuncio|vender|mañana|hoy|zona|n[uú]mero|tel[eé]fono)\\b/i.test(t);
+  const nonAscii = /[^\x00-\x7F]/.test(t);
+  if (!t || looksSpanish || nonAscii) t = nextTestQuestion(session);
+
+  // Max 2 sentences
+  const parts = t.split(/(?<=[.!?])\s+/).filter(Boolean);
+  t = parts.slice(0, 2).join(" ").trim();
+
+  // Must end with a question
+  if (!t.endsWith("?")) {
+    // If there's a question mark inside, keep up to last one.
+    const lastQ = t.lastIndexOf("?");
+    if (lastQ >= 0) t = t.slice(0, lastQ + 1).trim();
+    else t = (t.replace(/[.!]+$/g, "").trim() + "?").trim();
+  }
+
+  // Hard length cap
+  if (t.length > 220) {
+    t = t.slice(0, 220).trim();
+    if (!t.endsWith("?")) t = t.replace(/[.!]+$/g, "").trim() + "?";
+  }
+  return t;
+}
+
+async function aiReplyAndEmitTest(session, userText) {
+  // VOICE_TEST_MODE only
+  updateTestChecklistFromUserText(session, userText);
+
+  const system = [
+    "You are a car-seller prequalification caller.",
+    "Goal: confirm (1) owner, (2) availability, (3) location/area, (4) best time to meet, (5) best phone number.",
+    "Hard rules: English only. Max 2 sentences. End with a question. Ask only one question at a time.",
+    "Do NOT give buying advice. Do NOT discuss price negotiation, financing, budgets, or opinions about the car.",
+    "Be short, polite, and practical.",
+  ].join(" ");
+
+  const user = `User said: ${String(userText || "").trim()}`;
+
+  let draft = "";
+  try {
+    const res = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: OPENAI_TEXT_MODEL,
+        input: [
+          { role: "system", content: [{ type: "input_text", text: system }] },
+          { role: "user", content: [{ type: "input_text", text: user }] },
+        ],
+        max_output_tokens: 90,
+        temperature: 0.2,
+      }),
+    });
+    const j = await res.json().catch(() => null);
+    // Tolerant extractor
+    draft =
+      (j && typeof j.output_text === "string" ? j.output_text : "") ||
+      (Array.isArray(j?.output) ? (
+        (() => {
+          for (const item of j.output) {
+            const c = item?.content;
+            if (Array.isArray(c)) {
+              for (const part of c) {
+                if (part?.type === "output_text" && typeof part?.text === "string") return part.text;
+              }
+            }
+          }
+          return "";
+        })()
+      ) : "") ||
+      "";
+  } catch (e) {
+    draft = "";
+    jlog({ event: "TEST_AI_ERR", session_id: session.session_id, err: String(e?.message || e) });
+  }
+
+  jlog({ event: "TEST_AI_DRAFT", session_id: session.session_id, text: String(draft || "").slice(0, 160) });
+
+  const validated = validateAiTestReply(session, draft || nextTestQuestion(session));
+  jlog({ event: "TEST_AI_VALIDATED", session_id: session.session_id, text: String(validated || "").slice(0, 160) });
+
+  const framesRes = await getMulawFramesForText(validated);
+  if (!framesRes.ok) {
+    jlog({ event: "TEST_TTS_FAIL", session_id: session.session_id, err: framesRes.error });
+    return;
+  }
+  session._playbackFrames = framesRes.mulawFramesB64;
+  session._playbackIdx = 0;
+  jlog({ event: "TEST_TTS_FRAMES", session_id: session.session_id, frames: framesRes.mulawFramesB64.length });
 }
 
 async function decideHotAndEmitDone(session) {
@@ -1399,7 +1550,7 @@ async function runOpenAiVoiceTest(args) {
       user_text_len: mockUserText.length,
       preview: mockUserText.slice(0, 80),
     });
-    await advanceStageAndEmit(st, mockUserText);
+    await aiReplyAndEmitTest(st, mockUserText);
     persisted.stage = st.stage;
     persisted.source = st.source;
     persisted.qual = st.qual;
@@ -1515,7 +1666,7 @@ async function runOpenAiVoiceTest(args) {
           return;
         }
         // Only advance when explicit userText exists (no VAD-only advancement).
-        advanceStageAndEmit(st, mockUserText).then(() => {
+        aiReplyAndEmitTest(st, mockUserText).then(() => {
           persisted.stage = st.stage;
           persisted.source = st.source;
           persisted.qual = st.qual;
