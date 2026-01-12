@@ -61,6 +61,20 @@ function jlog(obj) {
   console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
 }
 
+// Process-level safety: never crash the gateway from uncaught async errors.
+// IMPORTANT: do NOT call process.exit() here. Health checks must keep working.
+process.on("uncaughtException", (err) => {
+  try {
+    jlog({ event: "PROC_FATAL", kind: "uncaughtException", err: String(err?.stack || err?.message || err) });
+  } catch {}
+});
+
+process.on("unhandledRejection", (reason) => {
+  try {
+    jlog({ event: "PROC_FATAL", kind: "unhandledRejection", err: String(reason?.stack || reason?.message || reason) });
+  } catch {}
+});
+
 function safeJsonParse(s) {
   try {
     return JSON.parse(s);
@@ -382,7 +396,7 @@ async function playDeterministicLine(session, text) {
     (session?.client_state?.source ? String(session.client_state.source) : null) ??
     "encuentra24";
   const hotAlready = Boolean(session?.qual?.hot_announced);
-  const safeText = templateEnforce(String(session?.stage || "available"), String(text || ""), source, hotAlready);
+  const safeText = templateEnforce(String(session?.stage || "available"), String(text || ""), source, hotAlready, session?.session_id ?? null);
   const framesRes = await getMulawFramesForText(safeText);
   if (!framesRes.ok) {
     jlog({ event: "TTS_FAIL", session_id: session.session_id, err: framesRes.error });
@@ -605,10 +619,23 @@ function stagePrompt(stage, source, hot) {
   return "Perfecto. ¿Todavía lo tienes disponible?";
 }
 
-function templateEnforce(stage, assistantText, source, hotAlready) {
+function templateEnforce(stage, assistantText, source, hotAlready, session_id) {
   const s = String(stage || "availability");
   const src = String(source || "internet");
   const original = String(assistantText || "").trim();
+
+  // Seller-only guardrail: block buyer/advice/comparison drift and return the stage question.
+  const buyerIntent =
+    /\b(buy|purchase|recommend|which car|should i buy|compare|comparison|versus|vs\.?|trim|model|engine|horsepower|mpg|0-60|jeep wrangler)\b/i;
+  if (buyerIntent.test(original)) {
+    jlog({ event: "TEMPLATE_BLOCK_BUYER_INTENT", stage: s, session_id: session_id ?? null, preview: original.slice(0, 120) });
+    if (s === "greet") return stagePrompt("greet", src, false);
+    if (s === "availability") return stagePrompt("availability", src, false);
+    if (s === "urgency") return stagePrompt("urgency", src, false);
+    if (s === "schedule") return stagePrompt("schedule", src, false);
+    if (s === "done") return hotAlready ? stagePrompt("done", src, true) : stagePrompt("done", src, false);
+    return stagePrompt("availability", src, false);
+  }
 
   const greet = stagePrompt("greet", src, false);
   const qAvail = stagePrompt("availability", src, false);
@@ -748,7 +775,7 @@ async function emitPromptForStage(session, stage) {
   const { hot } = hotDecisionFromQual(session?.qual);
   const hotAlready = Boolean(session?.qual?.hot_announced);
   const text = stagePrompt(stg, src, hot);
-  const safe = templateEnforce(stg, text, src, hotAlready);
+  const safe = templateEnforce(stg, text, src, hotAlready, session?.session_id ?? null);
 
   // TELNYX mode: actually speak via deterministic TTS frames
   if (session?.telnyx?.ws) {
@@ -786,6 +813,12 @@ function updateTestChecklistFromUserText(session, userText) {
 
   // owner
   if (session.qual.owner == null) {
+    // If we're in greet and the user gives a simple yes/no, treat it as owner confirmation.
+    // (Test-mode prequal: greet asks "Are you the owner of the car?")
+    if (String(session?.stage || "") === "greet") {
+      if (isYes(t)) session.qual.owner = true;
+      else if (isNo(t)) session.qual.owner = false;
+    }
     if (/\b(i am the owner|i'm the owner|yes,? i'm the owner|yes i am|i own it)\b/i.test(t)) session.qual.owner = true;
     else if (/\b(not the owner|i'm not the owner|i am not the owner|no,? i'm not)\b/i.test(t)) session.qual.owner = false;
   }
@@ -793,7 +826,7 @@ function updateTestChecklistFromUserText(session, userText) {
   // available
   if (session.qual.available == null) {
     if (/\b(sold|already sold|not available|no longer available)\b/i.test(t)) session.qual.available = false;
-    else if (/\b(yes|yeah|yep|still available|available)\b/i.test(t)) session.qual.available = true;
+    else if (/\b(still available|available|still have it|i still have it|it is available|it's available)\b/i.test(t)) session.qual.available = true;
   }
 
   // location
@@ -828,6 +861,9 @@ function nextTestQuestion(session) {
 
 function validateAiTestReply(session, draft) {
   let t = String(draft || "").replace(/\s+/g, " ").trim();
+  // Shorten phrasing
+  t = t.replace(/\bfor sale\b/gi, "").replace(/\s+/g, " ").trim();
+  t = t.replace(/\bIs the car still available\b/gi, "Is it still available");
   // Remove obvious buying advice / negotiation / pricing content
   const forbidden = /(recommend|you should buy|good deal|worth it|price|budget|financing|loan|interest rate|trade[- ]?in)/i;
   if (forbidden.test(t)) t = "";
@@ -837,9 +873,9 @@ function validateAiTestReply(session, draft) {
   const nonAscii = /[^\x00-\x7F]/.test(t);
   if (!t || looksSpanish || nonAscii) t = nextTestQuestion(session);
 
-  // Max 2 sentences
+  // One sentence only
   const parts = t.split(/(?<=[.!?])\s+/).filter(Boolean);
-  t = parts.slice(0, 2).join(" ").trim();
+  t = parts.slice(0, 1).join(" ").trim();
 
   // Must end with a question
   if (!t.endsWith("?")) {
@@ -861,11 +897,14 @@ async function aiReplyAndEmitTest(session, userText) {
   // VOICE_TEST_MODE only
   updateTestChecklistFromUserText(session, userText);
 
+  const fallbackQ = nextTestQuestion(session);
   const system = [
     "You are a car-seller prequalification caller.",
-    "Goal: confirm (1) owner, (2) availability, (3) whether they can meet today or tomorrow.",
-    "Hard rules: English only. Max 2 sentences. End with a question. Ask only one question at a time.",
-    "Do NOT give buying advice. Do NOT discuss price negotiation, financing, budgets, or opinions about the car.",
+    "Goal: confirm owner, still available, can meet today/tomorrow (time window).",
+    "Hard rules: English only. One sentence only. End with a question. Ask only one question at a time.",
+    "No filler. No thanks. Use 'meet' (not 'discuss').",
+    "Do NOT give buying advice. Do NOT compare cars. Do NOT recommend models. Do NOT discuss trims/engine/specs. Do NOT discuss price negotiation, financing, budgets, or opinions about the car.",
+    `If the user asks buying advice or what car to buy, ignore it and ask exactly this question: \"${fallbackQ}\"`,
     "Be short, polite, and practical.",
   ].join(" ");
 
@@ -914,14 +953,18 @@ async function aiReplyAndEmitTest(session, userText) {
   const validated = validateAiTestReply(session, draft || nextTestQuestion(session));
   jlog({ event: "TEST_AI_VALIDATED", session_id: session.session_id, text: String(validated || "").slice(0, 160) });
 
-  const framesRes = await getMulawFramesForText(validated);
-  if (!framesRes.ok) {
-    jlog({ event: "TEST_TTS_FAIL", session_id: session.session_id, err: framesRes.error });
-    return;
+  try {
+    const framesRes = await getMulawFramesForText(validated);
+    if (!framesRes.ok) {
+      jlog({ event: "TEST_TTS_FAIL", session_id: session.session_id, err: framesRes.error });
+      return;
+    }
+    session._playbackFrames = framesRes.mulawFramesB64;
+    session._playbackIdx = 0;
+    jlog({ event: "TEST_TTS_FRAMES", session_id: session.session_id, frames: framesRes.mulawFramesB64.length });
+  } catch (e) {
+    jlog({ event: "TEST_TTS_FAIL", session_id: session.session_id, err: String(e?.message || e) });
   }
-  session._playbackFrames = framesRes.mulawFramesB64;
-  session._playbackIdx = 0;
-  jlog({ event: "TEST_TTS_FRAMES", session_id: session.session_id, frames: framesRes.mulawFramesB64.length });
 }
 
 async function decideHotAndEmitDone(session) {
@@ -1150,7 +1193,7 @@ function openaiConnect(session) {
   function speakDeterministic(session, desiredText) {
     const source = session?.client_state?.source ?? "internet";
     const hotAlready = Boolean(session?.qual?.hot_announced);
-    const finalText = templateEnforce(session.stage, desiredText, source, hotAlready);
+    const finalText = templateEnforce(session.stage, desiredText, source, hotAlready, session?.session_id ?? null);
     // TEMPLATE-ONLY speech: no free-form output, ever.
     playDeterministicLine(session, finalText).catch(() => {});
   }
@@ -1701,133 +1744,137 @@ const server = http.createServer((req, res) => {
     return res.end("ok");
   }
 
+  // When VOICE_TEST_MODE is disabled, do not expose /voice-test (avoid misleading 200 text/plain fallthrough).
+  if (!VOICE_TEST_MODE && req.method === "POST" && req.url?.startsWith("/voice-test")) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: false, error: "voice_test_mode_disabled" }));
+  }
+
   if (VOICE_TEST_MODE && req.url?.startsWith("/voice-test")) {
     if (req.method !== "POST") {
       res.writeHead(405, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
     }
     (async () => {
-      const body = await readJsonBody(req);
-      const wavB64 = body?.wav_b64 ?? body?.wavB64 ?? null;
-      const pcmB64 = body?.pcm16_b64 ?? body?.pcm16B64 ?? null;
-      const sampleRate = Number(body?.sample_rate ?? body?.sampleRate ?? 16000);
-      const channels = Number(body?.channels ?? 1);
-      const mock = body?.mock && typeof body.mock === "object" ? body.mock : null;
-      const reqSessionId = body?.session_id ?? body?.sessionId ?? null;
+      let session_id = "unknown";
+      let sess = null;
+      try {
+        const body = await readJsonBody(req);
+        const wavB64 = body?.wav_b64 ?? body?.wavB64 ?? null;
+        const pcmB64 = body?.pcm16_b64 ?? body?.pcm16B64 ?? null;
+        const sampleRate = Number(body?.sample_rate ?? body?.sampleRate ?? 16000);
+        const channels = Number(body?.channels ?? 1);
+        const mock = body?.mock && typeof body.mock === "object" ? body.mock : null;
+        const reqSessionId = body?.session_id ?? body?.sessionId ?? null;
 
-      let pcm16le;
-      if (wavB64) {
-        const wav = Buffer.from(String(wavB64), "base64");
-        const parsed = wavToPcm16le(wav);
-        if (!parsed.ok || !parsed.pcm16le) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ ok: false, error: parsed.error || "wav_parse_failed" }));
-        }
-        pcm16le = Buffer.from(parsed.pcm16le);
-        let ch = Number(parsed.channels || 1);
-        if (ch > 1) {
-          const frames = pcm16le.length / 2 / ch;
-          const mono = Buffer.allocUnsafe(frames * 2);
-          for (let i = 0; i < frames; i++) mono.writeInt16LE(pcm16le.readInt16LE(i * 2 * ch), i * 2);
-          pcm16le = mono;
-          ch = 1;
-        }
-        pcm16le = resamplePcm16leTo16k(pcm16le, Number(parsed.sampleRate || 16000));
-      } else if (pcmB64) {
-        pcm16le = Buffer.from(String(pcmB64), "base64");
-        if (channels > 1) {
-          // assume interleaved; take left channel
-          const frames = pcm16le.length / 2 / channels;
-          const mono = Buffer.allocUnsafe(frames * 2);
-          for (let i = 0; i < frames; i++) mono.writeInt16LE(pcm16le.readInt16LE(i * 2 * channels), i * 2);
-          pcm16le = mono;
-        }
-        pcm16le = resamplePcm16leTo16k(pcm16le, sampleRate);
-      } else {
-        // VOICE_TEST_MODE: allow text-only tests
-        if (!VOICE_TEST_MODE) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ ok: false, error: "missing_wav_b64_or_pcm16_b64" }));
-        }
-        pcm16le = Buffer.alloc(0);
-      }
+        session_id = String(reqSessionId || crypto.randomUUID());
 
-      const session_id = String(reqSessionId || crypto.randomUUID());
+        let pcm16le;
+        if (wavB64) {
+          const wav = Buffer.from(String(wavB64), "base64");
+          const parsed = wavToPcm16le(wav);
+          if (!parsed.ok || !parsed.pcm16le) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ ok: false, error: parsed.error || "wav_parse_failed" }));
+          }
+          pcm16le = Buffer.from(parsed.pcm16le);
+          let ch = Number(parsed.channels || 1);
+          if (ch > 1) {
+            const frames = pcm16le.length / 2 / ch;
+            const mono = Buffer.allocUnsafe(frames * 2);
+            for (let i = 0; i < frames; i++) mono.writeInt16LE(pcm16le.readInt16LE(i * 2 * ch), i * 2);
+            pcm16le = mono;
+            ch = 1;
+          }
+          pcm16le = resamplePcm16leTo16k(pcm16le, Number(parsed.sampleRate || 16000));
+        } else if (pcmB64) {
+          pcm16le = Buffer.from(String(pcmB64), "base64");
+          if (channels > 1) {
+            // assume interleaved; take left channel
+            const frames = pcm16le.length / 2 / channels;
+            const mono = Buffer.allocUnsafe(frames * 2);
+            for (let i = 0; i < frames; i++) mono.writeInt16LE(pcm16le.readInt16LE(i * 2 * channels), i * 2);
+            pcm16le = mono;
+          }
+          pcm16le = resamplePcm16leTo16k(pcm16le, sampleRate);
+        } else {
+          pcm16le = Buffer.alloc(0);
+        }
 
-      // Per-session lock: prevent concurrent /voice-test runs for the same session_id
-      let sess = testSessions.get(session_id) || null;
-      if (!sess) {
-        sess = {
+        // Per-session lock: prevent concurrent /voice-test runs for the same session_id
+        sess = testSessions.get(session_id) || null;
+        if (!sess) {
+          sess = {
+            session_id,
+            stage: "availability",
+            source: "encuentra24",
+            qual: { available: null, urgent: null },
+            testMock: { available: null, urgent: null },
+            emittedAvailability: false,
+            busy: false,
+          };
+          testSessions.set(session_id, sess);
+        }
+
+        // Terminal state guard: if already done, ignore and return immediately.
+        if (String(sess.stage || "") === "done") {
+          jlog({ event: "TEST_SESSION_DONE_IGNORED", session_id });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: true, session_id, status: "done" }));
+        }
+        // Persist source across calls (prefer session.source)
+        if (typeof body?.source === "string" && body.source.trim()) {
+          sess.source = body.source.trim();
+          jlog({ event: "TEST_SOURCE", session_id, source: sess.source });
+        }
+
+        // Instrumentation: request-level log (A)
+        {
+          const hasMock = Boolean(mock && typeof mock === "object");
+          const mockKeys = hasMock ? Object.keys(mock).slice(0, 25) : [];
+          const userText = typeof mock?.userText === "string" ? String(mock.userText) : "";
+          const trimmed = userText.trim();
+          jlog({
+            event: "TEST_REQ_IN",
+            session_id,
+            has_mock: hasMock,
+            mock_keys: mockKeys,
+            has_userText: Boolean(trimmed),
+            userText_preview_len: trimmed ? trimmed.slice(0, 80).length : 0,
+          });
+        }
+        if (sess.busy === true) {
+          jlog({ event: "TEST_SESSION_BUSY", session_id });
+          res.writeHead(409, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: false, error: "session_busy", session_id }));
+        }
+        sess.busy = true;
+
+        // run async; logs are the output
+        jlog({ event: "TEST_CALL_RUN", session_id }); // (B)
+        await runOpenAiVoiceTest({
           session_id,
-          stage: "availability",
-          source: "encuentra24",
-          qual: { available: null, urgent: null },
-          testMock: { available: null, urgent: null },
-          emittedAvailability: false,
-          busy: false,
-        };
-        testSessions.set(session_id, sess);
-      }
-
-      // Terminal state guard: if already done, ignore and return immediately.
-      if (String(sess.stage || "") === "done") {
-        jlog({ event: "TEST_SESSION_DONE_IGNORED", session_id });
-        res.writeHead(200, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ ok: true, session_id, status: "done" }));
-      }
-      // Persist source across calls (prefer session.source)
-      if (typeof body?.source === "string" && body.source.trim()) {
-        sess.source = body.source.trim();
-        jlog({ event: "TEST_SOURCE", session_id, source: sess.source });
-      }
-
-      // Instrumentation: request-level log (A)
-      {
-        const hasMock = Boolean(mock && typeof mock === "object");
-        const mockKeys = hasMock ? Object.keys(mock).slice(0, 25) : [];
-        const userText = typeof mock?.userText === "string" ? String(mock.userText) : "";
-        const trimmed = userText.trim();
-        jlog({
-          event: "TEST_REQ_IN",
-          session_id,
-          has_mock: hasMock,
-          mock_keys: mockKeys,
-          has_userText: Boolean(trimmed),
-          userText_preview_len: trimmed ? trimmed.slice(0, 80).length : 0,
+          pcm16le_16k: pcm16le,
+          silence_ms: body?.silence_ms ?? 500,
+          timeout_ms: body?.timeout_ms ?? 15000,
+          source: sess.source || body?.source || "encuentra24",
+          mock: {
+            available: mock?.available ?? null,
+            urgent: mock?.urgent ?? null,
+            userText: (typeof mock?.userText === "string" ? mock.userText : null),
+          },
         });
+        jlog({ event: "TEST_RUN_RETURN", session_id }); // (C)
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, session_id }));
+      } catch (e) {
+        jlog({ event: "TEST_AI_ERR", session_id, err: String(e?.message || e) });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "test_failed", session_id }));
+      } finally {
+        // ALWAYS release the per-session lock, even if any awaited step throws.
+        if (sess) sess.busy = false;
       }
-      if (sess.busy === true) {
-        jlog({ event: "TEST_SESSION_BUSY", session_id });
-        res.writeHead(409, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ ok: false, error: "session_busy", session_id }));
-      }
-      sess.busy = true;
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, session_id }));
-
-      // run async; logs are the output
-      jlog({ event: "TEST_CALL_RUN", session_id }); // (B)
-      const p = runOpenAiVoiceTest({
-        session_id,
-        pcm16le_16k: pcm16le,
-        silence_ms: body?.silence_ms ?? 500,
-        timeout_ms: body?.timeout_ms ?? 15000,
-        source: sess.source || body?.source || "encuentra24",
-        mock: {
-          available: mock?.available ?? null,
-          urgent: mock?.urgent ?? null,
-          userText: (typeof mock?.userText === "string" ? mock.userText : null),
-        },
-      });
-      jlog({ event: "TEST_RUN_RETURN", session_id }); // (C)
-      p.catch((e) => {
-        // (D)
-        jlog({ event: "TEST_RUN_ERR", session_id, err: String(e?.message || e) });
-      }).finally(() => {
-        const s2 = testSessions.get(session_id);
-        if (s2) s2.busy = false;
-      });
     })().catch(() => {});
     return;
   }
