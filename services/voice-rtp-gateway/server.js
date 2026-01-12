@@ -1739,24 +1739,27 @@ async function runOpenAiVoiceTest(args) {
 // HTTP + WS server
 // ──────────────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
-  if (req.url?.startsWith("/healthz")) {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    return res.end("ok");
-  }
-
   if (req.url?.startsWith("/go.swml")) {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+
+<Response>
+
+  <Say voice="en-US">Hello Pacho. The gateway is connected.</Say>
+
+  <Pause length="8"/>
+
+</Response>`;
     res.writeHead(200, {
       "Content-Type": "application/xml; charset=utf-8",
       "Cache-Control": "no-store",
     });
-    return res.end([
-      '<?xml version="1.0" encoding="UTF-8"?>',
-      "<Response>",
-      '  <Say voice="en-US">Hello Pacho. The gateway is connected.</Say>',
-      '  <Pause length="8"/>',
-      "</Response>",
-      "",
-    ].join("\n"));
+    res.end(xml);
+    return;
+  }
+
+  if (req.url?.startsWith("/healthz")) {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end("ok");
   }
 
   // When VOICE_TEST_MODE is disabled, do not expose /voice-test (avoid misleading 200 text/plain fallthrough).
