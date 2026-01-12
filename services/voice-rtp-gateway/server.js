@@ -1744,7 +1744,7 @@ const server = http.createServer((req, res) => {
     return res.end("ok");
   }
 
-  if (req.method === "GET" && req.url?.startsWith("/go.swml")) {
+  if (req.url?.startsWith("/go.swml")) {
     res.writeHead(200, {
       "Content-Type": "application/xml; charset=utf-8",
       "Cache-Control": "no-store",
