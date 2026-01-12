@@ -1744,6 +1744,21 @@ const server = http.createServer((req, res) => {
     return res.end("ok");
   }
 
+  if (req.method === "GET" && req.url?.startsWith("/go.swml")) {
+    res.writeHead(200, {
+      "Content-Type": "application/xml; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    return res.end([
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      "<Response>",
+      '  <Say voice="en-US">Hello Pacho. The gateway is connected.</Say>',
+      '  <Pause length="8"/>',
+      "</Response>",
+      "",
+    ].join("\n"));
+  }
+
   // When VOICE_TEST_MODE is disabled, do not expose /voice-test (avoid misleading 200 text/plain fallthrough).
   if (!VOICE_TEST_MODE && req.method === "POST" && req.url?.startsWith("/voice-test")) {
     res.writeHead(404, { "Content-Type": "application/json" });
