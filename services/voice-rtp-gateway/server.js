@@ -804,7 +804,7 @@ function updateTestChecklistFromUserText(session, userText) {
 
   // when
   if (!session.qual.when) {
-    if (/\b(today|tomorrow|this afternoon|this morning|tonight)\b/i.test(t)) session.qual.when = t.slice(0, 80);
+    if (/\b(today|tomorrow|tonight|this afternoon|this morning)\b/i.test(t)) session.qual.when = t.slice(0, 80);
     const tm = t.match(/\b(\d{1,2}(:\d{2})?\s?(am|pm))\b/i);
     if (!session.qual.when && tm) session.qual.when = tm[0];
   }
@@ -821,11 +821,9 @@ function updateTestChecklistFromUserText(session, userText) {
 function nextTestQuestion(session) {
   const q = session?.qual || {};
   if (q.owner == null) return "Are you the owner of the car?";
-  if (q.available == null) return "Is the car still available?";
-  if (!q.location) return "What area are you located in?";
-  if (!q.when) return "What time today works best to see it?";
-  if (!q.phone) return "What’s the best phone number to reach you?";
-  return "Does today or tomorrow work better to meet?";
+  if (q.available == null) return "Is it still available?";
+  if (!q.when) return "Can you meet today or tomorrow?";
+  return "Quick one: today or tomorrow works better?";
 }
 
 function validateAiTestReply(session, draft) {
@@ -865,7 +863,7 @@ async function aiReplyAndEmitTest(session, userText) {
 
   const system = [
     "You are a car-seller prequalification caller.",
-    "Goal: confirm (1) owner, (2) availability, (3) location/area, (4) best time to meet, (5) best phone number.",
+    "Goal: confirm (1) owner, (2) availability, (3) whether they can meet today or tomorrow.",
     "Hard rules: English only. Max 2 sentences. End with a question. Ask only one question at a time.",
     "Do NOT give buying advice. Do NOT discuss price negotiation, financing, budgets, or opinions about the car.",
     "Be short, polite, and practical.",
