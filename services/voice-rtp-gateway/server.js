@@ -446,11 +446,11 @@ async function playDeterministicLine(session, text) {
 
 function sendCarrierMedia(session, frameB64) {
   if (session?.twilio?.ws && session.twilio.streamSid) {
-    session.twilio.ws.send(JSON.stringify({ event: "media", streamSid: session.twilio.streamSid, media: { payload: frameB64 } }));
+    session.twilio.ws.send(JSON.stringify({ event: "media", streamSid: session.twilio.streamSid, media: { payload: frameB64 } }), { compress: false });
     return;
   }
   if (session?.telnyx?.ws) {
-    session.telnyx.ws.send(JSON.stringify({ event: "media", media: { payload: frameB64 } }));
+    session.telnyx.ws.send(JSON.stringify({ event: "media", media: { payload: frameB64 } }), { compress: false });
   }
 }
 
@@ -1901,8 +1901,8 @@ const server = http.createServer((req, res) => {
   res.end("voice-rtp-gateway");
 });
 
-const wss = VOICE_TEST_MODE ? null : new WebSocketServer({ server, path: "/telnyx" });
-const wssTwilio = VOICE_TEST_MODE ? null : new WebSocketServer({ server, path: "/twilio" });
+const wss = VOICE_TEST_MODE ? null : new WebSocketServer({ server, path: "/telnyx", perMessageDeflate: false });
+const wssTwilio = VOICE_TEST_MODE ? null : new WebSocketServer({ server, path: "/twilio", perMessageDeflate: false });
 
 wss?.on("connection", (ws, req) => {
   const u = new URL(req.url || "/telnyx", "http://localhost");
@@ -1916,6 +1916,27 @@ wss?.on("connection", (ws, req) => {
   session.telnyx = { ws, lastMediaAt: 0, media_format: { encoding: "PCMU", sample_rate: 8000, channels: 1 } };
 
   jlog({ event: "WS_CONNECT", session_id: session.session_id, path: u.pathname });
+
+  // WS handshake metadata (no secrets) + negotiated extensions
+  try {
+    const h = req?.headers || {};
+    jlog({
+      event: "WS_HANDSHAKE",
+      session_id: session.session_id,
+      url: String(req?.url || ""),
+      ua: String(h["user-agent"] || ""),
+      in_ws_ext: String(h["sec-websocket-extensions"] || ""),
+      in_ws_proto: String(h["sec-websocket-protocol"] || ""),
+    });
+  } catch {}
+  try {
+    jlog({
+      event: "WS_NEGOTIATED",
+      session_id: session.session_id,
+      ws_ext: String(ws?.extensions || ""),
+      ws_proto: String(ws?.protocol || ""),
+    });
+  } catch {}
 
   ws.on("message", (data) => {
     const raw = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
