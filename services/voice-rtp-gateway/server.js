@@ -1963,6 +1963,31 @@ wss?.on("connection", (ws, req) => {
     }
   } catch {}
 
+  // Debug: log inbound socket data first byte to detect RSV1/opcode (do NOT log payloads).
+  try {
+    const sock = ws?._socket;
+    if (sock && typeof sock.on === "function" && !sock._dataWrappedForRsv1) {
+      sock._dataWrappedForRsv1 = true;
+      sock.on("data", (chunk) => {
+        try {
+          if (session._loggedFirstSocketData) return;
+          session._loggedFirstSocketData = true;
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk || ""), "binary");
+          const nbytes = buf.length;
+          const b0 = nbytes > 0 ? buf[0] : 0;
+          jlog({
+            event: "SOCKET_DATA",
+            session_id: session.session_id,
+            nbytes,
+            first_byte_hex: "0x" + b0.toString(16).padStart(2, "0"),
+            rsv1_set: (b0 & 0x40) !== 0,
+            opcode: b0 & 0x0f,
+          });
+        } catch {}
+      });
+    }
+  } catch {}
+
   ws.on("message", (data) => {
     const raw = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
     const msg = safeJsonParse(raw);
@@ -2208,7 +2233,8 @@ wssTwilio?.on("connection", (ws) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
+  jlog({ event: "LISTENING", host: "0.0.0.0", port: PORT });
   jlog({
     event: "BOOT",
     port: PORT,
