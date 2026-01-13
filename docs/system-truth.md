@@ -382,6 +382,12 @@ Server-side validation exists as a DB CHECK constraint (radius 1–50; if `activ
 ### Known failure mode (TTS)
 - If `OPENAI_TTS_MODEL` is unset, OpenAI `/v1/audio/speech` returns `400` (“you must provide a model parameter”) → `TTS_FAIL` → silence. Fix: set `OPENAI_TTS_MODEL` or rely on default `"gpt-4o-mini-tts"`.
 
+### Voice RTP Gateway – Codec Support
+- **Supported**: PCMU (μ-law) only.
+- **Unsupported**: G729 (hard-fail). Reason: triggers false RMS/barge-in and results in mute audio.
+  - Guardrail: if Telnyx start event reports `media_format.encoding !== "PCMU"`, the gateway logs `ERROR_FATAL_CODEC` and closes the session.
+  - Telnyx streaming start is forced with `stream_codec = "PCMU"` and `media_format.encoding = "PCMU"`.
+
 - Added Craigslist (US) V0 collector + SSV view + minimal `public.leads` columns/indexes required for `(account_id, source, external_id)` ingestion. See: `supabase/migrations/20260109090000_public_leads_source_external_id_v1.sql`, `supabase/migrations/20260109090100_v_craigslist_ssv_v0.sql`.
 - Updated Craigslist SSV timestamp to use `coalesce(first_seen_at, created_at)` and made `first_seen_at` nullable to avoid “now” contamination on existing rows. See: `supabase/migrations/20260109100000_fix_first_seen_at_safe.sql`, `supabase/migrations/20260109100100_v_craigslist_ssv_v0_fix.sql`.
 - Moved Craigslist execution from Edge web fetch to queued tasks + local worker. See: `supabase/migrations/20260109120000_lead_hunter_craigslist_tasks_v1.sql`, `services/craigslist-hunter/worker.js`.
