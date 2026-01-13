@@ -364,6 +364,24 @@ Server-side validation exists as a DB CHECK constraint (radius 1–50; if `activ
 
 ## Changelog
 
+## Voice RTP Gateway – Env Vars (Fly)
+
+- `PORT` (Fly) — HTTP/WebSocket listener port.
+- `VOICE_GATEWAY_TOKEN` (required) — query param token for `/telnyx?token=...`.
+- `VOICE_CARRIER_PRIMARY` (optional; default `"twilio"`) — primary carrier selection.
+- `OPENAI_API_KEY` (required) — for Realtime + TTS.
+- `OPENAI_TTS_MODEL` (optional; default `"gpt-4o-mini-tts"`) — hard default to avoid TTS 400.
+- `OPENAI_TTS_VOICE` (optional; default `"alloy"`).
+- `TTS_SPEED` (optional; default `1.2`).
+- `OPENAI_TEXT_MODEL` (optional; default `"gpt-4.1-mini"`).
+- `OPENAI_REALTIME_MODEL` (optional; default `"gpt-4o-realtime-preview"`).
+- `TELNYX_API_KEY` / `Telnyx_Api` (required for Telnyx call control).
+- `TELNYX_APP_ID` (required per Telnyx app setup).
+- `SUPABASE_VOICE_HANDOFF_URL` / `SUPABASE_VOICE_HANDOFF_TOKEN` (optional; HOT handoff).
+
+### Known failure mode (TTS)
+- If `OPENAI_TTS_MODEL` is unset, OpenAI `/v1/audio/speech` returns `400` (“you must provide a model parameter”) → `TTS_FAIL` → silence. Fix: set `OPENAI_TTS_MODEL` or rely on default `"gpt-4o-mini-tts"`.
+
 - Added Craigslist (US) V0 collector + SSV view + minimal `public.leads` columns/indexes required for `(account_id, source, external_id)` ingestion. See: `supabase/migrations/20260109090000_public_leads_source_external_id_v1.sql`, `supabase/migrations/20260109090100_v_craigslist_ssv_v0.sql`.
 - Updated Craigslist SSV timestamp to use `coalesce(first_seen_at, created_at)` and made `first_seen_at` nullable to avoid “now” contamination on existing rows. See: `supabase/migrations/20260109100000_fix_first_seen_at_safe.sql`, `supabase/migrations/20260109100100_v_craigslist_ssv_v0_fix.sql`.
 - Moved Craigslist execution from Edge web fetch to queued tasks + local worker. See: `supabase/migrations/20260109120000_lead_hunter_craigslist_tasks_v1.sql`, `services/craigslist-hunter/worker.js`.

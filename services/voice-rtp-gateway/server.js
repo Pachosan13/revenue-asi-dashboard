@@ -37,7 +37,7 @@ const MAX_TOKENS_PER_TURN = Number(process.env.MAX_TOKENS_PER_TURN ?? "60");
 const VOICE_NAME = String(process.env.OPENAI_VOICE ?? "alloy").trim();
 
 // Deterministic TTS for ZERO drift (we do NOT let the model speak freely)
-const OPENAI_TTS_MODEL = String(process.env.OPENAI_TTS_MODEL ?? "gpt-4o-mini-tts").trim();
+const OPENAI_TTS_MODEL = String(process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts").trim() || "gpt-4o-mini-tts";
 const OPENAI_TTS_VOICE = String(process.env.OPENAI_TTS_VOICE ?? "alloy").trim();
 // Prefer TTS_SPEED (new); fallback to legacy OPENAI_TTS_SPEED.
 const TTS_SPEED = Number(process.env.TTS_SPEED ?? process.env.OPENAI_TTS_SPEED ?? "1.2");
@@ -294,6 +294,7 @@ const ttsCache = new Map(); // text -> { mulawFramesB64: string[] }
 
 async function openaiTtsWav(text) {
   if (!OPENAI_API_KEY) return { ok: false, error: "missing_openai_api_key", wav: null };
+  if (!OPENAI_TTS_MODEL) return { ok: false, error: "missing_openai_tts_model", wav: null };
   const res = await fetch("https://api.openai.com/v1/audio/speech", {
     method: "POST",
     headers: {
@@ -471,6 +472,7 @@ function makeBaseSession() {
     telnyx: null,
     twilio: null,
     openai: null,
+    has_active_response: false,
 
     // behavior state
     source: "encuentra24",
@@ -1324,6 +1326,16 @@ function openaiConnect(session) {
       return;
     }
 
+    // Track active response lifecycle (used for cancel gating)
+    if (m.type === "response.created") {
+      session.has_active_response = true;
+      session.openai.activeResponse = true;
+    }
+    if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
+      session.has_active_response = false;
+      session.openai.activeResponse = false;
+    }
+
     // Barge-in via OpenAI VAD
     if (m.type === "input_audio_buffer.speech_started") {
       const now = nowMs();
@@ -1344,14 +1356,17 @@ function openaiConnect(session) {
       session.speechStartAt = now;
       // VAD barge-in trigger
       const sinceLastCancelMs = session.lastCancelAt ? (now - session.lastCancelAt) : null;
-      // Cancel immediately on EVERY speech_started (per requirement).
-      // Even if OpenAI reports "no active response", we still send cancel to enforce strict turn-taking.
       jlog({ event: "BARGE_IN_TRIGGER", reason: "vad", rms: null, sinceLastCancelMs });
-      try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
-      try { session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
-      session.lastCancelAt = now;
-      session.openai.activeResponse = false;
-      jlog({ event: "AI_CANCEL_SENT" });
+      if (session.has_active_response) {
+        try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
+        try { session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
+        session.lastCancelAt = now;
+        session.has_active_response = false;
+        session.openai.activeResponse = false;
+        jlog({ event: "AI_CANCEL_SENT" });
+      } else {
+        jlog({ event: "OPENAI_SKIP_CANCEL_NO_ACTIVE", session_id: session.session_id });
+      }
       // Hard-stop any outbound audio to Telnyx immediately.
       stopOutboundPlayback(session);
       session.speaking = false;
@@ -1405,6 +1420,17 @@ function openaiConnect(session) {
         user_text_len: userText.length,
         preview: userText.slice(0, 80),
       });
+
+      // Ensure a response is created after each user turn (used for cancel gating/turn-taking).
+      try {
+        session.openai?.ws?.send(JSON.stringify({
+          type: "response.create",
+          response: { modalities: ["audio", "text"], instructions: "Responde breve en español." },
+        }));
+        session.has_active_response = true;
+        session.openai.activeResponse = true;
+        jlog({ event: "OPENAI_RESPONSE_CREATE_SENT", session_id: session.session_id });
+      } catch {}
 
       // TELNYX mode uses the same template-only progression and HOT decision as VOICE_TEST_MODE.
       advanceStageAndEmit(session, userText).catch(() => {});
@@ -1534,6 +1560,7 @@ async function runOpenAiVoiceTest(args) {
     session_id,
     humanSpeaking: false,
     openai: { ws: ows, activeResponse: false },
+    has_active_response: false,
     textBuf: "",
     stage: persisted.stage,
     source: persisted.source,
@@ -1678,18 +1705,28 @@ async function runOpenAiVoiceTest(args) {
         jlog({ event: "OPENAI_EVT", session_id, type });
       }
 
+      if (type === "response.created") {
+        st.has_active_response = true;
+        st.openai.activeResponse = true;
+      }
+      if (type === "response.done" || type === "response.canceled" || type === "response.completed") {
+        st.has_active_response = false;
+        st.openai.activeResponse = false;
+      }
+
       if (type === "input_audio_buffer.speech_started") {
         st.humanSpeaking = true;
         st.inSpeech = true;
         st.emittedThisTurn = false; // reset emit guard at start of each speech cycle
-        if (st.openai.activeResponse === true) {
+        if (st.has_active_response === true) {
           try { ows.send(JSON.stringify({ type: "response.cancel" })); } catch {}
           jlog({ event: "TEST_CANCEL_ON_SPEECH_STARTED", session_id });
         } else {
-          jlog({ event: "TEST_CANCEL_SKIPPED_NO_ACTIVE", session_id });
+          jlog({ event: "OPENAI_SKIP_CANCEL_NO_ACTIVE", session_id });
         }
         stopOutboundPlayback(st); // "stop outbound audio" even in test mode
         st.openai.activeResponse = false;
+        st.has_active_response = false;
         return;
       }
 
@@ -1706,6 +1743,15 @@ async function runOpenAiVoiceTest(args) {
           jlog({ event: "TEST_NO_USER_TEXT", session_id, stage: st.stage });
           return;
         }
+
+        // Ensure a response is created after each user turn (test-mode: text only).
+        try {
+          ows.send(JSON.stringify({ type: "response.create", response: { modalities: ["text"], instructions: "Responde breve en español." } }));
+          st.has_active_response = true;
+          st.openai.activeResponse = true;
+          jlog({ event: "OPENAI_RESPONSE_CREATE_SENT", session_id });
+        } catch {}
+
         // Only advance when explicit userText exists (no VAD-only advancement).
         aiReplyAndEmitTest(st, mockUserText).then(() => {
           persisted.stage = st.stage;
@@ -1901,8 +1947,44 @@ const server = http.createServer((req, res) => {
   res.end("voice-rtp-gateway");
 });
 
-const wss = VOICE_TEST_MODE ? null : new WebSocketServer({ server, path: "/telnyx", perMessageDeflate: false });
-const wssTwilio = VOICE_TEST_MODE ? null : new WebSocketServer({ server, path: "/twilio", perMessageDeflate: false });
+const wss = VOICE_TEST_MODE ? null : new WebSocketServer({ noServer: true, perMessageDeflate: false });
+const wssTwilio = VOICE_TEST_MODE ? null : new WebSocketServer({ noServer: true, perMessageDeflate: false });
+
+// Take control of HTTP upgrade routing to avoid extension/protocol negotiation conflicts.
+server.on("upgrade", (req, socket, head) => {
+  try {
+    const url = String(req?.url || "");
+    const h = req?.headers || {};
+    const inExt = String(h["sec-websocket-extensions"] || "");
+    const inProto = String(h["sec-websocket-protocol"] || "");
+    const hasHost = Boolean(h["host"]);
+    jlog({ event: "UPGRADE", url, has_host: hasHost, in_ws_ext: inExt });
+
+    // Strip extensions/protocol to prevent permessage-deflate negotiation (client expects none).
+    try { delete req.headers["sec-websocket-extensions"]; } catch {}
+    try { delete req.headers["sec-websocket-protocol"]; } catch {}
+    try { if (!req.headers["host"]) req.headers["host"] = "revenue-asi-voice-gateway.fly.dev"; } catch {}
+
+    if (VOICE_TEST_MODE) {
+      try { socket.destroy(); } catch {}
+      return;
+    }
+
+    if (url.startsWith("/telnyx") && wss) {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+      return;
+    }
+    if (url.startsWith("/twilio") && wssTwilio) {
+      wssTwilio.handleUpgrade(req, socket, head, (ws) => wssTwilio.emit("connection", ws, req));
+      return;
+    }
+
+    try { socket.destroy(); } catch {}
+    void inProto; // keep for debugging if needed (do not log by default)
+  } catch {
+    try { socket.destroy(); } catch {}
+  }
+});
 
 wss?.on("connection", (ws, req) => {
   const u = new URL(req.url || "/telnyx", "http://localhost");
@@ -2238,11 +2320,15 @@ server.listen(PORT, "0.0.0.0", () => {
   jlog({
     event: "BOOT",
     port: PORT,
+    openai_tts_model_present: Boolean(OPENAI_TTS_MODEL),
+    openai_tts_model: OPENAI_TTS_MODEL,
     carrier_primary: VOICE_CARRIER_PRIMARY,
     paths: VOICE_TEST_MODE ? ["/voice-test"] : ["/twilio", "/telnyx"],
     has_token: Boolean(VOICE_GATEWAY_TOKEN),
     has_openai_key: Boolean(OPENAI_API_KEY),
     has_telnyx_api_key: Boolean(TELNYX_API_KEY),
+    openai_tts_model_present: Boolean(OPENAI_TTS_MODEL),
+    openai_tts_model: OPENAI_TTS_MODEL,
     voice_test_mode: VOICE_TEST_MODE,
     tuning: {
       BARGE_IN_RMS,
