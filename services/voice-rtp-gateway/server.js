@@ -2127,6 +2127,22 @@ wss?.on("connection", (ws, req) => {
       session.source = (session.client_state?.source ? String(session.client_state.source) : "") || "encuentra24";
       session.telnyx.media_format = mediaFormat;
 
+      const encStart = String(mediaFormat?.encoding || "").toUpperCase();
+      if (encStart !== "PCMU") {
+        jlog({
+          event: "ERROR_FATAL_CODEC",
+          session_id: session.session_id,
+          stream_id: session.stream_id,
+          call_control_id: session.call_control_id,
+          encoding: mediaFormat?.encoding ?? null,
+          sample_rate: mediaFormat?.sample_rate ?? null,
+          channels: mediaFormat?.channels ?? null,
+        });
+        try { ws.close(1011, "unsupported_codec"); } catch {}
+        if (session.stream_id) sessions.delete(session.stream_id);
+        return;
+      }
+
       if (session.stream_id) sessions.set(session.stream_id, session);
 
       jlog({

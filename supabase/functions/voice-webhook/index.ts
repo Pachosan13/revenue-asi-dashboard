@@ -1009,6 +1009,7 @@ serve(async (req) => {
                 },
                 body: JSON.stringify({
                   stream_url: STREAM_URL,
+                  stream_codec: "PCMU",
                   track: "both_tracks",
                   client_state: client_state_b64,
                   media_format: { encoding: "PCMU", sample_rate: 8000, channels: 1 },
