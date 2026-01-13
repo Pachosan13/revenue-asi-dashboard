@@ -319,6 +319,7 @@ async function insertNextTouchIfExists(args: {
 }
 
 serve(async (req) => {
+  console.log("VOICE_WEBHOOK_HIT", { ts: new Date().toISOString(), method: req.method, url: req.url })
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders })
 
   const SB_URL = Deno.env.get("SUPABASE_URL")
@@ -951,6 +952,10 @@ serve(async (req) => {
     if (!supabase) return json({ ok: true, ignored: true, reason: "missing_supabase_env", version: VERSION })
 
     const event = (await req.json().catch(() => ({}))) as any
+    console.log("VOICE_WEBHOOK_EVENT", {
+      event_type: event?.event_type ?? event?.data?.event_type ?? event?.data?.eventType ?? null,
+      data_event_type: event?.data?.event_type ?? event?.data?.eventType ?? null,
+    })
     const eventType: string | null =
       (event?.data?.event_type as string | undefined) ??
       (event?.data?.eventType as string | undefined) ??
@@ -983,6 +988,9 @@ serve(async (req) => {
     if (!inferredTouchRunId) {
       // Manual Telnyx calls (portal / ad-hoc):
       // If there's no touch_run_id but we have call_control_id, start realtime streaming so the call isn't mute.
+      if (eventType !== "call.answered" && callControlId) {
+        console.log("STREAMING_WAIT_STATE", { call_control_id: callControlId, event_type: eventType })
+      }
       if (eventType === "call.answered" && callControlId) {
         if (!VOICE_GATEWAY_TOKEN) {
           console.log("VOICE_GATEWAY_TOKEN_MISSING", { token_len: 0, token_prefix: "" })
@@ -1012,6 +1020,7 @@ serve(async (req) => {
               payload: JSON.stringify(body),
               stream_url: STREAM_URL,
             })
+            console.log("STREAMING_START_AFTER_ANSWER", { call_control_id: callControlId })
 
             const res = await fetch(
               url,
