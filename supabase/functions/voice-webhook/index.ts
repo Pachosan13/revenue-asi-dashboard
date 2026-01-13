@@ -219,7 +219,7 @@ async function upsertVoiceCallMerged(
         id: args.touch_run_id, // stable id (uuid)
         lead_id: args.lead_id,
         touch_run_id: args.touch_run_id,
-        channel: "voice",
+          channel: "voice",
         provider: args.provider,
         provider_call_id: args.provider_call_id ?? existing?.provider_call_id ?? null,
         provider_job_id: args.provider_job_id ?? existing?.provider_job_id ?? null,
@@ -308,7 +308,7 @@ async function insertNextTouchIfExists(args: {
   }
 
   const { data: ins, error: insErr } = await supabase
-    .from("touch_runs")
+      .from("touch_runs")
     .upsert(insertBody, { onConflict: "lead_id,campaign_id,step,channel", ignoreDuplicates: true })
     .select("id")
     .maybeSingle()
@@ -779,9 +779,9 @@ serve(async (req) => {
     const callDuration = callDurationRaw ? Number(callDurationRaw) : null
 
     const { data: run, error: rErr } = await supabase
-      .from("touch_runs")
+        .from("touch_runs")
       .select("id, account_id, campaign_id, lead_id, step, channel, payload, meta")
-      .eq("id", touchRunId)
+        .eq("id", touchRunId)
       .maybeSingle()
 
     if (rErr) return json({ ok: false, error: rErr.message, version: VERSION }, 500)
@@ -826,7 +826,7 @@ serve(async (req) => {
       await upsertVoiceCallMerged(supabase, {
         touch_run_id: run.id,
         lead_id: run.lead_id,
-        provider: "twilio",
+          provider: "twilio",
         from_phone: fromPhone,
         to_phone: toPhone,
         provider_call_id: callSid ?? (runPayload?.twilio_call_sid ?? null),
@@ -999,23 +999,39 @@ serve(async (req) => {
           const client_state_b64 = btoa(JSON.stringify(client_state_obj))
 
           try {
+            const url = `https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/streaming_start`
+            const body = {
+              stream_url: STREAM_URL,
+              stream_track: "both_tracks",
+              stream_codec: "PCMU",
+              client_state: client_state_b64,
+            }
+            console.log("TELNYX_STREAMING_START_REQ", {
+              call_control_id: callControlId,
+              url,
+              payload: JSON.stringify(body),
+              stream_url: STREAM_URL,
+            })
+
             const res = await fetch(
-              `https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/streaming.start`,
+              url,
               {
-                method: "POST",
-                headers: {
+              method: "POST",
+              headers: {
                   Authorization: `Bearer ${TELNYX_API_KEY}`,
-                  "Content-Type": "application/json",
+                "Content-Type": "application/json",
                 },
-                body: JSON.stringify({
-                  stream_url: STREAM_URL,
-                  stream_codec: "PCMU",
-                  track: "both_tracks",
-                  client_state: client_state_b64,
-                  media_format: { encoding: "PCMU", sample_rate: 8000, channels: 1 },
-                }),
+                body: JSON.stringify(body),
               },
             )
+            const txt = await res.text().catch(() => "")
+            console.log("TELNYX_STREAMING_START_RES", {
+              call_control_id: callControlId,
+              status: res.status,
+              ok: res.ok,
+              response_preview: txt.slice(0, 300),
+              content_type: String(res.headers.get("content-type") || ""),
+            })
 
             // Required structured log (no secrets)
             console.log("TELNYX_MANUAL_FALLBACK", {
@@ -1026,6 +1042,10 @@ serve(async (req) => {
               status: res.status,
             })
           } catch (e) {
+            console.log("TELNYX_STREAMING_START_ERR", {
+              call_control_id: callControlId,
+              err: String((e as any)?.message ?? e),
+            })
             console.log("TELNYX_MANUAL_FALLBACK", {
               event: "TELNYX_MANUAL_FALLBACK",
               call_control_id: callControlId,
