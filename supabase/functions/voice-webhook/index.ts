@@ -324,6 +324,8 @@ serve(async (req) => {
   const SB_URL = Deno.env.get("SUPABASE_URL")
   const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
   const TELNYX_API_KEY = Deno.env.get("TELNYX_API_KEY") ?? Deno.env.get("Telnyx_Api") ?? null
+  const VOICE_GATEWAY_TOKEN = String(Deno.env.get("VOICE_GATEWAY_TOKEN") ?? "").trim()
+  const STREAM_URL = `wss://revenue-asi-voice-gateway.fly.dev/telnyx?token=${VOICE_GATEWAY_TOKEN}`
   const supabase = SB_URL && SB_KEY ? createClient(SB_URL, SB_KEY, { auth: { persistSession: false } }) : null
 
   const url = new URL(req.url)
@@ -982,8 +984,12 @@ serve(async (req) => {
       // Manual Telnyx calls (portal / ad-hoc):
       // If there's no touch_run_id but we have call_control_id, start realtime streaming so the call isn't mute.
       if (eventType === "call.answered" && callControlId) {
-        const VOICE_GATEWAY_STREAM_URL = Deno.env.get("VOICE_GATEWAY_STREAM_URL") ?? null
-        if (TELNYX_API_KEY && VOICE_GATEWAY_STREAM_URL) {
+        if (!VOICE_GATEWAY_TOKEN) {
+          console.log("VOICE_GATEWAY_TOKEN_MISSING", { token_len: 0, token_prefix: "" })
+          return json({ ok: false, error: "missing_voice_gateway_token", version: VERSION }, 500)
+        }
+        console.log("STREAM_URL_BUILT", { token_len: VOICE_GATEWAY_TOKEN.length, token_prefix: VOICE_GATEWAY_TOKEN.slice(0, 6) })
+        if (TELNYX_API_KEY) {
           const manualTouchRunId = `manual_${String(callControlId).replace("v3:", "")}`
           const client_state_obj = {
             touch_run_id: manualTouchRunId,
@@ -994,7 +1000,7 @@ serve(async (req) => {
 
           try {
             const res = await fetch(
-              `https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/streaming_start`,
+              `https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/streaming.start`,
               {
                 method: "POST",
                 headers: {
@@ -1002,7 +1008,7 @@ serve(async (req) => {
                   "Content-Type": "application/json",
                 },
                 body: JSON.stringify({
-                  stream_url: VOICE_GATEWAY_STREAM_URL,
+                  stream_url: STREAM_URL,
                   track: "both_tracks",
                   client_state: client_state_b64,
                   media_format: { encoding: "PCMU", sample_rate: 8000, channels: 1 },
