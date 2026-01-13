@@ -1938,6 +1938,31 @@ wss?.on("connection", (ws, req) => {
     });
   } catch {}
 
+  // Debug: log outbound socket writes to detect RSV1 frames (do NOT log payloads).
+  try {
+    const sock = ws?._socket;
+    if (sock && typeof sock.write === "function" && !sock._writeWrappedForRsv1) {
+      const origWrite = sock.write.bind(sock);
+      sock._writeWrappedForRsv1 = true;
+      sock.write = (chunk, ...args) => {
+        try {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk || ""), "binary");
+          const nbytes = buf.length;
+          const b0 = nbytes > 0 ? buf[0] : 0;
+          jlog({
+            event: "SOCKET_WRITE",
+            session_id: session.session_id,
+            nbytes,
+            first_byte_hex: "0x" + b0.toString(16).padStart(2, "0"),
+            rsv1_set: (b0 & 0x40) !== 0,
+            opcode: b0 & 0x0f,
+          });
+        } catch {}
+        return origWrite(chunk, ...args);
+      };
+    }
+  } catch {}
+
   ws.on("message", (data) => {
     const raw = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
     const msg = safeJsonParse(raw);
