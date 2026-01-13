@@ -108,6 +108,21 @@ serve(async (req) => {
   // NOTE: el secreto en Supabase Edge está cargado como "Telnyx_Api" (según usuario),
   // pero también aceptamos TELNYX_API_KEY por consistencia.
   const TELNYX_API_KEY = Deno.env.get("TELNYX_API_KEY") ?? Deno.env.get("Telnyx_Api") ?? null
+  const VOICE_GATEWAY_TOKEN = String(Deno.env.get("VOICE_GATEWAY_TOKEN") ?? "").trim()
+  const TELNYX_STREAM_URL_FROM_TOKEN = VOICE_GATEWAY_TOKEN
+    ? `wss://revenue-asi-voice-gateway.fly.dev/telnyx?token=${VOICE_GATEWAY_TOKEN}`
+    : null
+  let streamUrlBuiltLogged = false
+  function logStreamUrlBuilt(touchRunId: string) {
+    if (streamUrlBuiltLogged) return
+    streamUrlBuiltLogged = true
+    console.log(JSON.stringify({
+      event: "STREAM_URL_BUILT",
+      touch_run_id: touchRunId,
+      got_len: VOICE_GATEWAY_TOKEN.length,
+      token_prefix: VOICE_GATEWAY_TOKEN ? VOICE_GATEWAY_TOKEN.slice(0, 6) : "",
+    }))
+  }
 
   const QA_VOICE_SINK = Deno.env.get("QA_VOICE_SINK") ?? null
   const DRY_DEFAULT = Deno.env.get("DRY_RUN_VOICE") === "true"
@@ -263,13 +278,14 @@ serve(async (req) => {
     const timeoutSecs = timeoutSecsRaw ? Number(timeoutSecsRaw) : 60
     if (Number.isFinite(timeoutSecs) && timeoutSecs > 0) body.timeout_secs = Math.min(Math.max(timeoutSecs, 15), 120)
 
-    // Optional: streaming to our Fly gateway (no TwiML). Provide wss URL with token.
-    const streamUrl =
-      (args.config?.telnyx_stream_url as string | undefined) ??
-      (args.config?.stream_url as string | undefined) ??
-      (Deno.env.get("TELNYX_STREAM_URL") ?? undefined)
-    if (streamUrl) {
-      body.stream_url = streamUrl
+    // Streaming to our Fly gateway: ALWAYS derive from VOICE_GATEWAY_TOKEN (ignore TELNYX_STREAM_URL env).
+    if (!TELNYX_STREAM_URL_FROM_TOKEN) {
+      console.log(JSON.stringify({ event: "VOICE_GATEWAY_TOKEN_MISSING", touch_run_id: args.touchRunId, token_len: 0, token_prefix: "" }))
+      return { ok: false, error: "missing_voice_gateway_token", raw: null }
+    }
+    logStreamUrlBuilt(args.touchRunId)
+    {
+      body.stream_url = TELNYX_STREAM_URL_FROM_TOKEN
 
       // Telnyx bidirectional streaming: RTP payload (no headers) over WebSocket.
       // Force a deterministic codec to avoid OPUS defaults causing silence in our gateway.
@@ -488,10 +504,12 @@ serve(async (req) => {
 
       // 2.5 Enviar por Telnyx (PRIMARY) o Twilio (fallback)
       if (!dryRun && isTelnyx) {
-        const streamUrl =
-          (config?.telnyx_stream_url as string | undefined) ??
-          (config?.stream_url as string | undefined) ??
-          (Deno.env.get("TELNYX_STREAM_URL") ?? undefined)
+        const streamUrl = TELNYX_STREAM_URL_FROM_TOKEN
+        if (!streamUrl) {
+          console.log(JSON.stringify({ event: "VOICE_GATEWAY_TOKEN_MISSING", touch_run_id: run.id, token_len: 0, token_prefix: "" }))
+          throw new Error("missing_voice_gateway_token")
+        }
+        logStreamUrlBuilt(run.id)
 
         const telnyxFrom =
           (config?.telnyx_from as string | undefined) ??
