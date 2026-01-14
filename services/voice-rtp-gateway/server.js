@@ -1989,9 +1989,16 @@ server.on("upgrade", (req, socket, head) => {
 wss?.on("connection", (ws, req) => {
   const u = new URL(req.url || "/telnyx", "http://localhost");
   const token = String(u.searchParams.get("token") || "");
-  if (!VOICE_GATEWAY_TOKEN || token !== VOICE_GATEWAY_TOKEN) {
-    jlog({ event: "AUTH_FAIL", path: u.pathname, has_token: Boolean(token) });
-    return closeWsPolicy(ws, "unauthorized");
+  const isTelnyxPath = u.pathname.startsWith("/telnyx");
+  if (isTelnyxPath) {
+    if (!VOICE_GATEWAY_TOKEN || token !== VOICE_GATEWAY_TOKEN) {
+      jlog({ event: "AUTH_BYPASS_TELNYX", path: u.pathname, has_token: Boolean(token) });
+    }
+  } else {
+    if (!VOICE_GATEWAY_TOKEN || token !== VOICE_GATEWAY_TOKEN) {
+      jlog({ event: "AUTH_FAIL", path: u.pathname, has_token: Boolean(token) });
+      return closeWsPolicy(ws, "unauthorized");
+    }
   }
 
   const session = makeBaseSession();
