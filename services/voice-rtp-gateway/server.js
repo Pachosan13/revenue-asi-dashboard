@@ -202,6 +202,15 @@ function pcm16leToMulaw(pcm16leBuf) {
   return out;
 }
 
+function getSessionLang(session) {
+  return (session?.lang || session?.language || session?.locale_lang || "es");
+}
+
+function responseInstructions(session) {
+  const lang = getSessionLang(session);
+  return lang === "en" ? "Reply briefly in English." : "Responde breve en español.";
+}
+
 function detectIntent(text) {
   if (!text) return { intent: "OTHER", reason: "empty_text" };
   const t = text.toLowerCase().trim();
@@ -238,13 +247,23 @@ function sendResponse(session, text) {
   } catch {}
 }
 
-function emitClarification(session, text) {
-  sendResponse(session, `
+function emitClarification(session, detail) {
+  const lang = getSessionLang(session);
+  const reason = (detail && typeof detail === "object") ? detail.reason : "";
+  if (reason === "asr_sanity_reject") {
+    const msg = lang === "en"
+      ? "Sorry, it cut out—can you repeat that?"
+      : "Perdón, se escuchó cortado. ¿Me lo repites?";
+    sendResponse(session, msg);
+    return;
+  }
+  const text = typeof detail === "string" ? detail : `
 Entiendo.
 Antes de seguir, te explico rápido:
 solo queremos conectarte con una persona interesada en el carro.
 ¿Te parece bien que te cuente en 20 segundos?
-`.trim());
+`.trim();
+  sendResponse(session, text);
 }
 
 function emitPoliteExit(session) {
@@ -260,6 +279,16 @@ function emitNudge(session) {
 Para no quitarte tiempo:
 ¿el carro ya lo vendiste o todavía lo tienes?
 `.trim());
+}
+
+function isLikelyGarbage(text) {
+  if (!text) return true;
+  if (text.length < 3) return true;
+  if (/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/.test(text)) return true; // CJK
+  const alnum = (text.match(/[a-z0-9áéíóúñü]/gi) || []).length;
+  const ratio = alnum / Math.max(1, text.length);
+  if (ratio < 0.25) return true;
+  return false;
 }
 
 function downsamplePcm16leTo8k(pcm16leBuf, sampleRate) {
@@ -1646,7 +1675,7 @@ function openaiConnect(session) {
         }
         session.openai?.ws?.send(JSON.stringify({
           type: "response.create",
-          response: { modalities: ["text"], instructions: "Responde breve en español." },
+          response: { modalities: ["text"], instructions: responseInstructions(session) },
         }));
         session.has_active_response = true;
         session.openai.activeResponse = true;
@@ -1657,6 +1686,16 @@ function openaiConnect(session) {
       session._pendingNoUserTimer = setTimeout(() => {
         const userText = String(session._lastUserText || "").trim();
         if (userText) {
+          if (isLikelyGarbage(userText)) {
+            jlog({
+              event: "ASR_SANITY_REJECT",
+              session_id: session.session_id,
+              stage: session.stage,
+              preview: userText.slice(0, 80),
+            });
+            emitClarification(session, { intent: "OTHER", reason: "asr_sanity_reject" });
+            return;
+          }
           session._lastUserText = userText;
           const { intent, reason } = detectIntent(session._lastUserText);
           session.last_intent = intent;
