@@ -79,4 +79,16 @@ Expected logs include:
 - `OPENAI_READY`
 - `FIRST_AUDIO_SENT` (when OpenAI emits audio deltas)
 
+## Deploy (Fly.io)
+
+```
+cd services/voice-rtp-gateway
+fly deploy -a revenue-asi-voice-gateway
+fly logs -a revenue-asi-voice-gateway
+```
+
+Notes:
+- Uses Fly remote builder with Dockerfile (no local Docker Desktop required).
+- PORT is set to 8080 via fly.toml.
+
 
