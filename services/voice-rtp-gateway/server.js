@@ -1240,6 +1240,8 @@ function openaiConnect(session) {
           ].join(" "),
         },
       }));
+      session.openai_response_active = true;
+      jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, ts: new Date().toISOString() });
       session._lastBotPrompt = finalText;
       session.speaking = true;
       session.lastSpeakAt = nowMs();
@@ -1573,6 +1575,7 @@ function openaiConnect(session) {
         }));
         session.has_active_response = true;
         session.openai.activeResponse = true;
+        session.openai_response_active = true;
         jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, ts: new Date().toISOString() });
       } catch {}
 
