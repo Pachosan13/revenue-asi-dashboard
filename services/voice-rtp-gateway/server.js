@@ -1452,6 +1452,9 @@ function openaiConnect(session) {
       if (shouldCancel) {
         try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
         try { session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
+        session.bytes_since_commit = 0;
+        session.last_audio_append_at = 0;
+        session.last_inbound_rms = 0;
         session.lastCancelAt = now;
         session.has_active_response = false;
         session.openai.activeResponse = false;
@@ -1521,6 +1524,16 @@ function openaiConnect(session) {
       }
 
       session._lastResponseCreatedAt = null;
+      if (session.bytes_since_commit === 0) {
+        const dtSinceAppend = session.last_audio_append_at ? now - session.last_audio_append_at : null;
+        jlog({
+          event: "SKIP_COMMIT_ZERO_BYTES",
+          session_id: session.session_id,
+          tts_playing: Boolean(session.tts_playing),
+          dt_ms: dtSinceAppend,
+        });
+        return;
+      }
       if (session.bytes_since_commit < MIN_COMMIT_BYTES) {
         jlog({
           event: "SKIP_COMMIT_TOO_SMALL",
@@ -1552,6 +1565,7 @@ function openaiConnect(session) {
           tts_playing: Boolean(session.tts_playing),
         });
         session.bytes_since_commit = 0;
+        session.last_audio_append_at = 0;
       } catch {}
 
       // Create the next response immediately (text modality is enough; audio stays disabled downstream).
