@@ -604,6 +604,7 @@ function makeBaseSession() {
     last_intent: "OTHER",
     awaiting_yes_confirmation: false,
     yes_confirmed: false,
+    awaiting_commit_response: false,
   };
 }
 
@@ -661,18 +662,13 @@ function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, trac
     sess.rmsAboveSince = 0;
   }
 
-  // Send audio to OpenAI
+  // Send audio to OpenAI (raw PCMU base64, matching input_audio_format=g711_ulaw)
   if (sess.openai?.ws?.readyState === WebSocket.OPEN) {
-    let pcm16le = null;
-    if (pcm16_src) {
-      pcm16le = _sr === 8000 ? pcm16leUpsample2x(pcm16_src) : pcm16_src;
-    }
-    if (!pcm16le) return;
-
+    const mulawBuf = Buffer.from(String(payloadB64), "base64");
     const frameCount = (sess._audioFrameCount || 0) + 1;
     sess._audioFrameCount = frameCount;
     const logAudio = frameCount % 20 === 0 || rmsNorm > 0.02;
-    try { sess.bytes_since_commit = (sess.bytes_since_commit || 0) + pcm16le.length; } catch {}
+    try { sess.bytes_since_commit = (sess.bytes_since_commit || 0) + mulawBuf.length; } catch {}
     sess.last_audio_append_at = now;
     sess.last_inbound_rms = rmsNorm;
 
@@ -692,7 +688,7 @@ function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, trac
       jlog({
         event: "TELNYX_AUDIO_IN",
         session_id: sess.session_id,
-        bytes_pcmsrc: pcm16_src ? pcm16_src.length : 0,
+        bytes_pcmsrc: mulawBuf.length,
         rms: Number(rmsNorm.toFixed(4)),
         track: track || (isInbound ? "inbound" : ""),
       });
@@ -700,7 +696,7 @@ function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, trac
 
     sess.openai.ws.send(JSON.stringify({
       type: "input_audio_buffer.append",
-      audio: Buffer.from(pcm16le).toString("base64"),
+      audio: mulawBuf.toString("base64"),
     }));
     sess.openai.firstAudioSent = true;
 
@@ -708,7 +704,7 @@ function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, trac
       jlog({
         event: "OPENAI_AUDIO_APPEND",
         session_id: sess.session_id,
-        bytes_pcm16_16k: pcm16le.length,
+        bytes_pcm16_16k: mulawBuf.length,
         bytes_since_commit: sess.bytes_since_commit || 0,
         tts_playing: Boolean(sess.tts_playing),
       });
@@ -1283,15 +1279,10 @@ function openaiConnect(session) {
     const msg = {
       type: "session.update",
       session: {
-        instructions: `${agentContextLine(session)} ${lockedSystemInstructions(session)}`,
-        modalities: ["text", "audio"],
-        input_audio_format: "pcm16",
+        modalities: ["text"],
+        input_audio_format: "g711_ulaw",
         output_audio_format: "pcm16",
-        input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
-        // We control turns; no long monologues.
         turn_detection: { type: "server_vad", create_response: false },
-        voice: VOICE_NAME,
-        // OpenAI Realtime enforces a minimum temperature (>= 0.6). Lower values cause hard errors and can lead to silence.
         temperature: 0.6,
       },
     };
@@ -1506,6 +1497,29 @@ function openaiConnect(session) {
       session.openai_speaking = false;
       session.openai_response_active = false;
     }
+    if (m.type === "input_audio_buffer.committed") {
+      jlog({ event: "OPENAI_COMMITTED", session_id: session.session_id });
+      if (nowMs() - session.last_commit_empty_at < NO_COMMIT_BACKOFF_MS) {
+        jlog({ event: "SKIP_RESPONSE_RECENT_COMMIT_EMPTY", session_id: session.session_id });
+        return;
+      }
+      if (session.awaiting_commit_response) {
+        session.awaiting_commit_response = false;
+      }
+      // VOICE RULE (OpenAI aligned):
+      // After input_audio_buffer.committed, ALWAYS send response.create. Never gate on transcription timing or content.
+      try {
+        session.openai?.ws?.send(JSON.stringify({
+          type: "response.create",
+          response: { modalities: ["text"], instructions: responseInstructions(session) },
+        }));
+        session.has_active_response = true;
+        session.openai.activeResponse = true;
+        session.openai_response_active = true;
+        jlog({ event: "RESPONSE_CREATE_POST_COMMIT", session_id: session.session_id, stage: session.stage });
+        jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, ts: new Date().toISOString() });
+      } catch {}
+    }
     if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
       session.has_active_response = false;
       session.openai.activeResponse = false;
@@ -1621,7 +1635,6 @@ function openaiConnect(session) {
         session._pendingNoUserTimer = null;
       }
 
-      session._lastResponseCreatedAt = null;
       if (session.bytes_since_commit === 0) {
         const dtSinceAppend = session.last_audio_append_at ? now - session.last_audio_append_at : null;
         jlog({
@@ -1664,25 +1677,7 @@ function openaiConnect(session) {
         });
         session.bytes_since_commit = 0;
         session.last_audio_append_at = 0;
-      } catch {}
-
-      // VOICE RULE: never block response.create due to transcript timing; ASR uncertainty is handled by the model asking to repeat.
-      // Create the next response immediately (text modality is enough; audio stays disabled downstream).
-      try {
-        const nowTs = nowMs();
-        if (nowTs - session.last_commit_empty_at < NO_COMMIT_BACKOFF_MS) {
-          jlog({ event: "SKIP_RESPONSE_RECENT_COMMIT_EMPTY", session_id: session.session_id });
-          return;
-        }
-        session.openai?.ws?.send(JSON.stringify({
-          type: "response.create",
-          response: { modalities: ["text"], instructions: responseInstructions(session) },
-        }));
-        session.has_active_response = true;
-        session.openai.activeResponse = true;
-        session.openai_response_active = true;
-        jlog({ event: "RESPONSE_CREATE_POST_COMMIT", session_id: session.session_id, stage: session.stage });
-        jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, ts: new Date().toISOString() });
+        session.awaiting_commit_response = true;
       } catch {}
 
       session._pendingNoUserTimer = setTimeout(() => {
