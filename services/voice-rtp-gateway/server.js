@@ -1414,6 +1414,11 @@ function openaiConnect(session) {
     // Barge-in via OpenAI VAD
     if (m.type === "input_audio_buffer.speech_started") {
       const now = nowMs();
+      const was_tts_playing = Boolean(session.tts_playing);
+      const was_openai_speaking = Boolean(session.openai_speaking);
+      const was_openai_response_active = Boolean(session.openai_response_active);
+      const was_has_active_response = Boolean(session.has_active_response);
+      const was_openai_activeResponse = Boolean(session?.openai?.activeResponse);
       // Speaking lock: ignore VAD while bot is speaking (prevents echo/noise advancing stages)
       if (session.speaking_until && now < session.speaking_until) {
         if (!session._lastVadIgnoredAt || now - session._lastVadIgnoredAt > 1000) {
@@ -1432,12 +1437,16 @@ function openaiConnect(session) {
       // VAD barge-in trigger
       const sinceLastCancelMs = session.lastCancelAt ? (now - session.lastCancelAt) : null;
       jlog({ event: "BARGE_IN_TRIGGER", reason: "vad", rms: null, sinceLastCancelMs });
-      const was_tts_playing = Boolean(session.tts_playing);
       if (was_tts_playing) {
         try { stopOutboundPlayback(session); } catch {}
         session.tts_playing = false;
       }
-      const shouldCancel = Boolean(session.openai_response_active || session.openai_speaking);
+      const shouldCancel = Boolean(
+        was_openai_response_active ||
+        was_openai_speaking ||
+        was_has_active_response ||
+        was_openai_activeResponse
+      );
       if (shouldCancel) {
         try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
         try { session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
@@ -1449,16 +1458,20 @@ function openaiConnect(session) {
           event: "BARGE_IN_CANCEL_SENT",
           session_id: session.session_id,
           tts_playing: was_tts_playing,
-          openai_speaking: Boolean(session.openai_speaking),
-          openai_response_active: Boolean(session.openai_response_active),
+          openai_speaking: was_openai_speaking,
+          openai_response_active: was_openai_response_active,
+          has_active_response: was_has_active_response,
+          openai_activeResponse: was_openai_activeResponse,
         });
       } else {
         jlog({
           event: "BARGE_IN_CANCEL_SKIPPED",
           session_id: session.session_id,
           tts_playing: was_tts_playing,
-          openai_speaking: Boolean(session.openai_speaking),
-          openai_response_active: Boolean(session.openai_response_active),
+          openai_speaking: was_openai_speaking,
+          openai_response_active: was_openai_response_active,
+          has_active_response: was_has_active_response,
+          openai_activeResponse: was_openai_activeResponse,
         });
       }
       // Hard-stop any outbound audio to Telnyx immediately.
