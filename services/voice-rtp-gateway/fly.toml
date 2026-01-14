@@ -2,7 +2,7 @@ app = "revenue-asi-voice-gateway"
 primary_region = "dfw"
 
 [build]
-  dockerfile = "Dockerfile"
+  builder = "paketobuildpacks/builder:base"
 
 [http_service]
   internal_port = 8080
@@ -10,6 +10,12 @@ primary_region = "dfw"
   auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
+
+[env]
+  PORT = "8080"
+
+[processes]
+  app = "node services/voice-rtp-gateway/server.js"
 
 [[vm]]
   cpu_kind = "shared"
