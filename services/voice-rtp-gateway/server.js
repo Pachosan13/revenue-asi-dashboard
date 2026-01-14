@@ -230,7 +230,7 @@ function detectIntent(text) {
   }
 
   if (/\b(sí|si|claro|ok|dale|perfecto|me parece|está bien|esta bien|quiero)\b/.test(t)) {
-    return { intent: "YES", reason: "match_yes_phrase" };
+    return { intent: "YES", reason: "yes_clean_candidate" };
   }
 
   return { intent: "OTHER", reason: "fallback" };
@@ -602,6 +602,8 @@ function makeBaseSession() {
     openai_speaking: false,
     openai_response_active: false,
     last_intent: "OTHER",
+    awaiting_yes_confirmation: false,
+    yes_confirmed: false,
   };
 }
 
@@ -1177,6 +1179,9 @@ async function advanceStageAndEmit(session, userText) {
   // Terminal state guard (shared): once done, ignore any further turns/emits.
   if (stage === "done") return;
 
+  // SYSTEM TRUTH:
+  // Stage advancement requires YES confirmed explicitly. No implicit YES, no model-side advancement.
+
   // Mock answers (TEST MODE)
   const mockAvail = session?.testMock?.available;
   const mockUrg = session?.testMock?.urgent;
@@ -1195,6 +1200,9 @@ async function advanceStageAndEmit(session, userText) {
   } else if (stage === "schedule") {
     // accept anything; we just close quickly
   }
+
+  session.yes_confirmed = false;
+  session.awaiting_yes_confirmation = false;
 
   const next = nextStageName(stage);
   session.stage = next;
@@ -1720,6 +1728,41 @@ function openaiConnect(session) {
             user_text_len: userText.length,
             preview: userText.slice(0, 80),
           });
+
+          if (session.awaiting_yes_confirmation) {
+            if (intent === "YES") {
+              session.yes_confirmed = true;
+              session.awaiting_yes_confirmation = false;
+              jlog({ event: "YES_CONFIRMED", session_id: session.session_id, stage: session.stage });
+              advanceStageAndEmit(session, session._lastUserText).catch(() => {});
+              return;
+            }
+            if (intent === "NO") {
+              session.awaiting_yes_confirmation = false;
+              session.yes_confirmed = false;
+              emitPoliteExit(session);
+              return;
+            }
+            if (intent === "OBJECTION") {
+              session.awaiting_yes_confirmation = false;
+              session.yes_confirmed = false;
+              emitClarification(session, { intent, reason });
+              return;
+            }
+          }
+
+          if (intent === "YES" && session.yes_confirmed !== true) {
+            const lang = getSessionLang(session);
+            const msg = lang === "en"
+              ? "Just to confirm: do you want to move forward now?"
+              : "Solo para confirmar: ¿sí te interesa avanzar ahora?";
+            sendResponse(session, msg);
+            session.awaiting_yes_confirmation = true;
+            session.yes_confirmed = false;
+            jlog({ event: "YES_CONFIRMATION_REQUESTED", session_id: session.session_id, stage: session.stage });
+            return;
+          }
+
           switch (intent) {
             case "NO":
               emitPoliteExit(session);
@@ -1729,6 +1772,9 @@ function openaiConnect(session) {
               emitClarification(session, { intent, reason });
               return;
             case "YES":
+              if (session.yes_confirmed !== true) return;
+              session.yes_confirmed = false;
+              session.awaiting_yes_confirmation = false;
               advanceStageAndEmit(session, session._lastUserText).catch(() => {});
               return;
             default:
@@ -1875,6 +1921,8 @@ async function runOpenAiVoiceTest(args) {
     humanSpeaking: false,
     openai: { ws: ows, activeResponse: false },
     has_active_response: false,
+    awaiting_yes_confirmation: false,
+    yes_confirmed: false,
     textBuf: "",
     stage: persisted.stage,
     source: persisted.source,
