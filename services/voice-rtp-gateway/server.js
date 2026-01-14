@@ -30,6 +30,8 @@ const MIN_CANCEL_INTERVAL_MS = Number(process.env.MIN_CANCEL_INTERVAL_MS ?? "120
 const BARGE_IN_SUSTAIN_MS = Number(process.env.BARGE_IN_SUSTAIN_MS ?? "80"); // require sustained energy above threshold
 const VAD_THROTTLE_MS = Number(process.env.VAD_THROTTLE_MS ?? "0");
 const MAX_STAGE_REPEATS = Number(process.env.MAX_STAGE_REPEATS ?? "2");
+const MIN_COMMIT_BYTES = 3200; // 100ms at 16kHz PCM16 (16000 * 0.1 * 2)
+const NO_COMMIT_BACKOFF_MS = 2500;
 
 // “Speed”: Realtime doesn’t expose true playback speed reliably.
 // Best proxy: tighter phrasing + higher turn frequency + less tokens + no pauses.
@@ -410,6 +412,7 @@ async function playDeterministicLine(session, text) {
   session.lastSpeakAt = nowMs();
   const startAt = nowMs();
   jlog({ event: "TTS_PLAY_START", session_id: session.session_id, stage: session.stage, text: safeText });
+  session.tts_playing = true;
 
   // Send frames every 20ms
   session._playbackTimer = setInterval(() => {
@@ -427,6 +430,7 @@ async function playDeterministicLine(session, text) {
       stopOutboundPlayback(session);
       session.speaking = false;
       jlog({ event: "TTS_PLAY_END", session_id: session.session_id, ms: nowMs() - startAt });
+      session.tts_playing = false;
       // If there is a queued template, play it next (used for greet->availability).
       if (Array.isArray(session._playbackQueue) && session._playbackQueue.length) {
         const nextText = session._playbackQueue.shift();
@@ -498,6 +502,11 @@ function makeBaseSession() {
     _lastBotPrompt: "",
     _pendingSpeak: null,
     _pendingQueue: null,
+    bytes_since_commit: 0,
+    last_commit_empty_at: 0,
+    last_transcript_at: 0,
+    last_transcript_len: 0,
+    tts_playing: false,
   };
 }
 
@@ -566,6 +575,7 @@ function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, trac
     const frameCount = (sess._audioFrameCount || 0) + 1;
     sess._audioFrameCount = frameCount;
     const logAudio = frameCount % 20 === 0 || rmsNorm > 0.02;
+    try { sess.bytes_since_commit = (sess.bytes_since_commit || 0) + pcm16le.length; } catch {}
     if (logAudio) {
       jlog({
         event: "TELNYX_AUDIO_IN",
@@ -587,6 +597,8 @@ function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, trac
         event: "OPENAI_AUDIO_APPEND",
         session_id: sess.session_id,
         bytes_pcm16_16k: pcm16le.length,
+        bytes_since_commit: sess.bytes_since_commit || 0,
+        tts_playing: Boolean(sess.tts_playing),
       });
     }
   }
@@ -1348,6 +1360,11 @@ function openaiConnect(session) {
       const msg = m?.error?.message ?? m?.message ?? null;
       const code = m?.error?.code ?? null;
       jlog({ event: "OPENAI_ERR_DETAIL", session_id: session.session_id, code, message: msg ? String(msg).slice(0, 300) : null });
+    if (String(code || "").includes("input_audio_buffer_commit_empty") || String(msg || "").includes("input_audio_buffer_commit_empty")) {
+      session.last_commit_empty_at = nowMs();
+      session.bytes_since_commit = 0;
+      jlog({ event: "OPENAI_COMMIT_EMPTY", session_id: session.session_id, tts_playing: Boolean(session.tts_playing) });
+    }
       return;
     }
 
@@ -1442,11 +1459,43 @@ function openaiConnect(session) {
       }
 
       session._lastResponseCreatedAt = null;
+      if (session.bytes_since_commit < MIN_COMMIT_BYTES) {
+        jlog({
+          event: "SKIP_COMMIT_TOO_SMALL",
+          session_id: session.session_id,
+          bytes_since_commit: session.bytes_since_commit,
+          min_bytes: MIN_COMMIT_BYTES,
+          tts_playing: Boolean(session.tts_playing),
+        });
+        return;
+      }
       // Commit the buffered audio to allow OpenAI to finalize transcription for this turn.
-      try { session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch {}
+      try {
+        session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        jlog({
+          event: "OPENAI_COMMIT_SENT",
+          session_id: session.session_id,
+          bytes_since_commit: session.bytes_since_commit,
+          tts_playing: Boolean(session.tts_playing),
+        });
+        session.bytes_since_commit = 0;
+      } catch {}
 
       // Create the next response immediately (text modality is enough; audio stays disabled downstream).
       try {
+        const nowTs = nowMs();
+        if (nowTs - session.last_commit_empty_at < NO_COMMIT_BACKOFF_MS) {
+          jlog({ event: "SKIP_RESPONSE_RECENT_COMMIT_EMPTY", session_id: session.session_id });
+          return;
+        }
+        if (nowTs - session.last_transcript_at > 2500) {
+          jlog({ event: "SKIP_RESPONSE_NO_RECENT_TRANSCRIPT", session_id: session.session_id });
+          return;
+        }
+        if (session.last_transcript_len < 3) {
+          jlog({ event: "SKIP_RESPONSE_TRANSCRIPT_TOO_SHORT", session_id: session.session_id, transcript_len: session.last_transcript_len });
+          return;
+        }
         session.openai?.ws?.send(JSON.stringify({
           type: "response.create",
           response: { modalities: ["text"], instructions: "Responde breve en español." },
@@ -1498,7 +1547,11 @@ function openaiConnect(session) {
     // also capture user transcription if provided by model events (tolerant)
     if (m.type === "conversation.item.input_audio_transcription.completed") {
       const tr = m.transcript || m?.item?.content?.[0]?.transcript || "";
-      if (tr) session._lastUserText = String(tr);
+      if (tr) {
+        session._lastUserText = String(tr);
+        session.last_transcript_at = nowMs();
+        session.last_transcript_len = String(tr).trim().length;
+      }
       return;
     }
     if (m.type === "input_audio_transcription.completed") {
@@ -1694,6 +1747,7 @@ async function runOpenAiVoiceTest(args) {
     silence.fill(0);
     for (let off = 0; off < silence.length; off += CHUNK_BYTES) {
       const chunk = silence.slice(off, off + CHUNK_BYTES);
+          try { st.bytes_since_commit = (st.bytes_since_commit || 0) + chunk.length; } catch {}
       ows.send(JSON.stringify({ type: "input_audio_buffer.append", audio: chunk.toString("base64") }));
     }
     // TEST MODE: never commit (avoid input_audio_buffer_commit_empty; append-only is enough for VAD tests)
