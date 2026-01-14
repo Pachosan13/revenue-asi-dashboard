@@ -501,21 +501,23 @@ function makeBaseSession() {
   };
 }
 
-function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr }) {
+function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, track }) {
   // aggressive barge-in on inbound track (normalized RMS + cooldown)
   const _enc = String(enc || "PCMU").toUpperCase();
   const _sr = Number(sr || 8000);
 
+  let pcm16_src = null;
   let rms = 0;
   try {
     if (_enc === "L16") {
       const be = Buffer.from(String(payloadB64), "base64");
       const le = pcm16beToPcm16le(be);
-      rms = pcm16leRms(le);
+      pcm16_src = _sr === 8000 ? pcm16leDownsample2x(le) : le;
+      rms = pcm16leRms(pcm16_src);
     } else {
       const mulaw = Buffer.from(String(payloadB64), "base64");
-      const pcm16_8k = mulawToPcm16LEBytes(mulaw);
-      rms = pcm16leRms(pcm16_8k);
+      pcm16_src = mulawToPcm16LEBytes(mulaw);
+      rms = pcm16leRms(pcm16_src);
     }
   } catch {}
 
@@ -555,21 +557,38 @@ function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr }) {
 
   // Send audio to OpenAI
   if (sess.openai?.ws?.readyState === WebSocket.OPEN) {
-    let pcm16le;
-    if (_enc === "L16") {
-      const be = Buffer.from(String(payloadB64), "base64");
-      const le = pcm16beToPcm16le(be);
-      pcm16le = _sr === 8000 ? pcm16leUpsample2x(le) : le;
-    } else {
-      const mulaw = Buffer.from(String(payloadB64), "base64");
-      const pcm16_8k = mulawToPcm16LEBytes(mulaw);
-      pcm16le = pcm16leUpsample2x(pcm16_8k);
+    let pcm16le = null;
+    if (pcm16_src) {
+      pcm16le = _sr === 8000 ? pcm16leUpsample2x(pcm16_src) : pcm16_src;
+    }
+    if (!pcm16le) return;
+
+    const frameCount = (sess._audioFrameCount || 0) + 1;
+    sess._audioFrameCount = frameCount;
+    const logAudio = frameCount % 20 === 0 || rmsNorm > 0.02;
+    if (logAudio) {
+      jlog({
+        event: "TELNYX_AUDIO_IN",
+        session_id: sess.session_id,
+        bytes_pcmsrc: pcm16_src ? pcm16_src.length : 0,
+        rms: Number(rmsNorm.toFixed(4)),
+        track: track || (isInbound ? "inbound" : ""),
+      });
     }
 
     sess.openai.ws.send(JSON.stringify({
       type: "input_audio_buffer.append",
       audio: Buffer.from(pcm16le).toString("base64"),
     }));
+    sess.openai.firstAudioSent = true;
+
+    if (logAudio) {
+      jlog({
+        event: "OPENAI_AUDIO_APPEND",
+        session_id: sess.session_id,
+        bytes_pcm16_16k: pcm16le.length,
+      });
+    }
   }
 }
 
@@ -2224,7 +2243,7 @@ wss?.on("connection", (ws, req) => {
       const enc = String(sess.telnyx?.media_format?.encoding || "PCMU").toUpperCase();
       const sr = Number(sess.telnyx?.media_format?.sample_rate || 8000);
 
-      handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr });
+      handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, track });
       return;
     }
 
@@ -2344,7 +2363,7 @@ wssTwilio?.on("connection", (ws) => {
       }
 
       // Twilio Media Streams inbound is PCMU 8k; do not transcode.
-      handleInboundAudioToOpenAi(sess, { payloadB64, isInbound: true, enc: "PCMU", sr: 8000 });
+      handleInboundAudioToOpenAi(sess, { payloadB64, isInbound: true, enc: "PCMU", sr: 8000, track: "inbound" });
       return;
     }
 
