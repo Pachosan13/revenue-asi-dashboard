@@ -202,6 +202,52 @@ function pcm16leToMulaw(pcm16leBuf) {
   return out;
 }
 
+function detectIntent(text) {
+  if (!text) return "OTHER";
+  const t = text.toLowerCase().trim();
+
+  if (/\b(sí|si|claro|ok|dale|perfecto|me parece|está bien|quiero)\b/.test(t)) return "YES";
+  if (/\b(no|no gracias|no me interesa|ya vendí|ya lo vendí|ahorita no)\b/.test(t)) return "NO";
+  if (t.includes("?") || /^(quién|como|cómo|cuando|cuándo|por qué|qué|para qué)/.test(t)) return "QUESTION";
+  if (/empresa|compañía|quién llama|cuánto|precio|por qué debería|cómo funciona/.test(t)) return "OBJECTION";
+  return "OTHER";
+}
+
+function sendResponse(session, text) {
+  try {
+    session.openai?.ws?.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["text"], instructions: text },
+    }));
+    session.openai_response_active = true;
+    jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, ts: new Date().toISOString() });
+  } catch {}
+}
+
+function emitClarification(session, text) {
+  sendResponse(session, `
+Entiendo.
+Antes de seguir, te explico rápido:
+solo queremos conectarte con una persona interesada en el carro.
+¿Te parece bien que te cuente en 20 segundos?
+`.trim());
+}
+
+function emitPoliteExit(session) {
+  sendResponse(session, `
+Perfecto, no hay problema.
+Gracias por tu tiempo.
+Que tengas buen día.
+`.trim());
+}
+
+function emitNudge(session) {
+  sendResponse(session, `
+Para no quitarte tiempo:
+¿el carro ya lo vendiste o todavía lo tienes?
+`.trim());
+}
+
 function downsamplePcm16leTo8k(pcm16leBuf, sampleRate) {
   // crude but ok for voice prompts: handle 16k/24k/48k -> 8k
   const sr = Number(sampleRate || 24000);
@@ -512,6 +558,7 @@ function makeBaseSession() {
     last_inbound_rms: 0,
     openai_speaking: false,
     openai_response_active: false,
+    last_intent: "OTHER",
   };
 }
 
@@ -1596,7 +1643,15 @@ function openaiConnect(session) {
       session._pendingNoUserTimer = setTimeout(() => {
         const userText = String(session._lastUserText || "").trim();
         if (userText) {
-          session._lastUserText = "";
+          session._lastUserText = userText;
+          const intent = detectIntent(session._lastUserText);
+          session.last_intent = intent;
+          jlog({
+            event: "INTENT_DETECTED",
+            session_id: session.session_id,
+            intent,
+            text: session._lastUserText,
+          });
           jlog({
             event: "TELNYX_USER_TEXT",
             session_id: session.session_id,
@@ -1604,9 +1659,21 @@ function openaiConnect(session) {
             user_text_len: userText.length,
             preview: userText.slice(0, 80),
           });
-          // TELNYX mode uses the same template-only progression and HOT decision as VOICE_TEST_MODE.
-          advanceStageAndEmit(session, userText).catch(() => {});
-          return;
+          switch (intent) {
+            case "NO":
+              emitPoliteExit(session);
+              return;
+            case "QUESTION":
+            case "OBJECTION":
+              emitClarification(session, session._lastUserText);
+              return;
+            case "YES":
+              advanceStageAndEmit(session, session._lastUserText).catch(() => {});
+              return;
+            default:
+              emitNudge(session);
+              return;
+          }
         }
         if (session._lastResponseCreatedAt) {
           jlog({ event: "TELNYX_NO_TRANSCRIPT_AFTER_RESPONSE", session_id: session.session_id, stage: session.stage });
