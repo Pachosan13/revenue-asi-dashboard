@@ -1304,7 +1304,7 @@ function openaiConnect(session) {
     session.qual = { available: null, urgent: null };
     session._playbackQueue = [];
 
-    // Kickoff: emit ONLY greet. Availability is emitted on the first real VAD turn (speech_started->speech_stopped).
+    // INIT_GREETING_ONLY
     emitPromptForStage(session, "greet").catch(() => {});
 
     session.openai._noAudioTimer = setTimeout(() => {
@@ -1908,18 +1908,6 @@ async function runOpenAiVoiceTest(args) {
   // VOICE_TEST_MODE: allow text-only tests
   // If no audio was provided, we still execute the test pipeline using mock.userText (strict gating).
   if (!pcm16le_16k.length) {
-    // Kickoff: greet once only (availability comes after the first "user turn")
-    if (!st.emittedAvailability) {
-      st.emittedAvailability = true;
-      st.stage = "greet";
-      persisted.emittedAvailability = true;
-      persisted.stage = st.stage;
-      persisted.source = st.source;
-      persisted.qual = st.qual;
-      persisted.testMock = st.testMock;
-      await emitPromptForStage(st, "greet");
-    }
-
     const mockUserText = typeof st?.testMock?.userText === "string" ? String(st.testMock.userText).trim() : "";
     if (!mockUserText) {
       jlog({ event: "TEST_NO_USER_TEXT", session_id, stage: st.stage });
@@ -1941,9 +1929,7 @@ async function runOpenAiVoiceTest(args) {
   }
 
   async function emitOnce(stage) {
-    if (st.emittedThisTurn) return;
-    st.emittedThisTurn = true;
-    await emitPromptForStage(st, stage);
+    jlog({ event: "ILLEGAL_PROMPT_EMIT", session_id, stage: stage ?? st.stage });
   }
 
   const injectAudio = async () => {
@@ -2061,7 +2047,7 @@ async function runOpenAiVoiceTest(args) {
 
         // Ensure a response is created after each user turn (test-mode: text only).
         try {
-          ows.send(JSON.stringify({ type: "response.create", response: { modalities: ["text"], instructions: "Responde breve en español." } }));
+          ows.send(JSON.stringify({ type: "response.create", response: { modalities: ["text"], instructions: responseInstructions(st) } }));
           st.has_active_response = true;
           st.openai.activeResponse = true;
           jlog({ event: "OPENAI_RESPONSE_CREATE_SENT", session_id });
