@@ -238,12 +238,29 @@ function detectIntent(text) {
 
 function sendResponse(session, text) {
   try {
+    const nowTs = nowMs();
+    if (session.openai_response_active && session.response_pending_at && nowTs - session.response_pending_at > 1200) {
+      try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
+      jlog({ event: "RESPONSE_CANCEL_SENT", session_id: session.session_id, stage: session.stage });
+      session.openai_response_active = false;
+    }
+    const event_id = crypto.randomUUID();
     session.openai?.ws?.send(JSON.stringify({
       type: "response.create",
       response: { modalities: ["text"], instructions: text },
     }));
     session.openai_response_active = true;
-    jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, ts: new Date().toISOString() });
+    session.response_pending_id = event_id;
+    session.response_pending_at = nowMs();
+    if (session.response_watchdog) clearTimeout(session.response_watchdog);
+    session.response_watchdog = setTimeout(() => {
+      if (session.response_pending_id === event_id && session.openai_response_active) {
+        jlog({ event: "RESPONSE_LIFECYCLE_TIMEOUT", session_id: session.session_id, stage: session.stage, event_id });
+        try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
+        session.openai_response_active = false;
+      }
+    }, 1200);
+    jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, stage: session.stage, event_id, reason: "manual" });
   } catch {}
 }
 
@@ -605,6 +622,9 @@ function makeBaseSession() {
     awaiting_yes_confirmation: false,
     yes_confirmed: false,
     awaiting_commit_response: false,
+    response_pending_id: null,
+    response_pending_at: 0,
+    response_watchdog: null,
   };
 }
 
@@ -1290,7 +1310,24 @@ function openaiConnect(session) {
     jlog({
       event: "SESSION_UPDATE_SENT",
       session_id: session.session_id,
-      transcription_enabled: Boolean(msg?.session?.input_audio_transcription),
+      config: {
+        modalities: msg.session.modalities,
+        input_audio_format: msg.session.input_audio_format,
+        output_audio_format: msg.session.output_audio_format,
+        turn_detection: msg.session.turn_detection,
+        temperature: msg.session.temperature,
+      },
+    });
+    jlog({
+      event: "SESSION_UPDATE_EFFECTIVE",
+      session_id: session.session_id,
+      config: {
+        modalities: msg.session.modalities,
+        input_audio_format: msg.session.input_audio_format,
+        output_audio_format: msg.session.output_audio_format,
+        turn_detection: msg.session.turn_detection,
+        temperature: msg.session.temperature,
+      },
     });
     session.openai.ready = true;
     session.openai.activeResponse = false;
@@ -1315,6 +1352,7 @@ function openaiConnect(session) {
 
   function speakAudioExact(session, finalText, stage) {
     try {
+    const event_id = crypto.randomUUID();
       session.openai?.ws?.send(JSON.stringify({
         type: "response.create",
         response: {
@@ -1329,8 +1367,18 @@ function openaiConnect(session) {
           ].join(" "),
         },
       }));
+    session.response_pending_id = event_id;
+    session.response_pending_at = nowMs();
+    if (session.response_watchdog) clearTimeout(session.response_watchdog);
+    session.response_watchdog = setTimeout(() => {
+      if (session.response_pending_id === event_id && session.openai_response_active) {
+        jlog({ event: "RESPONSE_LIFECYCLE_TIMEOUT", session_id: session.session_id, stage, event_id });
+        try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
+        session.openai_response_active = false;
+      }
+    }, 1200);
+    jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, stage, event_id, reason: "tts_prompt" });
       session.openai_response_active = true;
-      jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, ts: new Date().toISOString() });
       session._lastBotPrompt = finalText;
       session.speaking = true;
       session.lastSpeakAt = nowMs();
@@ -1476,6 +1524,10 @@ function openaiConnect(session) {
       session.bytes_since_commit = 0;
       jlog({ event: "OPENAI_COMMIT_EMPTY", session_id: session.session_id, tts_playing: Boolean(session.tts_playing) });
     }
+    session.openai_response_active = false;
+    session.response_pending_id = null;
+    session.response_pending_at = 0;
+    if (session.response_watchdog) { clearTimeout(session.response_watchdog); session.response_watchdog = null; }
       return;
     }
 
@@ -1488,7 +1540,14 @@ function openaiConnect(session) {
       session.openai.activeResponse = true;
       session.openai_response_active = true;
       session._lastResponseCreatedAt = nowMs();
-      jlog({ event: "RESPONSE_CREATED", session_id: session.session_id });
+      jlog({ event: "RESPONSE_CREATED", session_id: session.session_id, stage: session.stage, event_id: session.response_pending_id });
+      if (session.response_watchdog) { clearTimeout(session.response_watchdog); session.response_watchdog = null; }
+    }
+    if (m.type === "response.output_text.delta" && typeof m.delta === "string") {
+      jlog({ event: "RESPONSE_DELTA", session_id: session.session_id, stage: session.stage, len: m.delta.length, preview: String(m.delta).slice(0, 80) });
+    }
+    if (m.type === "response.delta" && typeof m.delta === "string") {
+      jlog({ event: "RESPONSE_DELTA", session_id: session.session_id, stage: session.stage, len: m.delta.length, preview: String(m.delta).slice(0, 80) });
     }
     if (String(m.type || "").startsWith("response.audio.delta") || String(m.type || "").startsWith("response.output_audio.")) {
       session.openai_speaking = true;
@@ -1496,6 +1555,10 @@ function openaiConnect(session) {
     if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
       session.openai_speaking = false;
       session.openai_response_active = false;
+      session.response_pending_id = null;
+      session.response_pending_at = 0;
+      if (session.response_watchdog) { clearTimeout(session.response_watchdog); session.response_watchdog = null; }
+      jlog({ event: "RESPONSE_DONE", session_id: session.session_id, stage: session.stage });
     }
     if (m.type === "input_audio_buffer.committed") {
       jlog({ event: "OPENAI_COMMITTED", session_id: session.session_id });
@@ -1509,6 +1572,13 @@ function openaiConnect(session) {
       // VOICE RULE (OpenAI aligned):
       // After input_audio_buffer.committed, ALWAYS send response.create. Never gate on transcription timing or content.
       try {
+      const nowTs = nowMs();
+      if (session.openai_response_active && session.response_pending_at && nowTs - session.response_pending_at > 1200) {
+        try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
+        jlog({ event: "RESPONSE_CANCEL_SENT", session_id: session.session_id, stage: session.stage });
+        session.openai_response_active = false;
+      }
+      const event_id = crypto.randomUUID();
         session.openai?.ws?.send(JSON.stringify({
           type: "response.create",
           response: { modalities: ["text"], instructions: responseInstructions(session) },
@@ -1516,8 +1586,18 @@ function openaiConnect(session) {
         session.has_active_response = true;
         session.openai.activeResponse = true;
         session.openai_response_active = true;
-        jlog({ event: "RESPONSE_CREATE_POST_COMMIT", session_id: session.session_id, stage: session.stage });
-        jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, ts: new Date().toISOString() });
+      session.response_pending_id = event_id;
+      session.response_pending_at = nowMs();
+      if (session.response_watchdog) clearTimeout(session.response_watchdog);
+      session.response_watchdog = setTimeout(() => {
+        if (session.response_pending_id === event_id && session.openai_response_active) {
+          jlog({ event: "RESPONSE_LIFECYCLE_TIMEOUT", session_id: session.session_id, stage: session.stage, event_id });
+          try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
+          session.openai_response_active = false;
+        }
+      }, 1200);
+      jlog({ event: "RESPONSE_CREATE_POST_COMMIT", session_id: session.session_id, stage: session.stage, event_id });
+      jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, stage: session.stage, event_id, reason: "post_commit" });
       } catch {}
     }
     if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
@@ -1668,11 +1748,12 @@ function openaiConnect(session) {
       }
       // Commit the buffered audio to allow OpenAI to finalize transcription for this turn.
       try {
+        const appended_bytes = session.bytes_since_commit;
         session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
         jlog({
           event: "OPENAI_COMMIT_SENT",
           session_id: session.session_id,
-          bytes_since_commit: session.bytes_since_commit,
+          bytes_since_commit: appended_bytes,
           tts_playing: Boolean(session.tts_playing),
         });
         session.bytes_since_commit = 0;
