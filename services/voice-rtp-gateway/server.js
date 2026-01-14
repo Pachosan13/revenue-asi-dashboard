@@ -1327,9 +1327,13 @@ function openaiConnect(session) {
     }
 
     // Track active response lifecycle (used for cancel gating)
+    if (m.type === "conversation.item.created") {
+      session._lastConversationItemCreated = nowMs();
+    }
     if (m.type === "response.created") {
       session.has_active_response = true;
       session.openai.activeResponse = true;
+      jlog({ event: "RESPONSE_CREATED", session_id: session.session_id });
     }
     if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
       session.has_active_response = false;
@@ -1406,34 +1410,44 @@ function openaiConnect(session) {
       session.lastUserTurnAt = now;
       jlog({ event: "TURN_RESUME", stage: session.stage });
 
-      const userText = String(session._lastUserText || "").trim();
-      session._lastUserText = "";
-      // Strict gating: NEVER advance stages without non-empty userText from this turn.
-      if (!userText) {
-        jlog({ event: "TELNYX_NO_USER_TEXT", session_id: session.session_id, stage: session.stage });
-        return;
+      if (session._pendingNoUserTimer) {
+        clearTimeout(session._pendingNoUserTimer);
+        session._pendingNoUserTimer = null;
       }
-      jlog({
-        event: "TELNYX_USER_TEXT",
-        session_id: session.session_id,
-        stage: session.stage,
-        user_text_len: userText.length,
-        preview: userText.slice(0, 80),
-      });
 
-      // Ensure a response is created after each user turn (used for cancel gating/turn-taking).
+      // Commit the buffered audio to allow OpenAI to finalize transcription for this turn.
+      try { session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch {}
+
+      // Create the next response immediately (text modality is enough; audio stays disabled downstream).
       try {
         session.openai?.ws?.send(JSON.stringify({
           type: "response.create",
-          response: { modalities: ["audio", "text"], instructions: "Responde breve en español." },
+          response: { modalities: ["text"], instructions: "Responde breve en español." },
         }));
         session.has_active_response = true;
         session.openai.activeResponse = true;
-        jlog({ event: "OPENAI_RESPONSE_CREATE_SENT", session_id: session.session_id });
+        jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id });
       } catch {}
 
-      // TELNYX mode uses the same template-only progression and HOT decision as VOICE_TEST_MODE.
-      advanceStageAndEmit(session, userText).catch(() => {});
+      session._pendingNoUserTimer = setTimeout(() => {
+        const userText = String(session._lastUserText || "").trim();
+        const hasItem = Boolean(session._lastConversationItemCreated);
+        if (userText) {
+          session._lastUserText = "";
+          jlog({
+            event: "TELNYX_USER_TEXT",
+            session_id: session.session_id,
+            stage: session.stage,
+            user_text_len: userText.length,
+            preview: userText.slice(0, 80),
+          });
+          // TELNYX mode uses the same template-only progression and HOT decision as VOICE_TEST_MODE.
+          advanceStageAndEmit(session, userText).catch(() => {});
+          return;
+        }
+        if (hasItem) return;
+        jlog({ event: "TELNYX_NO_USER_TEXT", session_id: session.session_id, stage: session.stage });
+      }, 1200);
       return;
     }
 
