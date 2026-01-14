@@ -203,14 +203,28 @@ function pcm16leToMulaw(pcm16leBuf) {
 }
 
 function detectIntent(text) {
-  if (!text) return "OTHER";
+  if (!text) return { intent: "OTHER", reason: "empty_text" };
   const t = text.toLowerCase().trim();
 
-  if (/\b(sí|si|claro|ok|dale|perfecto|me parece|está bien|quiero)\b/.test(t)) return "YES";
-  if (/\b(no|no gracias|no me interesa|ya vendí|ya lo vendí|ahorita no)\b/.test(t)) return "NO";
-  if (t.includes("?") || /^(quién|como|cómo|cuando|cuándo|por qué|qué|para qué)/.test(t)) return "QUESTION";
-  if (/empresa|compañía|quién llama|cuánto|precio|por qué debería|cómo funciona/.test(t)) return "OBJECTION";
-  return "OTHER";
+  // Precedence: NO -> OBJECTION -> QUESTION -> YES -> OTHER
+  if (/\b(no|no gracias|no me interesa|ya vendí|ya lo vendí|no quiero|no puedo|no puedo ahora)\b/.test(t)) {
+    return { intent: "NO", reason: "match_no_phrase" };
+  }
+
+  const objectionWord = (["pero", "aunque", "ahorita no", "después", "luego", "más tarde", "mas tarde", "ahora no", "no puedo ahora", "tal vez", "depende"].find((w) => t.includes(w))) || null;
+  if (objectionWord) {
+    return { intent: "OBJECTION", reason: `contains_objection:${objectionWord}` };
+  }
+
+  if (t.includes("?") || /(?:\b)(quién|quien|como|cómo|cuando|cuándo|por qué|porque|qué|que|para qué|para que|dónde|donde)(?:\b)/.test(t)) {
+    return { intent: "QUESTION", reason: "question_marker" };
+  }
+
+  if (/\b(sí|si|claro|ok|dale|perfecto|me parece|está bien|esta bien|quiero)\b/.test(t)) {
+    return { intent: "YES", reason: "match_yes_phrase" };
+  }
+
+  return { intent: "OTHER", reason: "fallback" };
 }
 
 function sendResponse(session, text) {
@@ -1644,13 +1658,14 @@ function openaiConnect(session) {
         const userText = String(session._lastUserText || "").trim();
         if (userText) {
           session._lastUserText = userText;
-          const intent = detectIntent(session._lastUserText);
+          const { intent, reason } = detectIntent(session._lastUserText);
           session.last_intent = intent;
           jlog({
             event: "INTENT_DETECTED",
             session_id: session.session_id,
             intent,
-            text: session._lastUserText,
+            reason,
+            user_text: session._lastUserText,
           });
           jlog({
             event: "TELNYX_USER_TEXT",
