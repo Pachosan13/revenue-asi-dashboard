@@ -1702,8 +1702,8 @@ function openaiConnect(session) {
           session.last_intent = intent;
           if (!session.lang) {
             const lower = session._lastUserText.toLowerCase();
-            const looksEn = /\b(yes|ok|sell|today|tomorrow|no)\b/.test(lower);
-            session.lang = looksEn ? "en" : "es";
+            const enHits = (lower.match(/\b(yes|ok|sell|today|tomorrow)\b/g) || []).length;
+            session.lang = enHits >= 1 ? "en" : "es";
           }
           jlog({
             event: "INTENT_DETECTED",
