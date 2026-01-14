@@ -32,6 +32,7 @@ const VAD_THROTTLE_MS = Number(process.env.VAD_THROTTLE_MS ?? "0");
 const MAX_STAGE_REPEATS = Number(process.env.MAX_STAGE_REPEATS ?? "2");
 const MIN_COMMIT_BYTES = 3200; // 100ms at 16kHz PCM16 (16000 * 0.1 * 2)
 const NO_COMMIT_BACKOFF_MS = 2500;
+const TTS_ECHO_RMS_MIN = 0.010;
 
 // “Speed”: Realtime doesn’t expose true playback speed reliably.
 // Best proxy: tighter phrasing + higher turn frequency + less tokens + no pauses.
@@ -507,6 +508,9 @@ function makeBaseSession() {
     last_transcript_at: 0,
     last_transcript_len: 0,
     tts_playing: false,
+    last_audio_append_at: 0,
+    last_inbound_rms: 0,
+    openai_speaking: false,
   };
 }
 
@@ -576,6 +580,20 @@ function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, trac
     sess._audioFrameCount = frameCount;
     const logAudio = frameCount % 20 === 0 || rmsNorm > 0.02;
     try { sess.bytes_since_commit = (sess.bytes_since_commit || 0) + pcm16le.length; } catch {}
+    sess.last_audio_append_at = now;
+    sess.last_inbound_rms = rmsNorm;
+
+    if (sess.tts_playing && rmsNorm < TTS_ECHO_RMS_MIN) {
+      if (logAudio) {
+        jlog({
+          event: "DROP_INBOUND_DURING_TTS",
+          session_id: sess.session_id,
+          rms: Number(rmsNorm.toFixed(4)),
+          tts_playing: true,
+        });
+      }
+      return;
+    }
     if (logAudio) {
       jlog({
         event: "TELNYX_AUDIO_IN",
@@ -1378,6 +1396,12 @@ function openaiConnect(session) {
       session._lastResponseCreatedAt = nowMs();
       jlog({ event: "RESPONSE_CREATED", session_id: session.session_id });
     }
+    if (String(m.type || "").startsWith("response.audio.delta") || String(m.type || "").startsWith("response.output_audio.")) {
+      session.openai_speaking = true;
+    }
+    if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
+      session.openai_speaking = false;
+    }
     if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
       session.has_active_response = false;
       session.openai.activeResponse = false;
@@ -1411,6 +1435,11 @@ function openaiConnect(session) {
         session.has_active_response = false;
         session.openai.activeResponse = false;
         jlog({ event: "AI_CANCEL_SENT" });
+        if (session.tts_playing) {
+          try { stopOutboundPlayback(session); } catch {}
+          session.tts_playing = false;
+          jlog({ event: "BARGE_IN_CANCEL_SENT", session_id: session.session_id });
+        }
       } else {
         jlog({ event: "OPENAI_SKIP_CANCEL_NO_ACTIVE", session_id: session.session_id });
       }
@@ -1466,6 +1495,17 @@ function openaiConnect(session) {
           bytes_since_commit: session.bytes_since_commit,
           min_bytes: MIN_COMMIT_BYTES,
           tts_playing: Boolean(session.tts_playing),
+        });
+        return;
+      }
+      const COMMIT_REQUIRE_RECENT_MS = 250;
+      const dtSinceAppend = session.last_audio_append_at ? now - session.last_audio_append_at : Infinity;
+      if (dtSinceAppend > COMMIT_REQUIRE_RECENT_MS) {
+        jlog({
+          event: "SKIP_COMMIT_NOT_RECENT",
+          session_id: session.session_id,
+          dt_ms: dtSinceAppend,
+          bytes_since_commit: session.bytes_since_commit,
         });
         return;
       }
