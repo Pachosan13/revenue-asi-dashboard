@@ -1138,6 +1138,7 @@ function openaiConnect(session) {
         modalities: ["text", "audio"],
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
+        input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
         // We control turns; no long monologues.
         turn_detection: { type: "server_vad", create_response: false },
         voice: VOICE_NAME,
@@ -1146,6 +1147,11 @@ function openaiConnect(session) {
       },
     };
     ows.send(JSON.stringify(msg));
+    jlog({
+      event: "SESSION_UPDATE_SENT",
+      session_id: session.session_id,
+      transcription_enabled: Boolean(msg?.session?.input_audio_transcription),
+    });
     session.openai.ready = true;
     session.openai.activeResponse = false;
 
