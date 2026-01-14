@@ -1686,7 +1686,8 @@ function openaiConnect(session) {
       session._pendingNoUserTimer = setTimeout(() => {
         const userText = String(session._lastUserText || "").trim();
         if (userText) {
-          if (isLikelyGarbage(userText)) {
+          const preIntent = detectIntent(userText || "");
+          if (preIntent.intent === "OTHER" && isLikelyGarbage(userText)) {
             jlog({
               event: "ASR_SANITY_REJECT",
               session_id: session.session_id,
@@ -1697,8 +1698,13 @@ function openaiConnect(session) {
             return;
           }
           session._lastUserText = userText;
-          const { intent, reason } = detectIntent(session._lastUserText);
+          const { intent, reason } = preIntent.intent === "OTHER" ? detectIntent(session._lastUserText) : preIntent;
           session.last_intent = intent;
+          if (!session.lang) {
+            const lower = session._lastUserText.toLowerCase();
+            const looksEn = /\b(yes|ok|sell|today|tomorrow|no)\b/.test(lower);
+            session.lang = looksEn ? "en" : "es";
+          }
           jlog({
             event: "INTENT_DETECTED",
             session_id: session.session_id,
