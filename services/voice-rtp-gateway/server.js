@@ -511,6 +511,7 @@ function makeBaseSession() {
     last_audio_append_at: 0,
     last_inbound_rms: 0,
     openai_speaking: false,
+    openai_response_active: false,
   };
 }
 
@@ -1394,6 +1395,7 @@ function openaiConnect(session) {
     if (m.type === "response.created") {
       session.has_active_response = true;
       session.openai.activeResponse = true;
+      session.openai_response_active = true;
       session._lastResponseCreatedAt = nowMs();
       jlog({ event: "RESPONSE_CREATED", session_id: session.session_id });
     }
@@ -1402,6 +1404,7 @@ function openaiConnect(session) {
     }
     if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
       session.openai_speaking = false;
+      session.openai_response_active = false;
     }
     if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
       session.has_active_response = false;
@@ -1429,20 +1432,35 @@ function openaiConnect(session) {
       // VAD barge-in trigger
       const sinceLastCancelMs = session.lastCancelAt ? (now - session.lastCancelAt) : null;
       jlog({ event: "BARGE_IN_TRIGGER", reason: "vad", rms: null, sinceLastCancelMs });
-    if (session.tts_playing) {
-      try { stopOutboundPlayback(session); } catch {}
-      session.tts_playing = false;
-    }
-    if (session.openai_speaking) {
-      try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
-      try { session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
-      session.lastCancelAt = now;
-      session.has_active_response = false;
-      session.openai.activeResponse = false;
-      jlog({ event: "BARGE_IN_CANCEL_SENT", session_id: session.session_id, tts_playing: false, openai_speaking: true });
-    } else {
-      jlog({ event: "BARGE_IN_CANCEL_SKIPPED", session_id: session.session_id, tts_playing: Boolean(session.tts_playing), openai_speaking: Boolean(session.openai_speaking) });
-    }
+      const was_tts_playing = Boolean(session.tts_playing);
+      if (was_tts_playing) {
+        try { stopOutboundPlayback(session); } catch {}
+        session.tts_playing = false;
+      }
+      const shouldCancel = Boolean(session.openai_response_active || session.openai_speaking);
+      if (shouldCancel) {
+        try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
+        try { session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
+        session.lastCancelAt = now;
+        session.has_active_response = false;
+        session.openai.activeResponse = false;
+        session.openai_response_active = false;
+        jlog({
+          event: "BARGE_IN_CANCEL_SENT",
+          session_id: session.session_id,
+          tts_playing: was_tts_playing,
+          openai_speaking: Boolean(session.openai_speaking),
+          openai_response_active: Boolean(session.openai_response_active),
+        });
+      } else {
+        jlog({
+          event: "BARGE_IN_CANCEL_SKIPPED",
+          session_id: session.session_id,
+          tts_playing: was_tts_playing,
+          openai_speaking: Boolean(session.openai_speaking),
+          openai_response_active: Boolean(session.openai_response_active),
+        });
+      }
       // Hard-stop any outbound audio to Telnyx immediately.
       stopOutboundPlayback(session);
       session.speaking = false;
