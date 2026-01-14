@@ -389,6 +389,7 @@ Server-side validation exists as a DB CHECK constraint (radius 1–50; if `activ
   - Telnyx streaming start is forced with `stream_codec = "PCMU"` and `media_format.encoding = "PCMU"`.
   - Telnyx streaming_start MUST use `/actions/streaming_start` and include `stream_track`. Logs required for debugging: `TELNYX_STREAMING_START_REQ/RES`. Success criteria: gateway `TELNYX_START.media_format.encoding == "PCMU"`.
   - Webhook logs required: `VOICE_WEBHOOK_HIT`, `VOICE_WEBHOOK_EVENT`, `TELNYX_STREAMING_START_REQ/RES/ERR`, plus `STREAMING_WAIT_STATE` / `STREAMING_START_AFTER_ANSWER` when gating answered events.
+ - WS auth: `/telnyx` is trusted carrier ingress and is allowed without token (explicit bypass logged as `AUTH_BYPASS_TELNYX`). All other WS paths keep token requirements.
 
 - Added Craigslist (US) V0 collector + SSV view + minimal `public.leads` columns/indexes required for `(account_id, source, external_id)` ingestion. See: `supabase/migrations/20260109090000_public_leads_source_external_id_v1.sql`, `supabase/migrations/20260109090100_v_craigslist_ssv_v0.sql`.
 - Updated Craigslist SSV timestamp to use `coalesce(first_seen_at, created_at)` and made `first_seen_at` nullable to avoid “now” contamination on existing rows. See: `supabase/migrations/20260109100000_fix_first_seen_at_safe.sql`, `supabase/migrations/20260109100100_v_craigslist_ssv_v0_fix.sql`.
