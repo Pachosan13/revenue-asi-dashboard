@@ -1333,6 +1333,7 @@ function openaiConnect(session) {
     if (m.type === "response.created") {
       session.has_active_response = true;
       session.openai.activeResponse = true;
+      session._lastResponseCreatedAt = nowMs();
       jlog({ event: "RESPONSE_CREATED", session_id: session.session_id });
     }
     if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
@@ -1415,6 +1416,7 @@ function openaiConnect(session) {
         session._pendingNoUserTimer = null;
       }
 
+      session._lastResponseCreatedAt = null;
       // Commit the buffered audio to allow OpenAI to finalize transcription for this turn.
       try { session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch {}
 
@@ -1426,12 +1428,11 @@ function openaiConnect(session) {
         }));
         session.has_active_response = true;
         session.openai.activeResponse = true;
-        jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id });
+        jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, ts: new Date().toISOString() });
       } catch {}
 
       session._pendingNoUserTimer = setTimeout(() => {
         const userText = String(session._lastUserText || "").trim();
-        const hasItem = Boolean(session._lastConversationItemCreated);
         if (userText) {
           session._lastUserText = "";
           jlog({
@@ -1445,7 +1446,12 @@ function openaiConnect(session) {
           advanceStageAndEmit(session, userText).catch(() => {});
           return;
         }
-        if (hasItem) return;
+        if (session._lastResponseCreatedAt) {
+          jlog({ event: "TELNYX_NO_TRANSCRIPT_AFTER_RESPONSE", session_id: session.session_id, stage: session.stage });
+          jlog({ event: "TELNYX_NO_USER_TEXT", session_id: session.session_id, stage: session.stage });
+          return;
+        }
+        jlog({ event: "TELNYX_NO_RESPONSE_CREATED", session_id: session.session_id, stage: session.stage });
         jlog({ event: "TELNYX_NO_USER_TEXT", session_id: session.session_id, stage: session.stage });
       }, 1200);
       return;
