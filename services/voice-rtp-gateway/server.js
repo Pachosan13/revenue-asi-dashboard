@@ -1663,6 +1663,7 @@ function openaiConnect(session) {
           jlog({
             event: "INTENT_DETECTED",
             session_id: session.session_id,
+            stage: session.stage,
             intent,
             reason,
             user_text: session._lastUserText,
@@ -1680,13 +1681,13 @@ function openaiConnect(session) {
               return;
             case "QUESTION":
             case "OBJECTION":
-              emitClarification(session, session._lastUserText);
+              emitClarification(session, { intent, reason });
               return;
             case "YES":
               advanceStageAndEmit(session, session._lastUserText).catch(() => {});
               return;
             default:
-              emitNudge(session);
+              emitNudge(session, { intent, reason });
               return;
           }
         }
