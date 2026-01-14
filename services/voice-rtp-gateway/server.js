@@ -1666,19 +1666,12 @@ function openaiConnect(session) {
         session.last_audio_append_at = 0;
       } catch {}
 
+      // VOICE RULE: never block response.create due to transcript timing; ASR uncertainty is handled by the model asking to repeat.
       // Create the next response immediately (text modality is enough; audio stays disabled downstream).
       try {
         const nowTs = nowMs();
         if (nowTs - session.last_commit_empty_at < NO_COMMIT_BACKOFF_MS) {
           jlog({ event: "SKIP_RESPONSE_RECENT_COMMIT_EMPTY", session_id: session.session_id });
-          return;
-        }
-        if (nowTs - session.last_transcript_at > 2500) {
-          jlog({ event: "SKIP_RESPONSE_NO_RECENT_TRANSCRIPT", session_id: session.session_id });
-          return;
-        }
-        if (session.last_transcript_len < 3) {
-          jlog({ event: "SKIP_RESPONSE_TRANSCRIPT_TOO_SHORT", session_id: session.session_id, transcript_len: session.last_transcript_len });
           return;
         }
         session.openai?.ws?.send(JSON.stringify({
@@ -1688,6 +1681,7 @@ function openaiConnect(session) {
         session.has_active_response = true;
         session.openai.activeResponse = true;
         session.openai_response_active = true;
+        jlog({ event: "RESPONSE_CREATE_POST_COMMIT", session_id: session.session_id, stage: session.stage });
         jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, ts: new Date().toISOString() });
       } catch {}
 
