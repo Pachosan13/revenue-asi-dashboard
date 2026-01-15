@@ -1536,6 +1536,7 @@ function openaiConnect(session) {
     // Track active response lifecycle (used for cancel gating)
     if (m.type === "conversation.item.created") {
       session._lastConversationItemCreated = nowMs();
+      jlog({ event: "OPENAI_EVT_FULL", session_id: session.session_id, type: m.type || null, raw: m });
     }
     if (m.type === "response.created") {
       session.has_active_response = true;
@@ -1551,6 +1552,9 @@ function openaiConnect(session) {
     if (m.type === "response.delta" && typeof m.delta === "string") {
       jlog({ event: "RESPONSE_DELTA", session_id: session.session_id, stage: session.stage, len: m.delta.length, preview: String(m.delta).slice(0, 80) });
     }
+    if (m.type === "response.content_part.added" || m.type === "response.content_part.done") {
+      jlog({ event: "OPENAI_EVT_FULL", session_id: session.session_id, type: m.type || null, raw: m });
+    }
     if (String(m.type || "").startsWith("response.audio.delta") || String(m.type || "").startsWith("response.output_audio.")) {
       session.openai_speaking = true;
     }
@@ -1561,6 +1565,15 @@ function openaiConnect(session) {
       session.response_pending_at = 0;
       if (session.response_watchdog) { clearTimeout(session.response_watchdog); session.response_watchdog = null; }
       jlog({ event: "RESPONSE_DONE", session_id: session.session_id, stage: session.stage });
+      jlog({
+        event: "OPENAI_EVT_FULL",
+        session_id: session.session_id,
+        type: m.type || null,
+        response_id: m?.response?.id ?? null,
+        status: m?.response?.status ?? null,
+        output_types: Array.isArray(m?.response?.output) ? m.response.output.map((o) => o?.type || null) : null,
+        raw: m,
+      });
     }
     if (m.type === "input_audio_buffer.committed") {
       jlog({ event: "OPENAI_COMMITTED", session_id: session.session_id });
