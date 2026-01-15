@@ -1564,43 +1564,8 @@ function openaiConnect(session) {
     }
     if (m.type === "input_audio_buffer.committed") {
       jlog({ event: "OPENAI_COMMITTED", session_id: session.session_id });
-      if (nowMs() - session.last_commit_empty_at < NO_COMMIT_BACKOFF_MS) {
-        jlog({ event: "SKIP_RESPONSE_RECENT_COMMIT_EMPTY", session_id: session.session_id });
-        return;
-      }
-      if (session.awaiting_commit_response) {
-        session.awaiting_commit_response = false;
-      }
-      // VOICE RULE (OpenAI aligned):
-      // After input_audio_buffer.committed, ALWAYS send response.create. Never gate on transcription timing or content.
-      try {
-      const nowTs = nowMs();
-      if (session.openai_response_active && session.response_pending_at && nowTs - session.response_pending_at > 1200) {
-        try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
-        jlog({ event: "RESPONSE_CANCEL_SENT", session_id: session.session_id, stage: session.stage });
-        session.openai_response_active = false;
-      }
-      const event_id = crypto.randomUUID();
-        session.openai?.ws?.send(JSON.stringify({
-          type: "response.create",
-          response: { modalities: ["text"], instructions: responseInstructions(session) },
-        }));
-        session.has_active_response = true;
-        session.openai.activeResponse = true;
-        session.openai_response_active = true;
-      session.response_pending_id = event_id;
-      session.response_pending_at = nowMs();
-      if (session.response_watchdog) clearTimeout(session.response_watchdog);
-      session.response_watchdog = setTimeout(() => {
-        if (session.response_pending_id === event_id && session.openai_response_active) {
-          jlog({ event: "RESPONSE_LIFECYCLE_TIMEOUT", session_id: session.session_id, stage: session.stage, event_id });
-          try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
-          session.openai_response_active = false;
-        }
-      }, 1200);
-      jlog({ event: "RESPONSE_CREATE_POST_COMMIT", session_id: session.session_id, stage: session.stage, event_id });
-      jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, stage: session.stage, event_id, reason: "post_commit" });
-      } catch {}
+      if (session.awaiting_commit_response) session.awaiting_commit_response = false;
+      return;
     }
     if (m.type === "response.done" || m.type === "response.canceled" || m.type === "response.completed") {
       session.has_active_response = false;
@@ -1717,51 +1682,35 @@ function openaiConnect(session) {
         session._pendingNoUserTimer = null;
       }
 
-      if (session.bytes_since_commit === 0) {
-        const dtSinceAppend = session.last_audio_append_at ? now - session.last_audio_append_at : null;
-        jlog({
-          event: "SKIP_COMMIT_ZERO_BYTES",
-          session_id: session.session_id,
-          tts_playing: Boolean(session.tts_playing),
-          dt_ms: dtSinceAppend,
-        });
-        return;
+      // With server_vad create_response:false we do NOT send manual commit; send response.create on speech_stopped.
+      jlog({ event: "OPENAI_COMMIT_SKIPPED_SERVER_VAD", session_id: session.session_id, bytes_since_commit: session.bytes_since_commit });
+
+      if (!session.openai_response_active && !session.has_active_response) {
+        try {
+          const event_id = crypto.randomUUID();
+          session.openai?.ws?.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["text"], instructions: responseInstructions(session) },
+          }));
+          session.has_active_response = true;
+          session.openai.activeResponse = true;
+          session.openai_response_active = true;
+          session.response_pending_id = event_id;
+          session.response_pending_at = nowMs();
+          if (session.response_watchdog) clearTimeout(session.response_watchdog);
+          session.response_watchdog = setTimeout(() => {
+            if (session.response_pending_id === event_id && session.openai_response_active) {
+              jlog({ event: "RESPONSE_LIFECYCLE_TIMEOUT", session_id: session.session_id, stage: session.stage, event_id });
+              try { session.openai?.ws?.send(JSON.stringify({ type: "response.cancel" })); } catch {}
+              session.openai_response_active = false;
+            }
+          }, 1200);
+          jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, stage: session.stage, event_id, reason: "speech_stopped" });
+        } catch {}
       }
-      if (session.bytes_since_commit < MIN_COMMIT_BYTES) {
-        jlog({
-          event: "SKIP_COMMIT_TOO_SMALL",
-          session_id: session.session_id,
-          bytes_since_commit: session.bytes_since_commit,
-          min_bytes: MIN_COMMIT_BYTES,
-          tts_playing: Boolean(session.tts_playing),
-        });
-        return;
-      }
-      const COMMIT_REQUIRE_RECENT_MS = 600;
-      const dtSinceAppend = session.last_audio_append_at ? now - session.last_audio_append_at : Infinity;
-      if (dtSinceAppend > COMMIT_REQUIRE_RECENT_MS) {
-        jlog({
-          event: "SKIP_COMMIT_NOT_RECENT",
-          session_id: session.session_id,
-          dt_ms: dtSinceAppend,
-          bytes_since_commit: session.bytes_since_commit,
-        });
-        return;
-      }
-      // Commit the buffered audio to allow OpenAI to finalize transcription for this turn.
-      try {
-        const appended_bytes = session.bytes_since_commit;
-        session.openai?.ws?.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-        jlog({
-          event: "OPENAI_COMMIT_SENT",
-          session_id: session.session_id,
-          bytes_since_commit: appended_bytes,
-          tts_playing: Boolean(session.tts_playing),
-        });
-        session.bytes_since_commit = 0;
-        session.last_audio_append_at = 0;
-        session.awaiting_commit_response = true;
-      } catch {}
+
+      session.bytes_since_commit = 0;
+      session.last_audio_append_at = 0;
 
       session._pendingNoUserTimer = setTimeout(() => {
         const userText = String(session._lastUserText || "").trim();
@@ -2086,19 +2035,6 @@ async function runOpenAiVoiceTest(args) {
     }, timeoutMs);
 
     ows.on("open", async () => {
-      // Configure session for turn-taking diagnostics (no auto-responses).
-      const msg = {
-        type: "session.update",
-        session: {
-          instructions: "MODO PRUEBA. Solo valida turn-taking. No hables si el humano habla. 1 respuesta por turno.",
-          modalities: ["text"],
-          input_audio_format: "pcm16",
-          output_audio_format: "pcm16",
-          turn_detection: { type: "server_vad", create_response: false },
-          temperature: 0.6,
-        },
-      };
-      ows.send(JSON.stringify(msg));
       jlog({ event: "TEST_OPENAI_READY", session_id });
       // Kickoff: emit ONLY greet. Availability is emitted on first real VAD turn.
       if (!st.emittedAvailability) {
