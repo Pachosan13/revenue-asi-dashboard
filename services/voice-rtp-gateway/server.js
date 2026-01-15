@@ -682,7 +682,7 @@ function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, trac
     sess.rmsAboveSince = 0;
   }
 
-  // Send audio to OpenAI (raw PCMU base64, matching input_audio_format=g711_ulaw)
+  // Send audio to OpenAI (raw G.711 base64; format matches input_audio_format: g711_ulaw or g711_alaw)
   if (sess.openai?.ws?.readyState === WebSocket.OPEN) {
     const mulawBuf = Buffer.from(String(payloadB64), "base64");
     const frameCount = (sess._audioFrameCount || 0) + 1;
@@ -1296,11 +1296,13 @@ function openaiConnect(session) {
   jlog({ event: "OPENAI_CONNECT", session_id: session.session_id, stream_id: session.stream_id });
 
   ows.on("open", () => {
+    const telnyxEnc = String(session.telnyx?.media_format?.encoding || "PCMU").toUpperCase();
+    const inputAudioFormat = telnyxEnc === "PCMA" ? "g711_alaw" : "g711_ulaw";
     const msg = {
       type: "session.update",
       session: {
         modalities: ["text"],
-        input_audio_format: "g711_ulaw",
+        input_audio_format: inputAudioFormat,
         output_audio_format: "pcm16",
         turn_detection: { type: "server_vad", create_response: false },
         temperature: 0.6,
@@ -2554,7 +2556,17 @@ wss?.on("connection", (ws, req) => {
       session.telnyx.media_format = mediaFormat;
 
       const encStart = String(mediaFormat?.encoding || "").toUpperCase();
-      if (encStart !== "PCMU") {
+      if (encStart === "PCMA") {
+        jlog({
+          event: "TELNYX_CODEC_PCMA_ACCEPTED",
+          session_id: session.session_id,
+          stream_id: session.stream_id,
+          call_control_id: session.call_control_id,
+          encoding: mediaFormat?.encoding ?? null,
+          sample_rate: mediaFormat?.sample_rate ?? null,
+          channels: mediaFormat?.channels ?? null,
+        });
+      } else if (encStart !== "PCMU") {
         jlog({
           event: "ERROR_FATAL_CODEC",
           session_id: session.session_id,
