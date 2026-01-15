@@ -247,7 +247,11 @@ function sendResponse(session, text) {
     const event_id = crypto.randomUUID();
     session.openai?.ws?.send(JSON.stringify({
       type: "response.create",
-      response: { modalities: ["text"], instructions: text },
+      response: {
+        output_modalities: ["text"],
+        tools: [],
+        instructions: "Reply with one short spoken sentence suitable for a phone call.",
+      },
     }));
     session.openai_response_active = true;
     session.response_pending_id = event_id;
@@ -1358,15 +1362,9 @@ function openaiConnect(session) {
       session.openai?.ws?.send(JSON.stringify({
         type: "response.create",
         response: {
-          // Realtime API requires ['text'] or ['audio','text'] (audio-only is invalid).
-          modalities: ["audio", "text"],
-          max_output_tokens: MAX_TOKENS_PER_TURN,
-          instructions: [
-            agentContextLine(session),
-            lockedSystemInstructions(session),
-            "Di EXACTAMENTE este texto y nada más:",
-            `"${finalText}"`,
-          ].join(" "),
+        output_modalities: ["text"],
+        tools: [],
+        instructions: "Reply with one short spoken sentence suitable for a phone call.",
         },
       }));
     session.response_pending_id = event_id;
@@ -1703,7 +1701,11 @@ function openaiConnect(session) {
           const event_id = crypto.randomUUID();
           session.openai?.ws?.send(JSON.stringify({
             type: "response.create",
-            response: { modalities: ["text"], instructions: responseInstructions(session) },
+            response: {
+              output_modalities: ["text"],
+              tools: [],
+              instructions: "Reply with one short spoken sentence suitable for a phone call.",
+            },
           }));
           session.has_active_response = true;
           session.openai.activeResponse = true;
@@ -2116,7 +2118,14 @@ async function runOpenAiVoiceTest(args) {
 
         // Ensure a response is created after each user turn (test-mode: text only).
         try {
-          ows.send(JSON.stringify({ type: "response.create", response: { modalities: ["text"], instructions: responseInstructions(st) } }));
+          ows.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              output_modalities: ["text"],
+              tools: [],
+              instructions: "Reply with one short spoken sentence suitable for a phone call.",
+            },
+          }));
           st.has_active_response = true;
           st.openai.activeResponse = true;
           jlog({ event: "OPENAI_RESPONSE_CREATE_SENT", session_id });
