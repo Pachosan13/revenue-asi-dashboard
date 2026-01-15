@@ -250,7 +250,12 @@ function sendResponse(session, text) {
       response: {
         output_modalities: ["text"],
         tools: [],
-        instructions: "Reply with one short spoken sentence suitable for a phone call.",
+        instructions: `
+You are a voice sales agent on a phone call.
+Reply with ONE short spoken sentence suitable for a phone call.
+Stay strictly in the current conversation stage.
+${responseInstructions(session)}
+`.trim(),
       },
     }));
     session.openai_response_active = true;
@@ -1364,7 +1369,12 @@ function openaiConnect(session) {
         response: {
         output_modalities: ["text"],
         tools: [],
-        instructions: "Reply with one short spoken sentence suitable for a phone call.",
+            instructions: `
+You are a voice sales agent on a phone call.
+Reply with ONE short spoken sentence suitable for a phone call.
+Stay strictly in the current conversation stage.
+${responseInstructions(session)}
+`.trim(),
         },
       }));
     session.response_pending_id = event_id;
@@ -1702,9 +1712,14 @@ function openaiConnect(session) {
           session.openai?.ws?.send(JSON.stringify({
             type: "response.create",
             response: {
-              output_modalities: ["text"],
-              tools: [],
-              instructions: "Reply with one short spoken sentence suitable for a phone call.",
+        output_modalities: ["text"],
+        tools: [],
+        instructions: `
+You are a voice sales agent on a phone call.
+Reply with ONE short spoken sentence suitable for a phone call.
+Stay strictly in the current conversation stage.
+${responseInstructions(session)}
+`.trim(),
             },
           }));
           session.has_active_response = true;
@@ -2123,7 +2138,12 @@ async function runOpenAiVoiceTest(args) {
             response: {
               output_modalities: ["text"],
               tools: [],
-              instructions: "Reply with one short spoken sentence suitable for a phone call.",
+              instructions: `
+You are a voice sales agent on a phone call.
+Reply with ONE short spoken sentence suitable for a phone call.
+Stay strictly in the current conversation stage.
+${responseInstructions(st)}
+`.trim(),
             },
           }));
           st.has_active_response = true;
