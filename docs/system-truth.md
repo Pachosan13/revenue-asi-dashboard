@@ -363,6 +363,11 @@ LeadGen routing is stored as JSON in `org_settings.leadgen_routing`:
 Server-side validation exists as a DB CHECK constraint (radius 1–50; if `active=true`, `dealer_address` is required).
 
 ## Changelog
+- Voice: Telnyx bidirectional streaming now accepts PCMA or PCMU and configures OpenAI Realtime to match (`input_audio_format`/`output_audio_format` set to `g711_alaw` for PCMA or `g711_ulaw` for PCMU). Logs `AUDIO_CODEC_INBOUND_ALAW_CONFIRMED` on first inbound PCMA. See `supabase/functions/dispatch-touch-voice-v5/index.ts`, `services/voice-rtp-gateway/server.js`.
+- Voice: OpenAI realtime output audio (events `response.output_audio.delta` and legacy `response.audio.delta`, plus `response.output_audio.done` and `output_audio_buffer.started/stopped`) is now decoded and streamed to Telnyx as 20ms G.711 frames (A-law for PCMA, μ-law for PCMU). Logs `OUTBOUND_AUDIO_ENQUEUE` (bytes/frames/codec) and periodic `TELNYX_MEDIA_SENT` counts. See `services/voice-rtp-gateway/server.js`.
+- Voice (Telnyx→OpenAI Realtime): server_vad now includes `idle_timeout_ms` (5s) and treats `input_audio_buffer.timeout_triggered` as turn end (logs `TURN_END_TIMEOUT_TRIGGERED` and can auto create a response). Inbound calls auto start Telnyx noise suppression once per call (`TELNYX_NOISE_SUPPRESSION_INBOUND_ENABLED`). Logs added for speech start/stop and timeout. See `services/voice-rtp-gateway/server.js`.
+- Voice: Added signed Telnyx webhook backup cleanup at `POST /webhooks/telnyx` (Ed25519 via `TELNYX_PUBLIC_KEY`) that clears timers, stops playback, closes bot turns/OpenAI WS, and removes Telnyx sessions on hangup/stream-stop events. See `services/voice-rtp-gateway/server.js`.
+- Voice: Documented post-incident voice turn lifecycle, audio vs logic split, webhook backup cleanup, and gated wartime socket/OpenAI event logs behind optional `VOICE_GATEWAY_DEBUG`. See `services/voice-rtp-gateway/server.js`, `docs/system-truth.md`.
 
 ## Voice RTP Gateway – Env Vars (Fly)
 
@@ -378,16 +383,45 @@ Server-side validation exists as a DB CHECK constraint (radius 1–50; if `activ
 - `TELNYX_API_KEY` / `Telnyx_Api` (required for Telnyx call control).
 - `TELNYX_APP_ID` (required per Telnyx app setup).
 - `SUPABASE_VOICE_HANDOFF_URL` / `SUPABASE_VOICE_HANDOFF_TOKEN` (optional; HOT handoff).
+- `TELNYX_PUBLIC_KEY` (required for Telnyx webhook signature verification).
+
+### Telnyx webhook cleanup (gateway)
+- Endpoint: `POST /webhooks/telnyx` (`services/voice-rtp-gateway/server.js`), verifies `telnyx-signature-ed25519` + `telnyx-timestamp` against `TELNYX_PUBLIC_KEY`; 401 + `WEBHOOK_AUTH_FAIL` on mismatch/missing key.
+- Cleanup events: any Telnyx webhook with `hangup` in the event name, `call.end`/`call.ended`, or any event containing `stream.stop`/`streaming.stopped`. Audio end events (`call.speak.ended`, `call.playback.ended`) still mark `audio_done` to close turns.
+- Cleanup actions: `clearResponseDoneTimer` → `stopOutboundPlayback` → `closeBotTurn(session, "telnyx_webhook_cleanup")` → close OpenAI WS (if open) → close Telnyx WS (if open) → remove the session from the Telnyx `sessions` map. Idempotent for repeated webhooks.
+- Logs: single-line JSON `WEBHOOK_IN`, `WEBHOOK_OK`, `WEBHOOK_NO_SESSION`, `WEBHOOK_CLEANUP`, `WEBHOOK_AUTH_FAIL` with `session_id`, `call_control_id`, `stream_id`, `telnyx_event`.
+- Local test (gateway running on `PORT`, throwaway Ed25519 keys):
+  ```
+  openssl genpkey -algorithm ed25519 -out telnyx.key
+  openssl pkey -in telnyx.key -pubout -out telnyx.pub
+  export TELNYX_PUBLIC_KEY="$(cat telnyx.pub)"
+  BODY='{"data":{"event_type":"call.hangup","payload":{"call_control_id":"ccid-demo","stream_id":"stream-demo"}}}'
+  TS=$(date +%s)
+  SIG=$(printf "%s|%s" "$TS" "$BODY" | openssl pkeyutl -sign -inkey telnyx.key -rawin | openssl base64 -A)
+  curl -i -X POST "http://localhost:${PORT:-8080}/webhooks/telnyx" \
+    -H "content-type: application/json" \
+    -H "telnyx-timestamp: $TS" \
+    -H "telnyx-signature-ed25519: $SIG" \
+    -d "$BODY"
+  ```
+  Expect `200` and logs `WEBHOOK_CLEANUP` (or `WEBHOOK_NO_SESSION` if no active session).
+- Fly: set `TELNYX_PUBLIC_KEY` via `fly secrets set TELNYX_PUBLIC_KEY="$(cat telnyx.pub)"` and run the same curl against the Fly hostname (e.g., `https://voice-rtp-gateway.fly.dev/webhooks/telnyx`).
+
+## Post-Incident Notes (Voice)
+- Canonical turn close: `tryCloseBotTurnCanon` closes a bot turn only when `audio_done` **and** `openai_done` are true. `audio_done` is set by Telnyx mark ack/timeout, webhook audio end, or hangup/stream-stop cleanup; `openai_done` is set on OpenAI `response.done` (or forced for greet). Event log: `BOT_TURN_CANON_CLOSED`. Path: `services/voice-rtp-gateway/server.js`.
+- Audio vs logic separation: audio delivery is tracked via Telnyx marks plus `response_done_timer` (best-effort timeout if no mark); logical completion is tracked via OpenAI response lifecycle. `turnClosed` gates user input only after both sides report done.
+- Telnyx webhooks: `POST /webhooks/telnyx` (Ed25519 `TELNYX_PUBLIC_KEY`) is the backup cleanup when WS ordering/delivery is unreliable; it clears timers, stops playback, closes OpenAI/Telnyx WS, and removes the session on hangup/stream-stop/audio-end.
+- Required Voice RTP Gateway env: `VOICE_GATEWAY_TOKEN`, `OPENAI_API_KEY`, `TELNYX_API_KEY` (or `Telnyx_Api`), `TELNYX_APP_ID`, `TELNYX_PUBLIC_KEY`; defaults remain for OpenAI model/voice (`OPENAI_TTS_MODEL`, `OPENAI_REALTIME_MODEL`, `OPENAI_TEXT_MODEL`) and `VOICE_CARRIER_PRIMARY` (twilio|telnyx).
+- Observability knob: setting `VOICE_GATEWAY_DEBUG=1` (or `VOICE_DEBUG=1`) enables wartime socket-level and OpenAI-event logging; default off to avoid noise.
 
 ### Known failure mode (TTS)
 - If `OPENAI_TTS_MODEL` is unset, OpenAI `/v1/audio/speech` returns `400` (“you must provide a model parameter”) → `TTS_FAIL` → silence. Fix: set `OPENAI_TTS_MODEL` or rely on default `"gpt-4o-mini-tts"`.
 
 ### Voice RTP Gateway – Codec Support
-- **Supported**: PCMU (μ-law) only.
+- **Supported**: PCMA (A-law) and PCMU (μ-law). OpenAI Realtime input/output audio formats are set to the matching G.711 flavor per Telnyx `media_format.encoding`.
 - **Unsupported**: G729 (hard-fail). Reason: triggers false RMS/barge-in and results in mute audio.
-  - Guardrail: if Telnyx start event reports `media_format.encoding !== "PCMU"`, the gateway logs `ERROR_FATAL_CODEC` and closes the session.
-  - Telnyx streaming start is forced with `stream_codec = "PCMU"` and `media_format.encoding = "PCMU"`.
-  - Telnyx streaming_start MUST use `/actions/streaming_start` and include `stream_track`. Logs required for debugging: `TELNYX_STREAMING_START_REQ/RES`. Success criteria: gateway `TELNYX_START.media_format.encoding == "PCMU"`.
+  - Guardrail: if Telnyx start event reports an encoding other than PCMA/PCMU, the gateway logs `ERROR_FATAL_CODEC` and closes the session.
+  - Telnyx streaming_start MUST use `/actions/streaming_start` and include `stream_track`. Logs required for debugging: `TELNYX_STREAMING_START_REQ/RES`. Success criteria: gateway `TELNYX_START.media_format.encoding` is `PCMA` or `PCMU`.
   - Webhook logs required: `VOICE_WEBHOOK_HIT`, `VOICE_WEBHOOK_EVENT`, `TELNYX_STREAMING_START_REQ/RES/ERR`, plus `STREAMING_WAIT_STATE` / `STREAMING_START_AFTER_ANSWER` when gating answered events.
   - WS auth: `/telnyx` is trusted carrier ingress and is allowed without token (explicit bypass logged as `AUTH_BYPASS_TELNYX`). All other WS paths keep token requirements.
   - After `input_audio_buffer.commit` with real audio, always issue `response.create`; do not time-gate on `last_transcript_at`.
