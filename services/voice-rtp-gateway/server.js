@@ -34,6 +34,7 @@ const MAX_STAGE_REPEATS = Number(process.env.MAX_STAGE_REPEATS ?? "2");
 const MIN_COMMIT_BYTES = 3200; // 100ms at 16kHz PCM16 (16000 * 0.1 * 2)
 const NO_COMMIT_BACKOFF_MS = 2500;
 const TTS_ECHO_RMS_MIN = 0.0075;
+const NO_USER_NUDGE_MS = 10000; // 10s gentle follow-up prompt window
 
 // “Speed”: Realtime doesn’t expose true playback speed reliably.
 // Best proxy: tighter phrasing + higher turn frequency + less tokens + no pauses.
@@ -357,7 +358,7 @@ function speakAuthorizer(session, text, reason) {
   if (!session || !text) return;
   const stage = String(session.stage || "greet");
   jlog({ event: "SPEAK_GATE_PRE_AUTH", session_id: session.session_id, stage, reason: reason || null, snapshot: gateSnapshot(session) });
-  if (session.awaiting_user_input) {
+  if (session.awaiting_user_input && reason !== "nudge") {
     jlog({ event: "SPEAK_GATE_BLOCKED_WAITING_USER", session_id: session.session_id, stage, reason: reason || null, snapshot: gateSnapshot(session) });
     return;
   }
@@ -390,7 +391,9 @@ function speakAuthorizer(session, text, reason) {
     session.openai_done = true; // greet has no model response; mark done
     jlog({ event: "OPENAI_DONE_FORCED_GREET", session_id: session.session_id, stage, snapshot: gateSnapshot(session) });
   }
-  session._spokeThisTurn = true;
+  if (reason !== "nudge") {
+    session._spokeThisTurn = true;
+  }
   jlog({ event: "SPEAK_GATE_WILL_SPEAK", session_id: session.session_id, stage, reason: reason || null, text_preview: String(text).slice(0, 80), snapshot: gateSnapshot(session) });
   playDeterministicLine(session, text).catch((e) => {
     jlog({ event: "PLAYBACK_ERR", session_id: session.session_id, err: String(e?.message || e) });
@@ -402,19 +405,39 @@ function tryCloseBotTurnCanon(session, reason) {
   if (!session) return;
   if (session.turnClosed === true) return;
   logInvariantIfBroken(session);
+  clearNoUserNudgeTimer(session);
   const snap = gateSnapshot(session);
-  if (!session.audio_done || !session.openai_done) {
+  const now = nowMs();
+  const forcedHangup = typeof reason === "string" && (reason.includes("hangup") || reason.includes("stream_stop") || reason.includes("webhook_cleanup"));
+  const openaiDone = session.openai_done === true;
+  const markAckAt = Number(session.last_telnyx_mark_ack_at || 0);
+  const outputDoneAt = Number(session.output_audio_done_at || 0);
+  const lastSpeechAt = Number(session.last_speech_started_at || 0);
+  const hasMarkAck = markAckAt > 0;
+  const silenceAfterAudio = outputDoneAt > 0 && (now - outputDoneAt >= SPEAKING_RECENT_MS) && (!lastSpeechAt || lastSpeechAt <= outputDoneAt);
+  const canClose = forcedHangup ? openaiDone : (openaiDone && (hasMarkAck || silenceAfterAudio));
+  if (!canClose) {
+    if (!session.response_done_timer) {
+      session.response_done_timer = setTimeout(() => {
+        session.response_done_timer = null;
+        tryCloseBotTurnCanon(session, reason || "wait_recheck");
+      }, SPEAKING_RECENT_MS);
+    }
     jlog({
       event: "BOT_TURN_CANON_WAITING",
       session_id: session.session_id,
       stage: session.stage,
-      waiting_audio: !session.audio_done,
-      waiting_openai: !session.openai_done,
+      waiting_audio: !hasMarkAck && !silenceAfterAudio,
+      waiting_mark_ack: !hasMarkAck,
+      waiting_silence: !silenceAfterAudio,
+      waiting_openai: !openaiDone,
       reason: reason || null,
       snapshot: snap,
     });
     return;
   }
+  clearResponseDoneTimer(session);
+  const close_reason = forcedHangup ? "forced_hangup" : (hasMarkAck ? "telnyx_mark_ack" : "silence_after_audio");
   session.turnClosed = true;
   session.speaking = false;
   session.tts_playing = false;
@@ -434,11 +457,16 @@ function tryCloseBotTurnCanon(session, reason) {
   session.dropAudioUntil = 0;
   session.awaiting_user_input = true;
   session.pending_user_turn = true;
+  session.last_telnyx_mark_ack_at = 0;
+  session.output_audio_done_at = 0;
+  session.last_speech_started_at = 0;
+  armNoUserNudge(session);
   jlog({
     event: "BOT_TURN_CANON_CLOSED",
     session_id: session.session_id,
     stage: session.stage,
     reason: reason || null,
+    close_reason,
     snapshot: snap,
   });
   if (session.stage === "greet") {
@@ -565,6 +593,34 @@ function clearResponseDoneTimer(session) {
     clearTimeout(session.response_done_timer);
     session.response_done_timer = null;
   }
+}
+
+function clearNoUserNudgeTimer(session, logEvent) {
+  if (session?._pendingNoUserTimer) {
+    clearTimeout(session._pendingNoUserTimer);
+    session._pendingNoUserTimer = null;
+    if (logEvent === "speech") {
+      jlog({ event: "NUDGE_CLEARED_BY_SPEECH", session_id: session.session_id, stage: session.stage });
+    }
+  }
+}
+
+function armNoUserNudge(session) {
+  if (!session) return;
+  if (!session.awaiting_user_input) return;
+  if (session._pendingNoUserTimer) return;
+  if (session.last_speech_started_at) return;
+  session._pendingNoUserTimer = setTimeout(() => {
+    session._pendingNoUserTimer = null;
+    jlog({ event: "NUDGE_EMITTED", session_id: session.session_id, stage: session.stage });
+    speakAuthorizer(session, "Are you still there?", "nudge");
+  }, NO_USER_NUDGE_MS);
+  jlog({
+    event: "NUDGE_TIMER_ARMED",
+    session_id: session.session_id,
+    stage: session.stage,
+    delay_ms: NO_USER_NUDGE_MS,
+  });
 }
 
 function logInvariantIfBroken(session) {
@@ -1039,6 +1095,7 @@ async function playDeterministicLine(session, text) {
       if (session?.telnyx?.ws) {
         const mark_name = `tts_end_${session.session_id}_${nowMs()}`;
         session.pending_tts_mark = mark_name;
+        session.last_telnyx_mark_ack_at = 0;
         session.audio_done = false;
         try {
           session.telnyx.ws.send(JSON.stringify({ event: "mark", mark: { name: mark_name } }));
@@ -1173,6 +1230,10 @@ function makeBaseSession() {
     response_pending_id: null,
     response_pending_at: 0,
     response_watchdog: null,
+    last_speech_started_at: 0,
+    output_audio_done_at: 0,
+    last_telnyx_mark_ack_at: 0,
+    _pendingNoUserTimer: null,
     response_state: new Map(), // response_id -> { has_text, fallback_done }
     classifier_pending_id: null,
     classifier_retry_count: 0,
@@ -1372,13 +1433,13 @@ function stagePrompt(stage, source, hot) {
   // TEMPLATE-ONLY: return EXACT strings only.
   const s = String(stage || "");
   const src = String(source || "internet");
-  if (s === "greet") return `Hola, ¿qué tal? Te llamo por el anuncio del carro que publicaste en ${src}. ¿Eres el dueño?`;
-  if (s === "availability") return "Perfecto. ¿Todavía lo tienes disponible?";
-  if (s === "urgency") return "Buenísimo. ¿Lo estás vendiendo ya — hoy o mañana?";
+  if (s === "greet") return `Hola, ¿qué tal? Soy Juan Carlos. Te llamo por el anuncio del carro que publicaste en ${src}. ¿Eres el dueño?`;
+  if (s === "availability") return "¿Todavía lo tienes disponible?";
+  if (s === "urgency") return "¿Lo quieres vender ya — hoy o esta semana?";
   if (s === "schedule") return "Perfecto. ¿Podemos verlo hoy o mañana? ¿A qué hora te queda bien?";
   if (s === "done") return hot
-    ? "Listo. Ya le paso tu número a Darmesh que está interesado. Gracias."
-    : "Perfecto, gracias. Si decides venderlo pronto, me avisas.";
+    ? "Perfecto. Ya le paso tu número a Juan Carlos que está interesado. Gracias."
+    : "Gracias. Si decides venderlo pronto, me avisas.";
   return "Perfecto. ¿Todavía lo tienes disponible?";
 }
 
@@ -1422,16 +1483,17 @@ function templateEnforce(stage, assistantText, source, hotAlready, session_id) {
 function lockedSystemInstructions(session) {
   // STRICTEST possible system message (non-negotiable)
   return [
-    "Eres un operador/comprador. Llamas SOLO para confirmar que la persona está VENDIENDO el carro y coordinar una visita rápida.",
+    "Eres Juan Carlos, persona; NO eres empresa.",
+    "Te presentas como Juan Carlos (persona). Llamas SOLO para confirmar que la persona está VENDIENDO el carro y coordinar rápido.",
+    "Nunca menciones dealer, agencia, compañía, ni que compras por debajo. Di: “tengo alguien interesado”.",
     "NO das consejos. NO recomiendas compras. NO comparas modelos. NO opinas sobre marcas. NO hablas de features, precio, year, trim, mods.",
-    "Tu flujo es una máquina de estados. UNA pregunta por turno. Estados:",
-    "1) availability: “¿El carro sigue disponible?”",
-    "2) urgency: “¿Lo quieres vender hoy o mañana?”",
-    "3) zone: “¿En qué zona estás?”",
-    "4) time: “¿A qué hora te va bien hoy?”",
+    "Tu flujo es una máquina de estados. UNA pregunta por turno. Máximo 3 preguntas. Estados:",
+    "1) greet: “¿Eres el dueño?”",
+    "2) availability: “¿Todavía lo tienes disponible?”",
+    "3) urgency: “¿Lo quieres vender ya — hoy o esta semana?”",
     "Normaliza respuestas a YES/NO cuando aplique.",
     "HOT = availability=YES y urgency=YES.",
-    "Cuando HOT=TRUE, dices EXACTAMENTE: “Perfecto. Ya le paso tu número a Darmesh que está interesado en el carro.” Luego sigues stages.",
+    "Cuando HOT=TRUE, dices EXACTAMENTE: “Perfecto. Ya le paso tu número a Juan Carlos que está interesado en el carro.” Luego sigues stages.",
     "Si el usuario pregunta por consejos de compra o tema de carros, responde EXACTAMENTE: “No te puedo asesorar en compras. Solo confirmo disponibilidad y coordinamos para verlo rápido.” y vuelves al stage actual.",
     "Si detectas que NO está vendiendo / es comprador / no aplica: “Perfecto, gracias. Yo estoy contactando solo vendedores. Buen día.” y termina.",
     "No hagas multi-preguntas. Nunca más de una pregunta por turno.",
@@ -1788,7 +1850,7 @@ function nextStageName(stage) {
   const s = String(stage || "");
   if (s === "greet") return "availability";
   if (s === "availability") return "urgency";
-  if (s === "urgency") return "schedule";
+  if (s === "urgency") return "done";
   if (s === "schedule") return "done";
   return "done";
 }
@@ -2136,6 +2198,7 @@ ${responseInstructions(session)}
         session.tts_playing = false;
         const mark_name = `model_end_${session.session_id}_${nowMs()}`;
         session.pending_tts_mark = mark_name;
+        session.last_telnyx_mark_ack_at = 0;
         session.audio_done = false;
         if (session?.telnyx?.ws) {
           try {
@@ -2211,6 +2274,8 @@ ${responseInstructions(session)}
     session._outboundStreamActive = true;
     session._outboundStreamDone = false;
     session._lastOutboundCodec = targetCodec;
+    session.output_audio_done_at = 0;
+    session.last_telnyx_mark_ack_at = 0;
     session.speaking = true;
     session.audio_done = false;
     session.lastSpeakAt = nowMs();
@@ -2240,6 +2305,7 @@ ${responseInstructions(session)}
     session._playbackIdx = Math.min(session._playbackIdx || 0, frames.length);
     session._outboundStreamDone = true;
     session._outboundStreamActive = false;
+    session.output_audio_done_at = nowMs();
     if (!session._playbackTimer) startModelPlaybackTimer();
     jlog({ event: "OUTBOUND_AUDIO_DONE", session_id: session.session_id, source });
   }
@@ -2252,6 +2318,8 @@ ${responseInstructions(session)}
     const type = m.type || "unknown";
 
     if (type === "input_audio_buffer.speech_started") {
+      session.last_speech_started_at = nowMs();
+      clearNoUserNudgeTimer(session, "speech");
       jlog({ event: "OPENAI_SPEECH_STARTED", session_id: session.session_id, stage: session.stage });
     }
     if (type === "input_audio_buffer.speech_stopped") {
@@ -2403,15 +2471,8 @@ ${responseInstructions(session)}
       }
       session.response_done_timer = setTimeout(() => {
         session.response_done_timer = null;
-        if (!session.audio_done) {
-          session.audio_best_effort = true;
-          session.audio_done = true;
-          // DEBT: relies on a timeout when Telnyx marks do not arrive; best-effort audio_done.
-          tryCloseBotTurnCanon(session, "response_done_timeout");
-        } else {
-          tryCloseBotTurnCanon(session, "response_done");
-        }
-      }, 800);
+        tryCloseBotTurnCanon(session, "response_done_wait");
+      }, SPEAKING_RECENT_MS);
       jlog({ event: "OPENAI_RESPONSE_DONE", session_id: session.session_id, stage: session.stage, status: m?.response?.status ?? null });
       const rid = m?.response?.id || session.response_pending_id || null;
       const st = rid ? session.response_state.get(rid) || { has_text: false, fallback_done: false } : { has_text: false, fallback_done: false };
@@ -2704,10 +2765,7 @@ ${responseInstructions(session)}
       jlog({ event: "TURN_RESUME", stage: session.stage });
       jlog({ event: "BARGE_IN_CONFIRMED", session_id: session.session_id, dur_ms: dur });
 
-      if (session._pendingNoUserTimer) {
-        clearTimeout(session._pendingNoUserTimer);
-        session._pendingNoUserTimer = null;
-      }
+      clearNoUserNudgeTimer(session, "speech");
 
       // With server_vad create_response enabled we do NOT send manual commit here; defer to conversation.item.created.
       jlog({ event: "OPENAI_COMMIT_SKIPPED_SERVER_VAD", session_id: session.session_id, bytes_since_commit: session.bytes_since_commit });
@@ -2716,106 +2774,19 @@ ${responseInstructions(session)}
       session.bytes_since_commit = 0;
       session.last_audio_append_at = 0;
 
-      session._pendingNoUserTimer = setTimeout(() => {
-        const userText = String(session._lastUserText || "").trim();
-        if (userText) {
-          const preIntent = detectIntent(userText || "");
-          if (preIntent.intent === "OTHER" && isLikelyGarbage(userText)) {
-            jlog({
-              event: "ASR_SANITY_REJECT",
-              session_id: session.session_id,
-              stage: session.stage,
-              preview: userText.slice(0, 80),
-            });
-            emitClarification(session, { intent: "OTHER", reason: "asr_sanity_reject" });
-            return;
-          }
-          session._lastUserText = userText;
-          const { intent, reason } = preIntent.intent === "OTHER" ? detectIntent(session._lastUserText) : preIntent;
-          session.last_intent = intent;
-          session._intentDetected = true;
-          if (!session.lang) {
-            const lower = session._lastUserText.toLowerCase();
-            const enHits = (lower.match(/\b(yes|ok|sell|today|tomorrow)\b/g) || []).length;
-            session.lang = enHits >= 1 ? "en" : "es";
-          }
-          jlog({
-            event: "INTENT_DETECTED",
-            session_id: session.session_id,
-            stage: session.stage,
-            intent,
-            reason,
-            user_text: session._lastUserText,
-          });
-          jlog({
-            event: "TELNYX_USER_TEXT",
-            session_id: session.session_id,
-            stage: session.stage,
-            user_text_len: userText.length,
-            preview: userText.slice(0, 80),
-          });
-
-          if (session.awaiting_yes_confirmation) {
-            if (intent === "YES") {
-              session.yes_confirmed = true;
-              session.awaiting_yes_confirmation = false;
-              jlog({ event: "YES_CONFIRMED", session_id: session.session_id, stage: session.stage });
-              advanceStageAndEmit(session, session._lastUserText).catch(() => {});
-              return;
-            }
-            if (intent === "NO") {
-              session.awaiting_yes_confirmation = false;
-              session.yes_confirmed = false;
-              emitPoliteExit(session);
-              return;
-            }
-            if (intent === "OBJECTION") {
-              session.awaiting_yes_confirmation = false;
-              session.yes_confirmed = false;
-              emitClarification(session, { intent, reason });
-              return;
-            }
-          }
-
-          if (intent === "YES" && session.yes_confirmed !== true) {
-            const lang = getSessionLang(session);
-            const msg = lang === "en"
-              ? "Just to confirm: do you want to move forward now?"
-              : "Solo para confirmar: ¿sí te interesa avanzar ahora?";
-            sendResponse(session, msg);
-            session.awaiting_yes_confirmation = true;
-            session.yes_confirmed = false;
-            jlog({ event: "YES_CONFIRMATION_REQUESTED", session_id: session.session_id, stage: session.stage });
-            return;
-          }
-
-          switch (intent) {
-            case "NO":
-              emitPoliteExit(session);
-              return;
-            case "QUESTION":
-            case "OBJECTION":
-              emitClarification(session, { intent, reason });
-              return;
-            case "YES":
-              if (session.yes_confirmed !== true) return;
-              session.yes_confirmed = false;
-              session.awaiting_yes_confirmation = false;
-              advanceStageAndEmit(session, session._lastUserText).catch(() => {});
-              return;
-            default:
-              emitNudge(session, { intent, reason });
-              return;
-          }
-        }
-        if (session._lastResponseCreatedAt) {
-          jlog({ event: "TELNYX_NO_TRANSCRIPT_AFTER_RESPONSE", session_id: session.session_id, stage: session.stage });
-          jlog({ event: "TELNYX_NO_USER_TEXT", session_id: session.session_id, stage: session.stage });
-          return;
-        }
-        jlog({ event: "TELNYX_NO_RESPONSE_CREATED", session_id: session.session_id, stage: session.stage });
-        jlog({ event: "TELNYX_NO_USER_TEXT", session_id: session.session_id, stage: session.stage });
-      }, 1200);
+      // Arm a one-time nudge if the user stays silent after the bot turn.
+      if (!session.awaiting_user_input || session._pendingNoUserTimer || session.last_speech_started_at) {
+        jlog({
+          event: "NUDGE_SKIP",
+          session_id: session.session_id,
+          stage: session.stage,
+          awaiting_user_input: Boolean(session.awaiting_user_input),
+          has_timer: Boolean(session._pendingNoUserTimer),
+          last_speech_started_at: session.last_speech_started_at || null,
+        });
+      } else {
+        armNoUserNudge(session);
+      }
       if (isTimeout && !session.has_active_response && !session.openai_response_active && !session?.openai?.activeResponse) {
         sendResponse(session, stageQuestion(session.stage, session));
       }
@@ -3632,6 +3603,7 @@ wss?.on("connection", (ws, req) => {
       jlog({ event: "TELNYX_MARK_IN", session_id: sess?.session_id ?? session.session_id, stream_id: streamId ?? null, name: name ?? null });
       if (sess && name && sess.pending_tts_mark && name === sess.pending_tts_mark) {
         sess.audio_done = true;
+        sess.last_telnyx_mark_ack_at = nowMs();
         if (sess.pending_tts_mark_timer) { clearTimeout(sess.pending_tts_mark_timer); sess.pending_tts_mark_timer = null; }
         sess.pending_tts_mark = null;
         jlog({ event: "TELNYX_MARK_ACK", session_id: sess.session_id, mark_name: name, call_control_id: sess.call_control_id || null });
@@ -3714,6 +3686,7 @@ function findTelnyxSession({ streamId, callControlId }) {
 function cleanupTelnyxSession(session, reason) {
   if (!session) return;
   clearResponseDoneTimer(session);
+  clearNoUserNudgeTimer(session);
   stopOutboundPlayback(session);
   closeBotTurn(session, reason || "telnyx_webhook_cleanup");
   try { session.openai?.ws?.close(); } catch {}

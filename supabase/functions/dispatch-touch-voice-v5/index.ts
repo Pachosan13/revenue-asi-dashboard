@@ -299,10 +299,7 @@ serve(async (req) => {
         (args.config?.stream_bidirectional_mode as string | undefined) ??
         (Deno.env.get("TELNYX_STREAM_BIDIRECTIONAL_MODE") ?? "rtp")
 
-      const bidiCodec =
-        (args.config?.telnyx_stream_bidirectional_codec as string | undefined) ??
-        (args.config?.stream_bidirectional_codec as string | undefined) ??
-        (Deno.env.get("TELNYX_STREAM_BIDIRECTIONAL_CODEC") ?? "PCMU")
+      const bidiCodec = "PCMA"
 
       body.stream_track = streamTrack
       body.stream_bidirectional_mode = bidiMode
