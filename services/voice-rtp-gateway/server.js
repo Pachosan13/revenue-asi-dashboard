@@ -99,6 +99,30 @@ function safeBase64Json(s) {
   }
 }
 
+function decodeClientStateB64(s, session) {
+  if (!s) return null;
+  const raw = String(s);
+  try {
+    const decoded = JSON.parse(Buffer.from(raw, "base64").toString("utf8"));
+    return decoded && typeof decoded === "object" ? decoded : null;
+  } catch (e1) {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch (e2) {
+      try {
+        jlog({
+          event: "CLIENT_STATE_DECODE_FAIL",
+          session_id: session?.session_id ?? null,
+          raw_len: raw.length,
+          raw_preview: raw.slice(0, 40),
+        });
+      } catch {}
+      return null;
+    }
+  }
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -266,6 +290,24 @@ function responseInstructions(session) {
   return lang === "en" ? "Reply briefly in English." : "Responde breve en español.";
 }
 
+function normalizeSource(raw) {
+  const val = String(raw || "").toLowerCase();
+  if (val.includes("craigslist")) return "Craigslist";
+  if (val.includes("encuentra24") || val.includes("enc24")) return "Encuentra24";
+  if (val.includes("facebook") || val.includes("fb") || val.includes("marketplace")) return "Facebook Marketplace";
+  return String(raw || "Internet").slice(0, 40);
+}
+
+function normalizeSourceFromClientState(session) {
+  const raw =
+    (session?.client_state?.payload?.voice?.source ?? null) ??
+    (session?.client_state?.source ?? null) ??
+    (session?.client_state?.listing?.source ?? null) ??
+    (session?.source ?? null) ??
+    "Internet";
+  return normalizeSource(raw);
+}
+
 function renderDeterministicLine(session, decision) {
   const lang = (decision?.slots?.language === "en") ? "en" : getSessionLang(session);
   const askOwner = lang === "en"
@@ -399,6 +441,34 @@ function speakAuthorizer(session, text, reason) {
     jlog({ event: "PLAYBACK_ERR", session_id: session.session_id, err: String(e?.message || e) });
     tryCloseBotTurnCanon(session, "playback_error");
   });
+}
+
+function speakFinal(session, desiredText, reason) {
+  if (!session) return;
+  const stage = String(session.stage || "availability");
+  const source = normalizeSourceFromClientState(session);
+  const hotAlready = Boolean(session?.qual?.hot_announced);
+  let finalText = templateEnforce(stage, String(desiredText || ""), source, hotAlready, session?.session_id ?? null);
+  const guard = guardAssistantText(stage, finalText, hotAlready, source);
+  if (!guard.ok) {
+    finalText = guard.text || stagePrompt(stage, source, false);
+    jlog({
+      event: "LOCKED_SYSTEM",
+      session_id: session.session_id,
+      stage,
+      reason: guard.reason || "allowlist",
+      fallback: finalText,
+      source,
+    });
+  } else {
+    finalText = guard.text;
+  }
+  finalText = String(finalText || "").trim();
+  if (!finalText) return;
+  const est = estMsForText(finalText, TTS_SPEED);
+  session.speaking_until = nowMs() + est + 250;
+  jlog({ event: "SPEAK_TEXT", session_id: session.session_id, stage, source, reason: reason || null, text: finalText });
+  speakAuthorizer(session, finalText, reason);
 }
 
 function tryCloseBotTurnCanon(session, reason) {
@@ -613,7 +683,7 @@ function armNoUserNudge(session) {
   session._pendingNoUserTimer = setTimeout(() => {
     session._pendingNoUserTimer = null;
     jlog({ event: "NUDGE_EMITTED", session_id: session.session_id, stage: session.stage });
-    speakAuthorizer(session, "Are you still there?", "nudge");
+    speakFinal(session, stagePrompt(session.stage, normalizeSourceFromClientState(session), false), "nudge");
   }, NO_USER_NUDGE_MS);
   jlog({
     event: "NUDGE_TIMER_ARMED",
@@ -677,7 +747,7 @@ Return ONLY the JSON. No prose.
   `.trim();
   const strictNote = strict ? "JSON ONLY. No text outside JSON. Do not apologize." : "";
   try {
-    session.response_state.set(event_id, { has_text: false, fallback_done: false });
+    session.response_state.set(event_id, { has_text: false, fallback_done: false, transcript_len: 0 });
     session.classifier_pending_id = event_id;
     session.classifier_retry_count = strict ? 1 : 0;
     session.response_pending_id = event_id;
@@ -753,7 +823,7 @@ function sendResponse(session, text) {
     const event_id = crypto.randomUUID();
     const modalities = ["audio"];
     if (!modalities.includes("audio")) jlog({ event: "ERROR_FATAL_BAD_MODALITIES", session_id: session.session_id, stage: session.stage, reason: "sendResponse" });
-    session.response_state.set(event_id, { has_text: false, fallback_done: false });
+    session.response_state.set(event_id, { has_text: false, fallback_done: false, transcript_len: 0 });
     session.openai_response_active = true;
     session.has_active_response = true;
     if (session.openai) session.openai.activeResponse = true;
@@ -1026,12 +1096,9 @@ async function telnyxHangup(callControlId) {
 
 async function playDeterministicLine(session, text) {
   // TEMPLATE-ONLY speech: before any TTS/outbound, enforce strict templates only.
-  const source =
-    (session?.source ? String(session.source) : null) ??
-    (session?.client_state?.source ? String(session.client_state.source) : null) ??
-    "encuentra24";
+  const source = normalizeSourceFromClientState(session);
   const hotAlready = Boolean(session?.qual?.hot_announced);
-  const safeText = templateEnforce(String(session?.stage || "available"), String(text || ""), source, hotAlready, session?.session_id ?? null);
+  const safeText = templateEnforce(String(session?.stage || "availability"), String(text || ""), source, hotAlready, session?.session_id ?? null);
   const framesRes = await getMulawFramesForText(safeText);
   if (!framesRes.ok) {
     jlog({ event: "TTS_FAIL", session_id: session.session_id, err: framesRes.error });
@@ -1134,7 +1201,7 @@ async function playDeterministicLine(session, text) {
         if (nextText) {
           // Small pause between emits if needed (helps pacing on some carriers)
           setTimeout(() => {
-              speakAuthorizer(session, String(nextText), "queue");
+              speakFinal(session, String(nextText), "queue");
           }, 150);
         }
       }
@@ -1190,7 +1257,7 @@ function makeBaseSession() {
     has_active_response: false,
 
     // behavior state
-    source: "encuentra24",
+    source: "Internet",
     stage: "greet",
     stageRepeats: 0,
     qual: { available: null, urgent: null },
@@ -1418,10 +1485,7 @@ function extractListingRef(session) {
 }
 
 function agentContextLine(session) {
-  const src =
-    (session?.source ? String(session.source) : null) ??
-    (session?.client_state?.source ? String(session.client_state.source) : null) ??
-    "encuentra24";
+  const src = normalizeSourceFromClientState(session);
   if (VOICE_TEST_MODE) {
     // TEST MODE context (exact, no car details)
     return `Te llamo por el anuncio del carro que subiste en ${src}. Soy comprador y quiero comprar rápido. Solo confirmo si está disponible y coordinamos para verlo.`;
@@ -1432,11 +1496,15 @@ function agentContextLine(session) {
 function stagePrompt(stage, source, hot) {
   // TEMPLATE-ONLY: return EXACT strings only.
   const s = String(stage || "");
-  const src = String(source || "internet");
+  const src = normalizeSource(source || "Internet");
   if (s === "greet") return `Hola, ¿qué tal? Soy Juan Carlos. Te llamo por el anuncio del carro que publicaste en ${src}. ¿Eres el dueño?`;
   if (s === "availability") return "¿Todavía lo tienes disponible?";
   if (s === "urgency") return "¿Lo quieres vender ya — hoy o esta semana?";
-  if (s === "schedule") return "Perfecto. ¿Podemos verlo hoy o mañana? ¿A qué hora te queda bien?";
+  if (s === "zone") return "¿En qué zona estás?";
+  if (s === "time") return "Perfecto. ¿Podemos verlo hoy o mañana? ¿A qué hora te queda bien?";
+  if (s === "hot_line") return "Perfecto. Ya le paso tu número a Juan Carlos que está interesado. Gracias.";
+  if (s === "refuse_buy_advice") return "No te puedo asesorar en compras. Solo confirmo disponibilidad y coordinamos para verlo rápido.";
+  if (s === "not_seller_end") return "Perfecto, gracias. Yo estoy contactando solo vendedores. Buen día.";
   if (s === "done") return hot
     ? "Perfecto. Ya le paso tu número a Juan Carlos que está interesado. Gracias."
     : "Gracias. Si decides venderlo pronto, me avisas.";
@@ -1456,7 +1524,8 @@ function templateEnforce(stage, assistantText, source, hotAlready, session_id) {
     if (s === "greet") return stagePrompt("greet", src, false);
     if (s === "availability") return stagePrompt("availability", src, false);
     if (s === "urgency") return stagePrompt("urgency", src, false);
-    if (s === "schedule") return stagePrompt("schedule", src, false);
+    if (s === "zone") return stagePrompt("zone", src, false);
+    if (s === "time") return stagePrompt("time", src, false);
     if (s === "done") return hotAlready ? stagePrompt("done", src, true) : stagePrompt("done", src, false);
     return stagePrompt("availability", src, false);
   }
@@ -1464,18 +1533,20 @@ function templateEnforce(stage, assistantText, source, hotAlready, session_id) {
   const greet = stagePrompt("greet", src, false);
   const qAvail = stagePrompt("availability", src, false);
   const qUrg = stagePrompt("urgency", src, false);
-  const qSched = stagePrompt("schedule", src, false);
+  const qZone = stagePrompt("zone", src, false);
+  const qTime = stagePrompt("time", src, false);
   const doneHot = stagePrompt("done", src, true);
   const doneNo = stagePrompt("done", src, false);
 
-  const allowed = new Set([greet, qAvail, qUrg, qSched, doneHot, doneNo]);
+  const allowed = new Set([greet, qAvail, qUrg, qZone, qTime, doneHot, doneNo]);
   if (allowed.has(original)) return original;
 
   // If drift/off-template, fall back to the current stage question (or done line).
   if (s === "greet") return greet;
   if (s === "availability") return qAvail;
   if (s === "urgency") return qUrg;
-  if (s === "schedule") return qSched;
+  if (s === "zone") return qZone;
+  if (s === "time") return qTime;
   if (s === "done") return hotAlready ? doneHot : doneNo;
   return qAvail;
 }
@@ -1487,10 +1558,12 @@ function lockedSystemInstructions(session) {
     "Te presentas como Juan Carlos (persona). Llamas SOLO para confirmar que la persona está VENDIENDO el carro y coordinar rápido.",
     "Nunca menciones dealer, agencia, compañía, ni que compras por debajo. Di: “tengo alguien interesado”.",
     "NO das consejos. NO recomiendas compras. NO comparas modelos. NO opinas sobre marcas. NO hablas de features, precio, year, trim, mods.",
-    "Tu flujo es una máquina de estados. UNA pregunta por turno. Máximo 3 preguntas. Estados:",
+    "Tu flujo es una máquina de estados. UNA pregunta por turno. Estados:",
     "1) greet: “¿Eres el dueño?”",
     "2) availability: “¿Todavía lo tienes disponible?”",
     "3) urgency: “¿Lo quieres vender ya — hoy o esta semana?”",
+    "4) zone: “¿En qué zona estás?”",
+    "5) time: “Perfecto. ¿Podemos verlo hoy o mañana? ¿A qué hora te queda bien?”",
     "Normaliza respuestas a YES/NO cuando aplique.",
     "HOT = availability=YES y urgency=YES.",
     "Cuando HOT=TRUE, dices EXACTAMENTE: “Perfecto. Ya le paso tu número a Juan Carlos que está interesado en el carro.” Luego sigues stages.",
@@ -1501,23 +1574,24 @@ function lockedSystemInstructions(session) {
 }
 
 function stageQuestion(stage, session) {
-  const src = session?.client_state?.source ? String(session.client_state.source) : "internet";
+  const src = normalizeSourceFromClientState(session);
   return stagePrompt(stage, src, false);
 }
 
 const LINES = {
-  Q_AVAILABLE: stagePrompt("available", "internet", false),
+  Q_AVAILABLE: stagePrompt("availability", "internet", false),
   Q_URGENCY: stagePrompt("urgency", "internet", false),
   Q_ZONE: stagePrompt("zone", "internet", false),
   Q_TIME: stagePrompt("time", "internet", false),
-  HOT_LINE: stagePrompt("hot_line", "internet", true),
+  HOT_LINE: stagePrompt("done", "internet", true),
   REFUSAL: stagePrompt("refuse_buy_advice", "internet", false),
   NOT_SELLER: stagePrompt("not_seller_end", "internet", false),
 };
 
 function guardAssistantText(stage, text, hotAlready, source) {
   const original = String(text || "").trim();
-  const s = String(stage || "available");
+  const s = String(stage || "availability");
+  const src = normalizeSource(source || "Internet");
 
   // Force one-question-per-turn: if multiple question marks, reduce to stage question.
   const questionCount = (original.match(/¿/g) || []).length;
@@ -1525,7 +1599,7 @@ function guardAssistantText(stage, text, hotAlready, source) {
     return {
       ok: false,
       reason: "multi_question",
-      text: stageQuestion(s, { client_state: { source } }),
+      text: stagePrompt(s, src, false),
     };
   }
 
@@ -1537,25 +1611,26 @@ function guardAssistantText(stage, text, hotAlready, source) {
   ];
   for (const b of blocklist) {
     if (b.re.test(original)) {
-      return { ok: false, reason: "regex", text: LINES.REFUSAL };
+      return { ok: false, reason: "regex", text: stagePrompt(s, src, false) };
     }
   }
 
   // Stage allowlist (hard)
-  const allow = new Set();
-  if (s === "available") { allow.add(LINES.Q_AVAILABLE); allow.add(LINES.REFUSAL); allow.add(LINES.NOT_SELLER); }
-  if (s === "urgency") { allow.add(LINES.Q_URGENCY); allow.add(LINES.REFUSAL); allow.add(LINES.NOT_SELLER); }
-  if (s === "zone") { allow.add(LINES.Q_ZONE); allow.add(LINES.REFUSAL); allow.add(LINES.NOT_SELLER); if (!hotAlready) {} }
-  if (s === "time") { allow.add(LINES.Q_TIME); allow.add(LINES.REFUSAL); allow.add(LINES.NOT_SELLER); }
-  if (s === "done") { allow.add(LINES.HOT_LINE); allow.add(LINES.REFUSAL); allow.add(LINES.NOT_SELLER); }
+  const base = stagePrompt(s, src, false);
+  const refusal = stagePrompt("refuse_buy_advice", src, false);
+  const notSeller = stagePrompt("not_seller_end", src, false);
+  const hotLine = stagePrompt("done", src, true);
 
-  if (original === LINES.HOT_LINE) {
-    if (s !== "zone" || hotAlready) return { ok: false, reason: "allowlist", text: LINES.REFUSAL };
-    return { ok: true, reason: null, text: original };
+  const allow = new Set([base, refusal, notSeller]);
+  const hotAllowed = !hotAlready && (s === "done" || s === "urgency" || s === "zone" || s === "time");
+  if (hotAllowed) allow.add(hotLine);
+
+  if (original === hotLine && !hotAllowed) {
+    return { ok: false, reason: "hot_not_allowed", text: base };
   }
 
   if (!allow.has(original)) {
-    return { ok: false, reason: "allowlist", text: stageQuestion(s, { client_state: { source } }) };
+    return { ok: false, reason: "allowlist", text: base };
   }
 
   return { ok: true, reason: null, text: original };
@@ -1598,10 +1673,7 @@ async function emitPromptForStage(session, stage) {
       return;
     }
   }
-  const src =
-    (session?.source ? String(session.source) : null) ??
-    (session?.client_state?.source ? String(session.client_state.source) : null) ??
-    "encuentra24";
+  const src = normalizeSourceFromClientState(session);
 
   const { hot } = hotDecisionFromQual(session?.qual);
   const hotAlready = Boolean(session?.qual?.hot_announced);
@@ -1610,8 +1682,6 @@ async function emitPromptForStage(session, stage) {
 
   // TELNYX mode: actually speak via deterministic TTS frames
   if (session?.telnyx?.ws) {
-    // Speaking lock: ignore VAD while bot is speaking to prevent false stage advances.
-    session.speaking_until = nowMs() + estMsForText(safe, TTS_SPEED) + 250;
     jlog({ event: "TELNYX_TEMPLATE_EMIT", session_id: session.session_id, stage: stg, text: safe });
     // Queue if already playing (used for greet->availability on open)
     if (session._playbackTimer) {
@@ -1619,7 +1689,7 @@ async function emitPromptForStage(session, stage) {
       session._playbackQueue.push(safe);
       return;
     }
-    await speakAuthorizer(session, safe, stg === "greet" ? "greet" : "template");
+    await speakFinal(session, safe, stg === "greet" ? "greet" : "template");
     return;
   }
 
@@ -1850,8 +1920,9 @@ function nextStageName(stage) {
   const s = String(stage || "");
   if (s === "greet") return "availability";
   if (s === "availability") return "urgency";
-  if (s === "urgency") return "done";
-  if (s === "schedule") return "done";
+  if (s === "urgency") return "zone";
+  if (s === "zone") return "time";
+  if (s === "time") return "done";
   return "done";
 }
 
@@ -1862,7 +1933,7 @@ function advanceStageIfAllowed(session, next, reason) {
   session.stage = target;
   if (current === "greet") session._greetPlayed = true;
   session.stageRepeats = 0;
-  jlog({ event: "STAGE_TRANSITION_COMMITTED", session_id: session.session_id, from: current, to: target, reason: reason || null });
+  jlog({ event: "STAGE_TRANSITION_COMMITTED", session_id: session.session_id, from: current, to: target, reason: reason || null, source: normalizeSourceFromClientState(session) });
 }
 
 async function advanceStageAndEmit(session, userText) {
@@ -1891,8 +1962,10 @@ async function advanceStageAndEmit(session, userText) {
     if (mockUrg === "yes" || mockUrg === "no") session.qual.urgent = mockUrg;
     else if (isUrgentYes(tRaw)) session.qual.urgent = "yes";
     else if (isUrgentNo(tRaw)) session.qual.urgent = "no";
-  } else if (stage === "schedule") {
-    // accept anything; we just close quickly
+  } else if (stage === "zone") {
+    if (tRaw) session.qual.zone = tRaw.slice(0, 80);
+  } else if (stage === "time") {
+    if (tRaw) session.qual.time = tRaw.slice(0, 120);
   }
 
   session.yes_confirmed = false;
@@ -1933,7 +2006,8 @@ function shortSummary(session) {
 function pickNextStage(session) {
   // deterministic stage progression
   const s = session.stage;
-  if (s === "available") return "urgency";
+  if (s === "greet") return "availability";
+  if (s === "availability") return "urgency";
   if (s === "urgency") return "zone";
   if (s === "zone") return "time";
   if (s === "time") return "done";
@@ -2000,6 +2074,13 @@ function openaiConnect(session) {
 
   function speakAudioExact(session, finalText, stage) {
     try {
+    const safeFinal = String(finalText || "").trim();
+    if (!safeFinal) return;
+    if (session?.telnyx?.ws) {
+      jlog({ event: "SPEAK_AUDIO_EXACT_BYPASS", session_id: session.session_id, stage, reason: "telnyx_deterministic_only" });
+      speakFinal(session, safeFinal, "telnyx_bypass_speak_audio_exact");
+      return;
+    }
     const event_id = crypto.randomUUID();
     const modalities = ["audio"];
     if (!canCreateResponse(session, "tts_prompt")) return;
@@ -2018,12 +2099,8 @@ function openaiConnect(session) {
       response: {
         modalities,
         tools: [],
-        instructions: `
-You are a voice sales agent on a phone call.
-Reply with ONE short spoken sentence suitable for a phone call.
-Stay strictly in the current conversation stage.
-${responseInstructions(session)}
-`.trim(),
+        temperature: 0,
+        instructions: `Say EXACTLY the following text, verbatim: ${safeFinal}`,
       },
     }));
     if (session.response_watchdog) clearTimeout(session.response_watchdog);
@@ -2034,21 +2111,18 @@ ${responseInstructions(session)}
       }
     }, 1200);
     jlog({ event: "RESPONSE_CREATE_SENT", session_id: session.session_id, stage, event_id, reason: "tts_prompt" });
-      session._lastBotPrompt = finalText;
+      session._lastBotPrompt = safeFinal;
       session.speaking = true;
       session.lastSpeakAt = nowMs();
-      jlog({ event: "BOT_AUDIO_REQ", session_id: session.session_id, stage, text: finalText });
+      jlog({ event: "SPEAK_TEXT", session_id: session.session_id, stage, text: safeFinal });
+      jlog({ event: "BOT_AUDIO_REQ", session_id: session.session_id, stage, text: safeFinal });
     } catch (e) {
       jlog({ event: "BOT_AUDIO_ERR", session_id: session.session_id, err: String(e?.message || e) });
     }
   }
 
   function speakDeterministic(session, desiredText) {
-    const source = session?.client_state?.source ?? "internet";
-    const hotAlready = Boolean(session?.qual?.hot_announced);
-    const finalText = templateEnforce(session.stage, desiredText, source, hotAlready, session?.session_id ?? null);
-    // TEMPLATE-ONLY speech: no free-form output, ever.
-  speakAuthorizer(session, finalText, "deterministic");
+    speakFinal(session, desiredText, "deterministic");
   }
 
   function decideAndMaybeAdvance(session, userText) {
@@ -2065,8 +2139,8 @@ ${responseInstructions(session)}
     return { say: LINES.REFUSAL, question: stageQuestion(session.stage, session), done: false, pending: [LINES.REFUSAL, stageQuestion(session.stage, session)] };
   }
 
-    // stage: available
-    if (session.stage === "available") {
+    // stage: availability
+    if (session.stage === "availability") {
       if (isNo(t)) {
         session.qual.available = false;
         advanceStageIfAllowed(session, "done", "decideAndMaybeAdvance_available_no");
@@ -2084,7 +2158,7 @@ ${responseInstructions(session)}
         advanceStage(session);
         return { say: "Ok.", question: stageQuestion(session.stage, session), done: false };
       }
-      return { say: "Ok.", question: stageQuestion("available", session), done: false };
+      return { say: "Ok.", question: stageQuestion("availability", session), done: false };
     }
 
     // stage: urgency
@@ -2310,7 +2384,7 @@ ${responseInstructions(session)}
     jlog({ event: "OUTBOUND_AUDIO_DONE", session_id: session.session_id, source });
   }
 
-  ows.on("message", (buf) => {
+  ows.on("message", async (buf) => {
     const txt = Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf);
     const m = safeJsonParse(txt);
     if (!m) return;
@@ -2379,6 +2453,7 @@ ${responseInstructions(session)}
         event: "USER_TRANSCRIPT_RECEIVED",
         session_id: session.session_id,
         stage: session.stage,
+        source: normalizeSourceFromClientState(session),
         item_id: itemId,
         transcript_preview: txt.slice(0, 80),
       });
@@ -2409,7 +2484,7 @@ ${responseInstructions(session)}
       jlog({ event: "RESPONSE_DELTA", session_id: session.session_id, stage: session.stage, len: m.delta.length, preview: String(m.delta).slice(0, 80) });
       const rid = m?.response?.id || session.response_pending_id || null;
       if (rid && m.delta.length > 0) {
-        const st = session.response_state.get(rid) || { has_text: false, fallback_done: false };
+        const st = session.response_state.get(rid) || { has_text: false, fallback_done: false, transcript_len: 0 };
         st.has_text = true;
         session.response_state.set(rid, st);
       }
@@ -2423,10 +2498,17 @@ ${responseInstructions(session)}
       if (rid) {
         const cp = m.content_part || {};
         const isText = cp.type === "output_text" || cp.type === "text";
+        const isAudioWithTranscript = cp.type === "audio" && typeof cp.transcript === "string" && cp.transcript.trim().length > 0;
         const txt = typeof cp.text === "string" ? cp.text : "";
         if (isText && txt.trim().length > 0) {
-          const st = session.response_state.get(rid) || { has_text: false, fallback_done: false };
+          const st = session.response_state.get(rid) || { has_text: false, fallback_done: false, transcript_len: 0 };
           st.has_text = true;
+          session.response_state.set(rid, st);
+        }
+        if (isAudioWithTranscript) {
+          const st = session.response_state.get(rid) || { has_text: false, fallback_done: false, transcript_len: 0 };
+          st.has_text = true;
+          st.transcript_len = (st.transcript_len || 0) + cp.transcript.trim().length;
           session.response_state.set(rid, st);
         }
       }
@@ -2435,6 +2517,13 @@ ${responseInstructions(session)}
       const txt = typeof m.delta === "string" ? m.delta : (typeof m.text === "string" ? m.text : "");
       const len = txt ? txt.length : 0;
       jlog({ event: "TRANSCRIPT_EVT", session_id: session.session_id, stage: session.stage, len });
+      const rid = m?.response?.id || session.response_pending_id || null;
+      if (rid && len > 0) {
+        const st = session.response_state.get(rid) || { has_text: false, fallback_done: false, transcript_len: 0 };
+        st.has_text = true;
+        st.transcript_len = (st.transcript_len || 0) + len;
+        session.response_state.set(rid, st);
+      }
     }
     if (m.type === "output_audio_buffer.started") {
       session._outboundStreamActive = true;
@@ -2475,7 +2564,7 @@ ${responseInstructions(session)}
       }, SPEAKING_RECENT_MS);
       jlog({ event: "OPENAI_RESPONSE_DONE", session_id: session.session_id, stage: session.stage, status: m?.response?.status ?? null });
       const rid = m?.response?.id || session.response_pending_id || null;
-      const st = rid ? session.response_state.get(rid) || { has_text: false, fallback_done: false } : { has_text: false, fallback_done: false };
+      const st = rid ? session.response_state.get(rid) || { has_text: false, fallback_done: false, transcript_len: 0 } : { has_text: false, fallback_done: false, transcript_len: 0 };
       const outputs = Array.isArray(m?.response?.output) ? m.response.output : [];
       for (const o of outputs) {
         if (!o || typeof o !== "object") continue;
@@ -2483,6 +2572,18 @@ ${responseInstructions(session)}
         if (type === "output_text" || type === "text") {
           const text = typeof o.text === "string" ? o.text : "";
           if (text.trim().length > 0) { st.has_text = true; break; }
+        }
+        const contentArr = Array.isArray(o.content) ? o.content : [];
+        for (const c of contentArr) {
+          const ctype = c?.type || "";
+          if (ctype && ctype.includes("audio_transcript")) {
+            const t = c?.text?.value || c?.text || "";
+            if (typeof t === "string" && t.trim()) {
+              st.has_text = true;
+              st.transcript_len = (st.transcript_len || 0) + t.trim().length;
+              break;
+            }
+          }
         }
       }
       session.response_pending_id = null;
@@ -2559,8 +2660,26 @@ ${responseInstructions(session)}
         preview: spokenText ? spokenText.slice(0, 120) : null,
         snapshot: gateSnapshot(session),
       });
+      let finalText = spokenText;
       if (spokenText) {
-        speakDeterministic(session, spokenText);
+        const src = normalizeSourceFromClientState(session);
+        const hotAlready = Boolean(session?.qual?.hot_announced);
+        const guard = guardAssistantText(session.stage, spokenText, hotAlready, src);
+        if (!guard.ok) {
+          const fallback = guard.text || stageQuestion(session.stage, session);
+          finalText = fallback;
+          jlog({
+            event: "LOCKED_SYSTEM",
+            session_id: session.session_id,
+            stage: session.stage,
+            reason: guard.reason || "allowlist",
+            original_preview: spokenText.slice(0, 120),
+            fallback: fallback,
+          });
+        }
+      }
+      if (finalText) {
+        speakDeterministic(session, finalText);
         if (session._postResponseSpeakTimer) { clearTimeout(session._postResponseSpeakTimer); session._postResponseSpeakTimer = null; }
         session._postResponseSpeakTimer = setTimeout(() => {
           if (!session.tts_playing && !session._playbackTimer && !session._spokeThisTurn) return;
@@ -2613,16 +2732,22 @@ ${responseInstructions(session)}
       }
       // Legacy fallback for non-classifier responses
       if (status === "completed" && !st.has_text && !session.tts_playing && !speakingLock && !st.fallback_done) {
-    if (session._activeResponseType === "classifier") {
-      jlog({ event: "VOICE_FALLBACK_SKIPPED_CLASSIFIER", session_id: session.session_id, stage: session.stage });
-    } else if (session._intentDetected === true && session._spokeThisTurn === true) {
-      jlog({ event: "VOICE_FALLBACK_SKIPPED_AFTER_INTENT", session_id: session.session_id, stage: session.stage });
-    } else {
-      st.fallback_done = true;
-      session.response_state.set(rid, st);
-      speakAuthorizer(session, responseInstructions(session), "fallback");
-      jlog({ event: "VOICE_FALLBACK_TRIGGERED", session_id: session.session_id, stage: session.stage, response_id: rid });
-    }
+        if (session._activeResponseType === "classifier") {
+          jlog({ event: "VOICE_FALLBACK_SKIPPED_CLASSIFIER", session_id: session.session_id, stage: session.stage });
+        } else if (session._intentDetected === true && session._spokeThisTurn === true) {
+          jlog({ event: "VOICE_FALLBACK_SKIPPED_AFTER_INTENT", session_id: session.session_id, stage: session.stage });
+        } else {
+          st.fallback_done = true;
+          session.response_state.set(rid, st);
+          const stage = String(session.stage || "greet");
+          const src = normalizeSourceFromClientState(session);
+          const hotAlready = Boolean(session?.qual?.hot_announced);
+          const desired = stagePrompt(stage, src, false);
+          const safe = templateEnforce(stage, desired, src, hotAlready, session.session_id);
+          await speakFinal(session, safe, "fallback_template");
+          jlog({ event: "FALLBACK_TEMPLATE_USED", session_id: session.session_id, stage, src });
+          jlog({ event: "VOICE_FALLBACK_TRIGGERED", session_id: session.session_id, stage: session.stage, response_id: rid });
+        }
       }
       if (rid) session.response_state.delete(rid);
       jlog({ event: "RESPONSE_DONE", session_id: session.session_id, stage: session.stage });
@@ -3176,6 +3301,19 @@ const server = http.createServer((req, res) => {
         const mock = body?.mock && typeof body.mock === "object" ? body.mock : null;
         const reqSessionId = body?.session_id ?? body?.sessionId ?? null;
 
+        if (body?.scenario === "template_smoke") {
+          const demo = makeBaseSession();
+          const raw = Buffer.from(JSON.stringify({ payload: { voice: { source: "craigslist" } } })).toString("base64");
+          demo.client_state = decodeClientStateB64(raw, demo) || {};
+          demo.source = normalizeSourceFromClientState(demo);
+          jlog({ event: "TEST_TEMPLATE_SMOKE_START", session_id: demo.session_id, source: demo.source });
+          await emitPromptForStage(demo, "greet");
+          demo.stage = "availability";
+          await advanceStageAndEmit(demo, "sí");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: true, session_id: demo.session_id, source: demo.source, stage: demo.stage }));
+        }
+
         session_id = String(reqSessionId || crypto.randomUUID());
 
         let pcm16le;
@@ -3216,7 +3354,7 @@ const server = http.createServer((req, res) => {
           sess = {
             session_id,
             stage: "availability",
-            source: "encuentra24",
+            source: "Internet",
             qual: { available: null, urgent: null },
             testMock: { available: null, urgent: null },
             emittedAvailability: false,
@@ -3233,7 +3371,7 @@ const server = http.createServer((req, res) => {
         }
         // Persist source across calls (prefer session.source)
         if (typeof body?.source === "string" && body.source.trim()) {
-          sess.source = body.source.trim();
+          sess.source = normalizeSource(body.source);
           jlog({ event: "TEST_SOURCE", session_id, source: sess.source });
         }
 
@@ -3266,7 +3404,7 @@ const server = http.createServer((req, res) => {
           pcm16le_16k: pcm16le,
           silence_ms: body?.silence_ms ?? 500,
           timeout_ms: body?.timeout_ms ?? 15000,
-          source: sess.source || body?.source || "encuentra24",
+          source: normalizeSource(sess.source || body?.source || "Internet"),
           mock: {
             available: mock?.available ?? null,
             urgent: mock?.urgent ?? null,
@@ -3483,8 +3621,10 @@ wss?.on("connection", (ws, req) => {
 
       session.stream_id = String(streamId || "");
       session.call_control_id = String(callControlId || "");
-      session.client_state = safeBase64Json(clientStateB64) || {};
-      session.source = (session.client_state?.source ? String(session.client_state.source) : "") || "encuentra24";
+      const decodedClientState = decodeClientStateB64(clientStateB64, session) || {};
+      session.client_state = decodedClientState;
+      session.source = normalizeSourceFromClientState(session);
+      jlog({ event: "SOURCE_SET", session_id: session.session_id, source: session.source, decoded_keys: Object.keys(decodedClientState || {}) });
       session.telnyx.media_format = mediaFormat;
 
       if (session.call_control_id && TELNYX_API_KEY && session._telnyxSuppressionStarted !== true) {
@@ -3551,6 +3691,8 @@ wss?.on("connection", (ws, req) => {
         session_id: session.session_id,
         stream_id: session.stream_id,
         call_control_id: session.call_control_id,
+        stage: session.stage,
+        source: session.source,
         touch_run_id: session.client_state?.touch_run_id ?? null,
         media_format: session.telnyx.media_format,
       });
