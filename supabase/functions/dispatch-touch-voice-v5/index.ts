@@ -278,33 +278,20 @@ serve(async (req) => {
     const timeoutSecs = timeoutSecsRaw ? Number(timeoutSecsRaw) : 60
     if (Number.isFinite(timeoutSecs) && timeoutSecs > 0) body.timeout_secs = Math.min(Math.max(timeoutSecs, 15), 120)
 
-    // Streaming to our Fly gateway: ALWAYS derive from VOICE_GATEWAY_TOKEN (ignore TELNYX_STREAM_URL env).
+    // Streaming is initiated on call.answered; still require token so gateway can start later.
     if (!TELNYX_STREAM_URL_FROM_TOKEN) {
       console.log(JSON.stringify({ event: "VOICE_GATEWAY_TOKEN_MISSING", touch_run_id: args.touchRunId, token_len: 0, token_prefix: "" }))
       return { ok: false, error: "missing_voice_gateway_token", raw: null }
     }
     logStreamUrlBuilt(args.touchRunId)
-    {
-      body.stream_url = TELNYX_STREAM_URL_FROM_TOKEN
 
-      // Telnyx bidirectional streaming: RTP payload (no headers) over WebSocket.
-      // Force a deterministic codec to avoid OPUS defaults causing silence in our gateway.
-      const streamTrack =
-        (args.config?.telnyx_stream_track as string | undefined) ??
-        (args.config?.stream_track as string | undefined) ??
-        (Deno.env.get("TELNYX_STREAM_TRACK") ?? "both_tracks")
-
-      const bidiMode =
-        (args.config?.telnyx_stream_bidirectional_mode as string | undefined) ??
-        (args.config?.stream_bidirectional_mode as string | undefined) ??
-        (Deno.env.get("TELNYX_STREAM_BIDIRECTIONAL_MODE") ?? "rtp")
-
-      const bidiCodec = "PCMA"
-
-      body.stream_track = streamTrack
-      body.stream_bidirectional_mode = bidiMode
-      body.stream_bidirectional_codec = bidiCodec
-    }
+    console.log(
+      JSON.stringify({
+        event: "TELNYX_CREATE_CALL_REQ",
+        touch_run_id: args.touchRunId,
+        body_keys: Object.keys(body).sort(),
+      }),
+    )
 
     const res = await fetch("https://api.telnyx.com/v2/calls", {
       method: "POST",

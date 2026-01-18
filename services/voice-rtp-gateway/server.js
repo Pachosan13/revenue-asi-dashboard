@@ -566,7 +566,17 @@ function preferredG711Format(session) {
 
 function sendInterruptUpdate(session, enabled, reason) {
   if (!session?.openai?.ws || session.openai.ws.readyState !== WebSocket.OPEN) return;
-  const audioFormat = preferredG711Format(session);
+  const inboundCodec = String(session?._inboundCodec || session?.telnyx?.media_format?.encoding || "").toUpperCase() || "PCMA";
+  const requestedFormat = preferredG711Format(session);
+  const audioFormat = "g711_alaw";
+  if (requestedFormat !== audioFormat) {
+    jlog({
+      event: "AUDIO_FORMAT_OVERRIDE_ALAW",
+      session_id: session.session_id,
+      requested: requestedFormat || null,
+      forced: audioFormat,
+    });
+  }
   const msg = {
     type: "session.update",
     session: {
@@ -590,6 +600,15 @@ function sendInterruptUpdate(session, enabled, reason) {
   session._vadInterruptEnabled = Boolean(enabled);
   session.openai_audio_configured = true;
   session.output_audio_format = audioFormat;
+  if (!session._loggedOutputCodecSet) {
+    session._loggedOutputCodecSet = true;
+    jlog({
+      event: "OPENAI_OUTPUT_CODEC_SET",
+      session_id: session.session_id,
+      inbound_codec: inboundCodec || null,
+      output_audio_format: audioFormat || null,
+    });
+  }
   jlog({ event: "GREET_VAD_GATED", session_id: session.session_id, enabled: Boolean(enabled), reason: reason || null });
 }
 
@@ -759,6 +778,11 @@ Return ONLY the JSON. No prose.
         session.classifier_retry_count = 0;
         jlog({ event: "CLASSIFIER_FALLBACK_REPEAT", session_id: session.session_id, stage: session.stage, reason: "timeout" });
         speakDeterministic(session, renderDeterministicLine(session, { next_action: "ASK_REPEAT", slots: {} }));
+        if (session.stage === "greet" && session?.telnyx?.ws) {
+          const src = normalizeSourceFromClientState(session);
+          const safe = stagePrompt("greet", src, false);
+          speakFinal(session, safe, "classifier_timeout_greet_failopen");
+        }
       }
     }, 2500);
     const payload = {
@@ -819,6 +843,13 @@ function detectIntent(text) {
 
 function sendResponse(session, text) {
   try {
+    const msg = String(text || "").trim();
+    if (!msg) return;
+    if (session?.telnyx?.ws) {
+      jlog({ event: "SENDRESPONSE_TELNYX_BYPASS", session_id: session.session_id, stage: session.stage, text_preview: msg.slice(0, 80) });
+      speakFinal(session, msg, "sendResponse_telnyx");
+      return;
+    }
     if (!canCreateResponse(session, "manual_sendResponse")) return;
     const event_id = crypto.randomUUID();
     const modalities = ["audio"];
@@ -1104,12 +1135,34 @@ async function playDeterministicLine(session, text) {
     jlog({ event: "TTS_FAIL", session_id: session.session_id, err: framesRes.error });
     return;
   }
+  if (!Array.isArray(framesRes.mulawFramesB64) || framesRes.mulawFramesB64.length === 0) {
+    jlog({ event: "TTS_FRAMES_EMPTY_ALAW", session_id: session.session_id, stage: session.stage });
+    return;
+  }
   if (session.openai_done) {
     logInvariantIfBroken(session);
     return;
   }
   stopOutboundPlayback(session);
-  session._playbackFrames = framesRes.mulawFramesB64;
+  const targetCodec = "PCMA";
+  let framesB64 = framesRes.mulawFramesB64
+    .map((f) => {
+      try {
+        const mulaw = Buffer.from(String(f || ""), "base64");
+        const pcm = mulawToPcm16LEBytes(mulaw);
+        const alaw = pcm16leToAlaw(pcm);
+        return alaw.toString("base64");
+      } catch {
+        return null;
+      }
+    })
+    .filter((f) => typeof f === "string" && f.length > 0);
+  if (!framesB64.length) {
+    jlog({ event: "TTS_FRAMES_CONVERT_EMPTY", session_id: session.session_id, stage: session.stage });
+    return;
+  }
+  session._lastOutboundCodec = targetCodec;
+  session._playbackFrames = framesB64;
   session._playbackIdx = 0;
   session.speaking = true;
   session.lastSpeakAt = nowMs();
@@ -1293,7 +1346,7 @@ function makeBaseSession() {
     awaiting_yes_confirmation: false,
     yes_confirmed: false,
     awaiting_commit_response: false,
-    output_audio_format: "g711_alaw",
+    output_audio_format: null,
     response_pending_id: null,
     response_pending_at: 0,
     response_watchdog: null,
@@ -1317,7 +1370,10 @@ function makeBaseSession() {
     openai_cancel_inflight: false,
     pending_response_payload: null,
     awaiting_user_input: false,
+    _inboundCodec: null,
     _loggedInboundAlaw: false,
+    _loggedInboundMulaw: false,
+    _loggedOutputCodecSet: false,
     _telnyxSuppressionStarted: false,
     openai_audio_configured: false,
     forceListen: false,
@@ -1334,13 +1390,25 @@ function makeBaseSession() {
 
 function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, track }) {
   // aggressive barge-in on inbound track (normalized RMS + cooldown)
-  const _enc = String(enc || "PCMU").toUpperCase();
+  const _enc = String(enc || "PCMA").toUpperCase();
   const _sr = Number(sr || 8000);
+
+  if (isInbound && !sess._inboundCodec) {
+    sess._inboundCodec = _enc;
+  }
 
   if (isInbound && _enc === "PCMA" && !sess._loggedInboundAlaw) {
     sess._loggedInboundAlaw = true;
     jlog({
       event: "AUDIO_CODEC_INBOUND_ALAW_CONFIRMED",
+      session_id: sess.session_id,
+      stream_id: sess.stream_id ?? null,
+      track: track || null,
+    });
+  } else if (isInbound && _enc === "PCMU" && !sess._loggedInboundMulaw) {
+    sess._loggedInboundMulaw = true;
+    jlog({
+      event: "AUDIO_CODEC_INBOUND_MULAW_CONFIRMED",
       session_id: sess.session_id,
       stream_id: sess.stream_id ?? null,
       track: track || null,
@@ -2221,7 +2289,7 @@ function openaiConnect(session) {
   }
 
   function preferredOutboundCodec(session) {
-    const fmt = session.output_audio_format || preferredG711Format(session) || "g711_alaw";
+    const fmt = session.output_audio_format || preferredG711Format(session);
     return fmt === "g711_alaw" ? "PCMA" : "PCMU";
   }
 
@@ -2315,22 +2383,55 @@ function openaiConnect(session) {
   function handleOutputAudioDelta(m) {
     const deltaB64 = typeof m.delta === "string" ? m.delta : null;
     if (!deltaB64) return;
+    jlog({
+      event: "OPENAI_OUTPUT_AUDIO_DELTA",
+      session_id: session.session_id,
+      len: deltaB64.length,
+      type: m?.type || null,
+    });
     if (session.tts_playing) {
       stopOutboundPlayback(session);
       session.tts_playing = false;
     }
     const targetCodec = preferredOutboundCodec(session);
-    const outputFmt = session.output_audio_format || preferredG711Format(session) || "pcm16";
-    const sr = Number(m?.sample_rate || m?.audio?.sample_rate || 24000);
+    const outputFmt = session.output_audio_format || preferredG711Format(session);
     let encoded = null;
+    let passthrough = false;
     try {
-      if (outputFmt === "g711_alaw" || outputFmt === "g711_ulaw") {
+      if ((outputFmt === "g711_alaw" && targetCodec === "PCMA") || (outputFmt === "g711_ulaw" && targetCodec === "PCMU")) {
+        encoded = Buffer.from(deltaB64, "base64");
+        passthrough = true;
+      } else if (outputFmt === "g711_alaw" || outputFmt === "g711_ulaw") {
         encoded = transcodeG711Buffer(Buffer.from(deltaB64, "base64"), outputFmt, targetCodec);
       } else {
         const pcm16 = Buffer.from(deltaB64, "base64");
+        const sr = Number(m?.sample_rate || m?.audio?.sample_rate || 24000);
         encoded = encodePcmToTargetG711(pcm16, targetCodec, sr);
       }
-    } catch {}
+    } catch (e) {
+      if (!session._loggedOutboundAudioErr) {
+        session._loggedOutboundAudioErr = true;
+        jlog({
+          event: "OUTBOUND_AUDIO_ERR",
+          session_id: session.session_id,
+          source_event: m?.type || null,
+          outputFmt,
+          targetCodec,
+          err: String(e?.message || e).slice(0, 200),
+        });
+      }
+    }
+    if (!session._loggedOutboundAudioPath) {
+      session._loggedOutboundAudioPath = true;
+      jlog({
+        event: "OUTBOUND_AUDIO_PATH",
+        session_id: session.session_id,
+        source_event: m?.type || null,
+        passthrough: Boolean(passthrough),
+        outputFmt,
+        targetCodec,
+      });
+    }
     if (!encoded || !encoded.length) return;
     const pending = session._outboundFrameBuffer && session._outboundFrameBuffer.length ? session._outboundFrameBuffer : Buffer.alloc(0);
     let working = pending.length ? Buffer.concat([pending, encoded]) : encoded;
@@ -2391,6 +2492,10 @@ function openaiConnect(session) {
 
     const type = m.type || "unknown";
 
+    if (type === "session.updated") {
+      const modalities = m?.session?.modalities || null;
+      jlog({ event: "SESSION_UPDATED", session_id: session.session_id, stage: session.stage, modalities });
+    }
     if (type === "input_audio_buffer.speech_started") {
       session.last_speech_started_at = nowMs();
       clearNoUserNudgeTimer(session, "speech");
@@ -2534,11 +2639,19 @@ function openaiConnect(session) {
       jlog({ event: "OUTPUT_AUDIO_STOPPED", session_id: session.session_id, stage: session.stage });
       handleOutputAudioDone("output_audio_buffer.stopped");
     }
-    if (m.type === "response.output_audio.delta" || m.type === "response.audio.delta") {
+    if (m.type === "response.audio.delta" || m.type === "response.output_audio.delta") {
       handleOutputAudioDelta(m);
     }
     if (m.type === "response.output_audio.done" || m.type === "response.audio.done") {
       handleOutputAudioDone("response_output_audio_done");
+    }
+    if (m.type === "connection.close" || m.type === "response.done" || m.type === "openai.close" || type === "close") {
+      if (session?.telnyx?.ws && session.stage === "greet") {
+        const src = normalizeSourceFromClientState(session);
+        const safe = stagePrompt("greet", src, false);
+        speakFinal(session, safe, "openai_close_greet_failopen");
+      }
+      jlog({ event: "OPENAI_CLOSE", session_id: session.session_id, stage: session.stage, code: m?.code ?? null });
     }
     if (String(m.type || "").startsWith("response.audio.delta") || String(m.type || "").startsWith("response.output_audio.")) {
       session.openai_speaking = true;
@@ -3488,7 +3601,7 @@ wss?.on("connection", (ws, req) => {
   }
 
   const session = makeBaseSession();
-  session.telnyx = { ws, lastMediaAt: 0, media_format: { encoding: "PCMU", sample_rate: 8000, channels: 1 } };
+  session.telnyx = { ws, lastMediaAt: 0, media_format: { encoding: "PCMA", sample_rate: 8000, channels: 1 } };
 
   jlog({ event: "WS_CONNECT", session_id: session.session_id, path: u.pathname });
 
@@ -3613,11 +3726,11 @@ wss?.on("connection", (ws, req) => {
 
       const mediaFormat = mf && typeof mf === "object"
         ? {
-            encoding: mf.encoding ?? mf.codec ?? "PCMU",
+            encoding: mf.encoding ?? mf.codec ?? "PCMA",
             sample_rate: mf.sample_rate ?? mf.sampleRate ?? 8000,
             channels: mf.channels ?? 1,
           }
-        : { encoding: "PCMU", sample_rate: 8000, channels: 1 };
+        : { encoding: "PCMA", sample_rate: 8000, channels: 1 };
 
       session.stream_id = String(streamId || "");
       session.call_control_id = String(callControlId || "");
@@ -3658,6 +3771,7 @@ wss?.on("connection", (ws, req) => {
       }
 
       const encStart = String(mediaFormat?.encoding || "").toUpperCase();
+      if (!session._inboundCodec) session._inboundCodec = encStart;
       if (encStart === "PCMA") {
         jlog({
           event: "TELNYX_CODEC_PCMA_ACCEPTED",
@@ -3668,9 +3782,9 @@ wss?.on("connection", (ws, req) => {
           sample_rate: mediaFormat?.sample_rate ?? null,
           channels: mediaFormat?.channels ?? null,
         });
-      } else if (encStart !== "PCMU") {
+      } else {
         jlog({
-          event: "ERROR_FATAL_CODEC",
+          event: "TELNYX_CODEC_REJECTED",
           session_id: session.session_id,
           stream_id: session.stream_id,
           call_control_id: session.call_control_id,
@@ -3678,7 +3792,7 @@ wss?.on("connection", (ws, req) => {
           sample_rate: mediaFormat?.sample_rate ?? null,
           channels: mediaFormat?.channels ?? null,
         });
-        try { ws.close(1011, "unsupported_codec"); } catch {}
+        try { ws.close(1011, "pcma_only"); } catch {}
         clearResponseDoneTimer(session);
         if (session.stream_id) sessions.delete(session.stream_id);
         return;
@@ -3731,7 +3845,7 @@ wss?.on("connection", (ws, req) => {
       // Treating "" as inbound causes false barge-in from non-user audio/noise.
       const isInbound = track === "inbound" || track === "in";
 
-      const enc = String(sess.telnyx?.media_format?.encoding || "PCMU").toUpperCase();
+      const enc = String(sess.telnyx?.media_format?.encoding || "PCMA").toUpperCase();
       const sr = Number(sess.telnyx?.media_format?.sample_rate || 8000);
 
       handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, track });
@@ -3757,13 +3871,42 @@ wss?.on("connection", (ws, req) => {
     }
 
     if (ev === "stop" || ev === "stream.stop" || ev === "call.end") {
-      jlog({ event: "STOP", session_id: session.session_id, stream_id: session.stream_id });
-      clearResponseDoneTimer(session);
-      closeBotTurn(session, "stream_stop");
-      try { session.openai?.ws?.close(); } catch {}
-      try { ws.close(); } catch {}
-      if (session.stream_id) sessions.delete(session.stream_id);
-      return;
+      const isGreetTelnyx = session.stage === "greet" && Boolean(session?.telnyx?.ws);
+      if (isGreetTelnyx) {
+        jlog({
+          event: "STREAM_STOP_DEFER_CLOSE",
+          session_id: session.session_id,
+          stage: session.stage,
+          stream_id: session.stream_id,
+          call_control_id: session.call_control_id,
+          wsOpen: ws.readyState === WebSocket.OPEN,
+        });
+        const src = normalizeSourceFromClientState(session);
+        const safe = stagePrompt("greet", src, false);
+        jlog({
+          event: "FAILOPEN_GREET_BEFORE_CLOSE",
+          session_id: session.session_id,
+          stage: session.stage,
+          wsOpen: ws.readyState === WebSocket.OPEN,
+          text: safe,
+        });
+        speakFinal(session, safe, "stream_stop_failopen_greet");
+        setTimeout(() => {
+          try { telnyxHangup(session.call_control_id); } catch {}
+          try { session.telnyx?.ws?.close(); } catch {}
+          try { session.openai?.ws?.close(); } catch {}
+          if (session.stream_id) sessions.delete(session.stream_id);
+        }, 1500);
+        return;
+      } else {
+        jlog({ event: "STOP", session_id: session.session_id, stream_id: session.stream_id });
+        clearResponseDoneTimer(session);
+        closeBotTurn(session, "stream_stop");
+        try { session.openai?.ws?.close(); } catch {}
+        try { ws.close(); } catch {}
+        if (session.stream_id) sessions.delete(session.stream_id);
+        return;
+      }
     }
 
     jlog({ event: "TELNYX_EVT", session_id: session.session_id, telnyx_event: String(ev) });
@@ -3939,7 +4082,13 @@ server.on("request", (req, res) => {
     }
   } catch {}
 });
-wssTwilio?.on("connection", (ws) => {
+wssTwilio?.on("connection", (ws, req) => {
+  const path = String(req?.url || "");
+  if (path.startsWith("/telnyx")) {
+    jlog({ event: "WRONG_PROVIDER_ROUTE", path });
+    try { ws.close(1008, "wrong_provider_route"); } catch {}
+    return;
+  }
   jlog({ event: "TWILIO_WS_CONNECT" });
 
   let lastStreamSid = null;

@@ -968,6 +968,13 @@ serve(async (req) => {
       (payload?.callControlId as string | undefined) ??
       null
 
+    console.log("TELNYX_MEDIA_FORMAT", {
+      event: "TELNYX_MEDIA_FORMAT",
+      call_control_id: callControlId,
+      encoding: payload?.media_format?.encoding ?? null,
+      sample_rate: payload?.media_format?.sample_rate ?? null,
+    })
+
     // Deterministic logging for every Telnyx event
     console.log("TELNYX_IN", {
       event_type: eventType,
@@ -1011,16 +1018,26 @@ serve(async (req) => {
             const body = {
               stream_url: STREAM_URL,
               stream_track: "both_tracks",
-              stream_codec: "PCMU",
+              stream_bidirectional_mode: "rtp",
+              stream_bidirectional_codec: "PCMA",
+              stream_bidirectional_target_legs: "opposite",
               client_state: client_state_b64,
             }
             console.log("TELNYX_STREAMING_START_REQ", {
               call_control_id: callControlId,
-              url,
-              payload: JSON.stringify(body),
-              stream_url: STREAM_URL,
+              body_keys: Object.keys(body).sort(),
+              has_client_state: Boolean(client_state_b64),
             })
             console.log("STREAMING_START_AFTER_ANSWER", { call_control_id: callControlId })
+
+            console.log("TELNYX_STREAMING_START_CODEC", {
+              event: "TELNYX_STREAMING_START_CODEC",
+              call_control_id: callControlId,
+              stream_bidirectional_mode: body.stream_bidirectional_mode,
+              stream_bidirectional_codec: body.stream_bidirectional_codec,
+              stream_bidirectional_target_legs: body.stream_bidirectional_target_legs,
+              stream_track: body.stream_track,
+            })
 
             const res = await fetch(
               url,
@@ -1038,9 +1055,16 @@ serve(async (req) => {
               call_control_id: callControlId,
               status: res.status,
               ok: res.ok,
-              response_preview: txt.slice(0, 300),
-              content_type: String(res.headers.get("content-type") || ""),
             })
+            if (!res.ok) {
+              console.log("TELNYX_STREAMING_START_RES_PREVIEW", {
+                call_control_id: callControlId,
+                status: res.status,
+                ok: res.ok,
+                response_preview: txt.slice(0, 300),
+                content_type: String(res.headers.get("content-type") || ""),
+              })
+            }
 
             // Required structured log (no secrets)
             console.log("TELNYX_MANUAL_FALLBACK", {
@@ -1167,8 +1191,9 @@ serve(async (req) => {
       // heartbeat: ensure updated_at moves so DB reapers don't kill active runs
       await supabase.from("touch_runs").update({ status: "executing", meta: metaPatch, updated_at: new Date().toISOString() }).eq("id", run.id)
 
-      // Realtime streaming calls: NEVER start playback here.
-      // (1) check run payload voice mode, (2) check client_state voice_mode
+      // Realtime streaming calls: start streaming after answer instead of dial payload.
+      let isRealtime = false
+      let clientVoiceMode: string | null = null
       try {
         const payloadVoiceMode =
           (typeof runPayload?.voice?.mode === "string" ? runPayload.voice.mode : null) ??
@@ -1178,31 +1203,74 @@ serve(async (req) => {
           (clientState && typeof clientState === "object" ? clientState : null) ??
           safeBase64Json(clientStateRaw) ??
           null
-        const clientVoiceMode = (cs?.voice_mode ?? cs?.voiceMode ?? null) as string | null
+        clientVoiceMode = (cs?.voice_mode ?? cs?.voiceMode ?? null) as string | null
 
-        const isRealtime =
+        isRealtime =
           (typeof payloadVoiceMode === "string" && payloadVoiceMode.startsWith("realtime")) ||
           clientVoiceMode === "realtime"
-
-        if (isRealtime) {
-          console.log("TELNYX_REALTIME_SKIP_PLAYBACK", { touch_run_id: run.id, payloadVoiceMode, clientVoiceMode })
-          return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
-        }
       } catch {}
 
-      // If the caller is configured for realtime streaming (Fly gateway), DO NOT start playback here.
-      // The WS bridge will handle the greeting + conversation.
-      try {
-        const cs =
-          (clientState && typeof clientState === "object" ? clientState : null) ??
-          safeBase64Json(clientStateRaw) ??
-          null
-        const voiceMode = (cs?.voice_mode ?? cs?.voiceMode ?? null) as string | null
-        if (voiceMode === "realtime") {
-          console.log("TELNYX_STREAMING_MODE_SKIP_PLAYBACK", { touch_run_id: run.id })
+      const client_state_b64 =
+        (typeof clientStateRaw === "string" && clientStateRaw) ||
+        (typeof metaPatch?.telnyx?.client_state === "string" ? metaPatch.telnyx.client_state : null)
+
+      if (isRealtime) {
+        if (!VOICE_GATEWAY_TOKEN) {
+          console.log("VOICE_GATEWAY_TOKEN_MISSING", { token_len: 0, token_prefix: "" })
+          return json({ ok: false, error: "missing_voice_gateway_token", version: VERSION }, 500)
+        }
+        if (!TELNYX_API_KEY) {
+          console.log("TELNYX_STREAMING_START_ERR", { call_control_id: ccid, err: "missing_telnyx_api_key" })
+          return json({ ok: false, error: "missing_telnyx_api_key", version: VERSION }, 500)
+        }
+        if (!ccid) {
+          console.log("TELNYX_STREAMING_START_ERR", { call_control_id: null, err: "missing_call_control_id" })
           return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
         }
-      } catch {}
+
+        const url = `https://api.telnyx.com/v2/calls/${encodeURIComponent(ccid)}/actions/streaming_start`
+        const body = {
+          stream_url: STREAM_URL,
+          stream_track: "both_tracks",
+          stream_bidirectional_mode: "rtp",
+          stream_bidirectional_codec: "PCMA",
+          stream_bidirectional_target_legs: "opposite",
+          client_state: client_state_b64,
+        }
+
+        try {
+          console.log("TELNYX_STREAMING_START_REQ", {
+            call_control_id: ccid,
+            body_keys: Object.keys(body).sort(),
+            has_client_state: Boolean(client_state_b64),
+          })
+
+          const res = await fetch(url, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${TELNYX_API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(body),
+          })
+          const txt = await res.text().catch(() => "")
+          console.log("TELNYX_STREAMING_START_RES", { call_control_id: ccid, status: res.status, ok: res.ok })
+          if (!res.ok) {
+            console.log("TELNYX_STREAMING_START_RES_PREVIEW", {
+              call_control_id: ccid,
+              status: res.status,
+              ok: res.ok,
+              response_preview: txt.slice(0, 300),
+              content_type: String(res.headers.get("content-type") || ""),
+            })
+          }
+        } catch (err) {
+          console.log("TELNYX_STREAMING_START_ERR", { call_control_id: ccid, err: String((err as any)?.message ?? err) })
+        }
+
+        console.log("TELNYX_REALTIME_SKIP_PLAYBACK", { touch_run_id: run.id, clientVoiceMode })
+        return json({ ok: true, terminal: false, event_type: eventType, version: VERSION })
+      }
 
       const MEDIA_NAME = String(Deno.env.get("TELNYX_INTRO_MEDIA_NAME") ?? "ra_intro_v1").trim()
       const INTRO_TEXT = String(Deno.env.get("INTRO_TEXT") ?? "Hola—un segundo.").trim()
