@@ -481,11 +481,34 @@ function tryCloseBotTurnCanon(session, reason) {
   const forcedHangup = typeof reason === "string" && (reason.includes("hangup") || reason.includes("stream_stop") || reason.includes("webhook_cleanup"));
   const openaiDone = session.openai_done === true;
   const markAckAt = Number(session.last_telnyx_mark_ack_at || 0);
+  const markTimeoutAt = Number(session.last_telnyx_mark_timeout_at || 0);
+  const expectingTelnyx = Boolean(session?.telnyx?.ws);
+  const hasMarkTimeout = markTimeoutAt > 0;
   const outputDoneAt = Number(session.output_audio_done_at || 0);
   const lastSpeechAt = Number(session.last_speech_started_at || 0);
   const hasMarkAck = markAckAt > 0;
   const silenceAfterAudio = outputDoneAt > 0 && (now - outputDoneAt >= SPEAKING_RECENT_MS) && (!lastSpeechAt || lastSpeechAt <= outputDoneAt);
-  const canClose = forcedHangup ? openaiDone : (openaiDone && (hasMarkAck || silenceAfterAudio));
+  const telnyxWs = session?.telnyx?.ws || null;
+  const telnyxWsClosedOrClosing = Boolean(telnyxWs && telnyxWs.readyState !== WebSocket.OPEN);
+  const outboundEnqueued =
+    (Array.isArray(session._playbackFrames) && session._playbackFrames.length > 0) ||
+    session._outboundStreamActive ||
+    session._outboundStreamDone ||
+    session._modelFramesSent > 0 ||
+    session.output_audio_done_at > 0;
+  const failSafeAudioClearance = outboundEnqueued && !session.tts_playing && telnyxWsClosedOrClosing;
+  const hasAudioClearance = expectingTelnyx ? (hasMarkAck || hasMarkTimeout || failSafeAudioClearance) : (hasMarkAck || silenceAfterAudio || failSafeAudioClearance);
+  if (failSafeAudioClearance && !session.audio_done) {
+    session.audio_done = true;
+    session.last_telnyx_mark_timeout_at = session.last_telnyx_mark_timeout_at || now;
+    jlog({
+      event: "BOT_TURN_CANON_FAILSAFE",
+      session_id: session.session_id,
+      ws_ready_state: telnyxWs?.readyState ?? null,
+      outbound_frames: Array.isArray(session._playbackFrames) ? session._playbackFrames.length : 0,
+    });
+  }
+  const canClose = forcedHangup ? openaiDone : (openaiDone && hasAudioClearance);
   if (!canClose) {
     if (!session.response_done_timer) {
       session.response_done_timer = setTimeout(() => {
@@ -499,6 +522,7 @@ function tryCloseBotTurnCanon(session, reason) {
       stage: session.stage,
       waiting_audio: !hasMarkAck && !silenceAfterAudio,
       waiting_mark_ack: !hasMarkAck,
+      waiting_mark_timeout: expectingTelnyx && !hasMarkTimeout,
       waiting_silence: !silenceAfterAudio,
       waiting_openai: !openaiDone,
       reason: reason || null,
@@ -527,7 +551,18 @@ function tryCloseBotTurnCanon(session, reason) {
   session.dropAudioUntil = 0;
   session.awaiting_user_input = true;
   session.pending_user_turn = true;
+  // H#3 FIX: safety timeout to clear awaiting_user_input if no speech
+  // is detected within 10s. Prevents permanent bot silence when VAD
+  // never fires (e.g., if audio pipeline stalls for any reason).
+  if (session._awaitingUserTimeout) clearTimeout(session._awaitingUserTimeout);
+  session._awaitingUserTimeout = setTimeout(() => {
+    if (session.awaiting_user_input) {
+      session.awaiting_user_input = false;
+      jlog({ event: "AWAITING_USER_TIMEOUT", session_id: session.session_id, stage: session.stage });
+    }
+  }, 10000);
   session.last_telnyx_mark_ack_at = 0;
+  session.last_telnyx_mark_timeout_at = 0;
   session.output_audio_done_at = 0;
   session.last_speech_started_at = 0;
   armNoUserNudge(session);
@@ -1102,6 +1137,10 @@ function stopOutboundPlayback(session) {
   session._model_playing = false;
   session._modelFramesSent = 0;
   session._modelBytesSent = 0;
+  // H#2 FIX: always clear tts_playing when stopping playback.
+  // Without this, interrupted TTS leaves the flag stuck true,
+  // causing the echo gate to permanently drop inbound audio.
+  session.tts_playing = false;
 }
 
 async function telnyxHangup(callControlId) {
@@ -1216,6 +1255,7 @@ async function playDeterministicLine(session, text) {
         const mark_name = `tts_end_${session.session_id}_${nowMs()}`;
         session.pending_tts_mark = mark_name;
         session.last_telnyx_mark_ack_at = 0;
+        session.last_telnyx_mark_timeout_at = 0;
         session.audio_done = false;
         try {
           session.telnyx.ws.send(JSON.stringify({ event: "mark", mark: { name: mark_name } }));
@@ -1229,6 +1269,8 @@ async function playDeterministicLine(session, text) {
           if (session.pending_tts_mark === mark_name) {
             session.audio_done = true;
             session.pending_tts_mark = null;
+            session.last_telnyx_mark_timeout_at = nowMs();
+            session.pending_tts_mark_timer = null;
             // DEBT: Telnyx mark ordering is not guaranteed; this timeout is the best-effort audio end fallback.
             jlog({ event: "TELNYX_MARK_TIMEOUT_ASSUME_DONE", session_id: session.session_id, mark_name });
             tryCloseBotTurnCanon(session, "mark_timeout");
@@ -1353,6 +1395,7 @@ function makeBaseSession() {
     last_speech_started_at: 0,
     output_audio_done_at: 0,
     last_telnyx_mark_ack_at: 0,
+    last_telnyx_mark_timeout_at: 0,
     _pendingNoUserTimer: null,
     response_state: new Map(), // response_id -> { has_text, fallback_done }
     classifier_pending_id: null,
@@ -1415,17 +1458,11 @@ function handleInboundAudioToOpenAi(sess, { payloadB64, isInbound, enc, sr, trac
     });
   }
 
-  const forceActive = sess.forceListen === true;
-  if (forceActive) {
-    jlog({ event: "FORCE_LISTEN_BYPASS", session_id: sess.session_id });
-    // One-shot: consume and immediately disable to avoid perpetual bypass loops.
-    sess.forceListen = false;
-  } else {
-    if (!sess.openai_audio_configured) {
-      jlog({ event: "AUDIO_APPEND_BLOCKED_NOT_READY", session_id: sess.session_id, stage: sess.stage, reason: "openai_audio_config_not_set" });
-      return;
-    }
-  }
+  // H#1 FIX: removed openai_audio_configured gate.
+  // The downstream ws.readyState check (before input_audio_buffer.append)
+  // already prevents sending to a closed OpenAI socket.
+  // The old gate caused a race condition: Telnyx sends audio before
+  // the OpenAI WS connects, silently dropping all early frames.
 
   let pcm16_src = null;
   let rms = 0;
@@ -2341,6 +2378,7 @@ function openaiConnect(session) {
         const mark_name = `model_end_${session.session_id}_${nowMs()}`;
         session.pending_tts_mark = mark_name;
         session.last_telnyx_mark_ack_at = 0;
+        session.last_telnyx_mark_timeout_at = 0;
         session.audio_done = false;
         if (session?.telnyx?.ws) {
           try {
@@ -2355,6 +2393,8 @@ function openaiConnect(session) {
             if (session.pending_tts_mark === mark_name) {
               session.audio_done = true;
               session.pending_tts_mark = null;
+              session.last_telnyx_mark_timeout_at = nowMs();
+              session.pending_tts_mark_timer = null;
               jlog({ event: "TELNYX_MARK_TIMEOUT_ASSUME_DONE", session_id: session.session_id, mark_name });
               tryCloseBotTurnCanon(session, "mark_timeout_model");
             }
@@ -2451,6 +2491,7 @@ function openaiConnect(session) {
     session._lastOutboundCodec = targetCodec;
     session.output_audio_done_at = 0;
     session.last_telnyx_mark_ack_at = 0;
+    session.last_telnyx_mark_timeout_at = 0;
     session.speaking = true;
     session.audio_done = false;
     session.lastSpeakAt = nowMs();
@@ -2905,6 +2946,7 @@ function openaiConnect(session) {
       session._respondedThisTurn = false;
       session._spokeThisTurn = false;
       session.awaiting_user_input = false;
+      if (session._awaitingUserTimeout) { clearTimeout(session._awaitingUserTimeout); session._awaitingUserTimeout = null; }
       // VAD barge-in trigger
       const sinceLastCancelMs = session.lastCancelAt ? (now - session.lastCancelAt) : null;
       jlog({ event: "BARGE_IN_TRIGGER", reason: "vad", rms: null, sinceLastCancelMs });
@@ -3860,6 +3902,7 @@ wss?.on("connection", (ws, req) => {
       if (sess && name && sess.pending_tts_mark && name === sess.pending_tts_mark) {
         sess.audio_done = true;
         sess.last_telnyx_mark_ack_at = nowMs();
+        sess.last_telnyx_mark_timeout_at = 0;
         if (sess.pending_tts_mark_timer) { clearTimeout(sess.pending_tts_mark_timer); sess.pending_tts_mark_timer = null; }
         sess.pending_tts_mark = null;
         jlog({ event: "TELNYX_MARK_ACK", session_id: sess.session_id, mark_name: name, call_control_id: sess.call_control_id || null });
