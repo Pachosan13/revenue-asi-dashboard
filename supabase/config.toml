@@ -415,6 +415,11 @@ entrypoint = "./functions/warmup-engine/index.ts"
 enabled = true
 verify_jwt = false
 
+[functions.hq-acq-import-apify]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/hq-acq-import-apify/index.ts"
+
 [functions.dispatch-touch-sms]
 enabled = true
 verify_jwt = false
@@ -425,6 +430,18 @@ verify_jwt = false
 
 [functions.ghl-appointment-webhook]
 verify_jwt = false
+
+[functions.ghl-message-webhook]
+verify_jwt = false
+entrypoint = "./functions/ghl-message-webhook/index.ts"
+
+[functions.ghl-whatsapp-webhook]
+verify_jwt = false
+entrypoint = "./functions/ghl-whatsapp-webhook/index.ts"
+
+[functions.mark-prequalified]
+verify_jwt = false
+entrypoint = "./functions/mark-prequalified/index.ts"
 
 [functions.lh_collect_maps]
 enabled = true

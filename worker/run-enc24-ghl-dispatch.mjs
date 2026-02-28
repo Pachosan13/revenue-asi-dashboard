@@ -61,12 +61,22 @@ function buildGhlPayload(listingRow) {
     const p = Number(stage1?.price);
     return Number.isFinite(p) && p > 0 ? p : null;
   })();
+  const contact_name = pickFirst(
+    listingRow.seller_name,
+    stage1?.contact_name,
+    stage1?.seller_name,
+    listingRow.raw?.contact_name,
+  );
+  const phone_e164 = pickFirst(listingRow.phone_e164);
 
   return {
-    phone: listingRow.phone_e164 ?? null, // main phone for the lead/contact in GHL
+    phone: phone_e164, // backward-compatible alias for existing GHL mappings
+    phone_e164,
+    contact_name,
     source: "encuentra24",
     external_id,
-    url,
+    url, // backward-compatible alias
+    listing_url: url,
     make,
     model,
     year,
@@ -81,7 +91,8 @@ function buildGhlPayload(listingRow) {
 }
 
 async function enqueueFromListings(db, accountId, limit) {
-  // Insert only once per (account_id, listing_url_hash)
+  // Insert only once per (account_id, listing_url_hash), and avoid replaying
+  // recently-sent templates by same external_id OR phone (24h window).
   const q = `
     insert into lead_hunter.enc24_ghl_deliveries (account_id, listing_url, external_id, phone_e164, status)
     select
@@ -99,6 +110,25 @@ async function enqueueFromListings(db, accountId, limit) {
         from lead_hunter.enc24_ghl_deliveries d
         where d.account_id = l.account_id
           and d.listing_url_hash = l.listing_url_hash
+      )
+      and not exists (
+        select 1
+        from lead_hunter.enc24_ghl_deliveries d24
+        where d24.account_id = l.account_id
+          and d24.status = 'sent'
+          and d24.sent_at >= now() - interval '24 hours'
+          and (
+            (
+              nullif(d24.external_id, '') is not null
+              and nullif(substring(l.listing_url from '/(\\d{6,})\\b'), '') is not null
+              and d24.external_id = substring(l.listing_url from '/(\\d{6,})\\b')
+            )
+            or (
+              nullif(d24.phone_e164, '') is not null
+              and nullif(l.phone_e164, '') is not null
+              and d24.phone_e164 = l.phone_e164
+            )
+          )
       )
     order by l.updated_at desc nulls last
     limit $2::int

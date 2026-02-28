@@ -63,7 +63,7 @@ export default function ProgramsPage() {
             Programs generate leads (supply). Campaigns decide what to do with them.
           </p>
         </div>
-        <Button variant="secondary" size="sm" className="gap-2" onClick={load} disabled={loading}>
+        <Button variant="subtle" size="sm" className="gap-2" onClick={load} disabled={loading}>
           <RefreshCw size={14} /> Refresh
         </Button>
       </div>
@@ -72,7 +72,7 @@ export default function ProgramsPage() {
         <Badge variant="neutral">Total {summary.total}</Badge>
         <Badge variant="outline">Live {summary.live}</Badge>
         <Badge variant="warning">Degraded {summary.degraded}</Badge>
-        <Badge variant="ghost">Disabled {summary.disabled}</Badge>
+        <Badge variant="neutral">Disabled {summary.disabled}</Badge>
       </div>
 
       <Card>
@@ -96,20 +96,23 @@ export default function ProgramsPage() {
               const ttf = p.kpis?.time_to_first_touch_avg_minutes
               return (
                 <Card key={p.key}>
-                  <CardHeader
-                    title={
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-white font-semibold">
-                          <Link href={`/programs/${encodeURIComponent(p.key)}`} className="hover:underline">
-                            {p.name}
-                          </Link>
-                          <div className="text-[11px] text-white/45">{p.key}</div>
-                        </div>
-                        <Badge variant="outline">{badge}</Badge>
-                      </div>
-                    as any}
-                    description="Programs generate supply. They do not contact leads."
-                  />
+<CardHeader
+  title={
+    <div className="flex items-center justify-between gap-3">
+      <div className="text-white font-semibold">
+        <Link
+          href={`/programs/${encodeURIComponent(p.key)}`}
+          className="hover:underline"
+        >
+          {p.name}
+        </Link>
+        <div className="text-[11px] text-white/45">{p.key}</div>
+      </div>
+      <Badge variant="outline">{badge}</Badge>
+    </div>
+  }
+  description="Programs generate supply. They do not contact leads."
+/>
                   <CardContent className="grid gap-2 text-sm text-white/70">
                     <div className="flex items-center justify-between">
                       <span>leads_last_60m</span>

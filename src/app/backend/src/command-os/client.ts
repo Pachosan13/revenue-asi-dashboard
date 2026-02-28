@@ -32,6 +32,8 @@ export type CommandOsIntent =
   | "campaign.metrics"
   | "program.list"
   | "program.status"
+  | "craigslist.cto.start"
+  | "craigslist.cto.stop"
   | "autos.activate"
   | "autos.deactivate"
   | "orchestrator.run"

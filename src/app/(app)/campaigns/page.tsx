@@ -494,7 +494,7 @@ export default function CampaignsPage() {
                   <TableCell className="text-right text-white/60">{p.last_started_at ? new Date(p.last_started_at).toLocaleString() : "--"}</TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-2">
-                      <Button variant="secondary" size="sm" onClick={() => startCraigslistMiami()}>
+                      <Button variant="outline" size="sm" onClick={() => startCraigslistMiami()}>
                         Start
                       </Button>
                       <Button variant="ghost" size="sm" onClick={() => stopCraigslistMiami()}>
@@ -561,7 +561,7 @@ export default function CampaignsPage() {
           <div className="flex items-center justify-end gap-2">
             {!confirmPauseAll ? (
               <Button
-                variant="secondary"
+                variant="subtle"
                 size="sm"
                 onClick={() => setConfirmPauseAll(true)}
                 disabled={summary.running === 0}
@@ -571,7 +571,7 @@ export default function CampaignsPage() {
             ) : (
               <div className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
                 <span>Confirm pause all running?</span>
-                <Button variant="secondary" size="sm" onClick={pauseAllRunning}>
+                <Button variant="subtle" size="sm" onClick={pauseAllRunning}>
                   Confirm
                 </Button>
                 <Button variant="ghost" size="sm" onClick={() => setConfirmPauseAll(false)}>
@@ -586,7 +586,7 @@ export default function CampaignsPage() {
                 <div className="font-semibold">Data unavailable</div>
                 <div className="text-rose-200/80">{runtimeError}</div>
               </div>
-              <Button variant="secondary" size="sm" className="gap-2" onClick={() => loadCampaigns()}>
+              <Button variant="subtle" size="sm" className="gap-2" onClick={() => loadCampaigns()}>
                 <RefreshCw size={14} /> Retry
               </Button>
             </div>
@@ -673,7 +673,7 @@ export default function CampaignsPage() {
 
                     <TableCell className="text-right">
                       <Button
-                        variant="secondary"
+                        variant="subtle"
                         size="sm"
                         onClick={(e) => {
                           e.stopPropagation()

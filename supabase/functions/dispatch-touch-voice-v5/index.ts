@@ -278,12 +278,40 @@ serve(async (req) => {
     const timeoutSecs = timeoutSecsRaw ? Number(timeoutSecsRaw) : 60
     if (Number.isFinite(timeoutSecs) && timeoutSecs > 0) body.timeout_secs = Math.min(Math.max(timeoutSecs, 15), 120)
 
-    // Streaming is initiated on call.answered; still require token so gateway can start later.
+    // Streaming to our Fly gateway: ALWAYS derive from VOICE_GATEWAY_TOKEN (ignore TELNYX_STREAM_URL env).
     if (!TELNYX_STREAM_URL_FROM_TOKEN) {
       console.log(JSON.stringify({ event: "VOICE_GATEWAY_TOKEN_MISSING", touch_run_id: args.touchRunId, token_len: 0, token_prefix: "" }))
       return { ok: false, error: "missing_voice_gateway_token", raw: null }
     }
     logStreamUrlBuilt(args.touchRunId)
+    {
+      body.stream_url = TELNYX_STREAM_URL_FROM_TOKEN
+
+      // Telnyx bidirectional streaming: RTP payload (no headers) over WebSocket.
+      // Force deterministic codec/track to avoid OPUS defaults causing silence.
+      const streamTrack =
+        (args.config?.telnyx_stream_track as string | undefined) ??
+        (args.config?.stream_track as string | undefined) ??
+        (Deno.env.get("TELNYX_STREAM_TRACK") ?? "both_tracks")
+
+      const bidiMode =
+        (args.config?.telnyx_stream_bidirectional_mode as string | undefined) ??
+        (args.config?.stream_bidirectional_mode as string | undefined) ??
+        (Deno.env.get("TELNYX_STREAM_BIDIRECTIONAL_MODE") ?? "rtp")
+
+      // PCMA-only (matches gateway hard lock)
+      const bidiCodec = "PCMA"
+
+      const bidiTargetLegs =
+        (args.config?.telnyx_stream_bidirectional_target_legs as string | undefined) ??
+        (args.config?.stream_bidirectional_target_legs as string | undefined) ??
+        (Deno.env.get("TELNYX_STREAM_BIDIRECTIONAL_TARGET_LEGS") ?? "opposite")
+
+      body.stream_track = streamTrack
+      body.stream_bidirectional_mode = bidiMode
+      body.stream_bidirectional_codec = bidiCodec
+      body.stream_bidirectional_target_legs = bidiTargetLegs
+    }
 
     console.log(
       JSON.stringify({

@@ -147,10 +147,10 @@ export default function ProgramDetailPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" className="gap-2" onClick={load} disabled={loading}>
+          <Button variant="subtle" size="sm" className="gap-2" onClick={load} disabled={loading}>
             <RefreshCw size={14} /> Refresh
           </Button>
-          <Button variant="secondary" size="sm" onClick={start}>
+          <Button variant="subtle" size="sm" onClick={start}>
             Start
           </Button>
           <Button variant="ghost" size="sm" onClick={stop}>
