@@ -15,21 +15,29 @@ export function getPgConfig() {
   const connectionString = String(process.env.DATABASE_URL || "").trim();
   if (!connectionString) throw new Error("Missing DATABASE_URL");
 
+  let url = null;
   let host = "unknown";
   try {
-    host = new URL(connectionString).hostname || "unknown";
+    url = new URL(connectionString);
+    host = url.hostname || "unknown";
   } catch {
     host = "unknown";
   }
 
   const supabaseHost = host.includes(".supabase.co");
   const localHost = isLocalHost(host);
-  const supabaseSslHint = envBool("SUPABASE_DB_SSL", false);
-  const forceSupabaseSslObject = supabaseHost || supabaseSslHint;
-
-  if (forceSupabaseSslObject) {
+  if (supabaseHost) {
+    if (!url) throw new Error("Invalid DATABASE_URL");
+    const port = Number(url.port || "5432");
+    const database = decodeURIComponent(String(url.pathname || "").replace(/^\/+/, ""));
+    const user = decodeURIComponent(url.username || "");
+    const password = decodeURIComponent(url.password || "");
     return {
-      connectionString,
+      host,
+      port,
+      database,
+      user,
+      password,
       ssl: { rejectUnauthorized: false },
       meta: {
         host,
@@ -39,9 +47,19 @@ export function getPgConfig() {
     };
   }
 
-  // Localhost defaults to plain connection.
-  const defaultSsl = localHost ? false : true;
-  const sslEnabled = localHost ? false : envBool("PG_SSL", defaultSsl);
+  // Localhost uses plain connectionString without SSL.
+  if (localHost) {
+    return {
+      connectionString,
+      meta: {
+        host,
+        ssl: false,
+        rejectUnauthorized: false,
+      },
+    };
+  }
+
+  const sslEnabled = envBool("PG_SSL", true);
   const rejectUnauthorized = sslEnabled ? envBool("PG_SSL_REJECT_UNAUTHORIZED", false) : false;
 
   return {
