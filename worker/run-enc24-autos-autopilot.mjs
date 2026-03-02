@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { Client } from "pg";
 import { execFile } from "node:child_process";
+import { getPgConfig, logPgConnect } from "./lib/pg-config.mjs";
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function nowIso() { return new Date().toISOString(); }
@@ -163,13 +164,23 @@ async function tickOnce(db, accountId, settings) {
 }
 
 async function main() {
-  const DATABASE_URL = process.env.DATABASE_URL;
-  if (!DATABASE_URL) throw new Error("Missing DATABASE_URL");
+  const pgConfig = getPgConfig();
+  const RUN_ONCE = envBool("RUN_ONCE", false);
 
-  const db = new Client({ connectionString: DATABASE_URL });
+  logPgConnect(pgConfig.meta);
+  const db = new Client(pgConfig);
   await db.connect();
 
   console.log(`[${nowIso()}] enc24 autopilot starting`);
+
+  if (RUN_ONCE) {
+    const { rows } = await db.query(
+      "select * from lead_hunter.enc24_autopilot_settings where enabled=true order by updated_at desc limit 1"
+    );
+    console.log(`[${nowIso()}] RUN_ONCE ok settings_found=${Boolean(rows?.[0])}`);
+    await db.end().catch(() => {});
+    return;
+  }
 
   while (true) {
     try {

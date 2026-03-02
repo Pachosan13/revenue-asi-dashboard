@@ -15,6 +15,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { chromium } from "playwright";
 import pg from "pg";
+import { getPgConfig, logPgConnect } from "../lib/pg-config.mjs";
 
 const { Client } = pg;
 
@@ -40,7 +41,6 @@ const OUT = env("OUT", "/tmp/enc24_links.txt");
 
 // DB
 const WRITE_DB = String(env("WRITE_DB", "0")) === "1";
-const DATABASE_URL = env("DATABASE_URL", null);
 const ACCOUNT_ID = env("ACCOUNT_ID", null); // nullable ok
 
 function normalizeListingUrl(href) {
@@ -108,10 +108,9 @@ async function hasUniqueOn(db, schema, table, cols) {
 
 async function upsertListingsToDb(urls) {
   if (!WRITE_DB) return { inserted_or_updated: 0, skipped: urls.length };
-
-  if (!DATABASE_URL) throw new Error("WRITE_DB=1 but DATABASE_URL is missing");
-
-  const db = new Client({ connectionString: DATABASE_URL });
+  const pgConfig = getPgConfig();
+  logPgConnect(pgConfig.meta);
+  const db = new Client(pgConfig);
   await db.connect();
 
   try {

@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { Client } from "pg";
+import { getPgConfig, logPgConnect } from "./lib/pg-config.mjs";
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function nowIso() { return new Date().toISOString(); }
@@ -274,8 +275,7 @@ async function runOnce(db, opts) {
 }
 
 async function main() {
-  const DATABASE_URL = process.env.DATABASE_URL;
-  if (!DATABASE_URL) throw new Error("Missing DATABASE_URL");
+  const pgConfig = getPgConfig();
 
   const accountId = String(process.env.ACCOUNT_ID || "").trim();
   if (!accountId) throw new Error("Missing ACCOUNT_ID (required)");
@@ -294,7 +294,8 @@ async function main() {
   const sendLimit = envNum("LIMIT", 5);
   const timeoutMs = envNum("ENC24_GHL_TIMEOUT_MS", 12_000);
 
-  const db = new Client({ connectionString: DATABASE_URL });
+  logPgConnect(pgConfig.meta);
+  const db = new Client(pgConfig);
   await db.connect();
 
   console.log(`[${nowIso()}] enc24-ghl-dispatch starting account_id=${accountId} loop=${LOOP} limit=${sendLimit}`);

@@ -1,6 +1,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { resolveEncuentra24PhoneFromListing } from "./providers/phone-resolver/encuentra24_whatsapp_resolver.mjs";
+import { getPgConfig, logPgConnect } from "./lib/pg-config.mjs";
 
 const { Client } = pg;
 
@@ -22,10 +23,6 @@ function isValidEnc24ListingUrl(u) {
     return false;
   }
 }
-
-const DATABASE_URL =
-  process.env.DATABASE_URL ||
-  "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
 
 const WORKER_ID = process.env.WORKER_ID || "local-macbook-hunter";
 
@@ -288,7 +285,9 @@ async function mainOnce(db) {
 }
 
 async function main() {
-  const db = new Client({ connectionString: DATABASE_URL });
+  const pgConfig = getPgConfig();
+  logPgConnect(pgConfig.meta);
+  const db = new Client(pgConfig);
   await db.connect();
 
   console.log(`[${nowIso()}] enc24 reveal worker starting`, {
