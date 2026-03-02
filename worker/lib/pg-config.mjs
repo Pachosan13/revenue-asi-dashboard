@@ -25,15 +25,24 @@ export function getPgConfig() {
   const supabaseHost = host.includes(".supabase.co");
   const localHost = isLocalHost(host);
   const supabaseSslHint = envBool("SUPABASE_DB_SSL", false);
+  const forceSupabaseSslObject = supabaseHost || supabaseSslHint;
 
-  // Default behavior:
-  // - Supabase/prod hint: SSL on, rejectUnauthorized off (unless overridden)
-  // - Localhost: SSL off
-  const defaultSsl = localHost ? false : (supabaseHost || supabaseSslHint);
+  if (forceSupabaseSslObject) {
+    return {
+      connectionString,
+      ssl: { rejectUnauthorized: false },
+      meta: {
+        host,
+        ssl: true,
+        rejectUnauthorized: false,
+      },
+    };
+  }
+
+  // Localhost defaults to plain connection.
+  const defaultSsl = localHost ? false : true;
   const sslEnabled = localHost ? false : envBool("PG_SSL", defaultSsl);
-  const rejectUnauthorized = sslEnabled
-    ? envBool("PG_SSL_REJECT_UNAUTHORIZED", false)
-    : false;
+  const rejectUnauthorized = sslEnabled ? envBool("PG_SSL_REJECT_UNAUTHORIZED", false) : false;
 
   return {
     connectionString,
@@ -51,4 +60,10 @@ export function logPgConnect(meta) {
   const ssl = Boolean(meta?.ssl);
   const rejectUnauthorized = Boolean(meta?.rejectUnauthorized);
   console.log(`pg_connect: host=${host} ssl=${ssl} rejectUnauthorized=${rejectUnauthorized}`);
+}
+
+export function logPgSslObject(ssl) {
+  const sslType = typeof ssl;
+  const keys = ssl && sslType === "object" ? Object.keys(ssl).join(",") : "";
+  console.log(`pg_ssl_object: ${sslType} keys=${keys}`);
 }

@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { Client } from "pg";
-import { getPgConfig, logPgConnect } from "./lib/pg-config.mjs";
+import { getPgConfig, logPgConnect, logPgSslObject } from "./lib/pg-config.mjs";
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function nowIso() { return new Date().toISOString(); }
@@ -295,6 +295,7 @@ async function main() {
   const timeoutMs = envNum("ENC24_GHL_TIMEOUT_MS", 12_000);
 
   logPgConnect(pgConfig.meta);
+  logPgSslObject(pgConfig.ssl);
   const db = new Client(pgConfig);
   await db.connect();
 

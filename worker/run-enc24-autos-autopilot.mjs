@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Client } from "pg";
 import { execFile } from "node:child_process";
-import { getPgConfig, logPgConnect } from "./lib/pg-config.mjs";
+import { getPgConfig, logPgConnect, logPgSslObject } from "./lib/pg-config.mjs";
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function nowIso() { return new Date().toISOString(); }
@@ -168,6 +168,7 @@ async function main() {
   const RUN_ONCE = envBool("RUN_ONCE", false);
 
   logPgConnect(pgConfig.meta);
+  logPgSslObject(pgConfig.ssl);
   const db = new Client(pgConfig);
   await db.connect();
 

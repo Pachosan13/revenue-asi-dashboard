@@ -1,7 +1,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { resolveEncuentra24PhoneFromListing } from "./providers/phone-resolver/encuentra24_whatsapp_resolver.mjs";
-import { getPgConfig, logPgConnect } from "./lib/pg-config.mjs";
+import { getPgConfig, logPgConnect, logPgSslObject } from "./lib/pg-config.mjs";
 
 const { Client } = pg;
 
@@ -287,6 +287,7 @@ async function mainOnce(db) {
 async function main() {
   const pgConfig = getPgConfig();
   logPgConnect(pgConfig.meta);
+  logPgSslObject(pgConfig.ssl);
   const db = new Client(pgConfig);
   await db.connect();
 

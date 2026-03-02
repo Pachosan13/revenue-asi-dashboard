@@ -15,7 +15,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { chromium } from "playwright";
 import pg from "pg";
-import { getPgConfig, logPgConnect } from "../lib/pg-config.mjs";
+import { getPgConfig, logPgConnect, logPgSslObject } from "../lib/pg-config.mjs";
 
 const { Client } = pg;
 
@@ -110,6 +110,7 @@ async function upsertListingsToDb(urls) {
   if (!WRITE_DB) return { inserted_or_updated: 0, skipped: urls.length };
   const pgConfig = getPgConfig();
   logPgConnect(pgConfig.meta);
+  logPgSslObject(pgConfig.ssl);
   const db = new Client(pgConfig);
   await db.connect();
 
