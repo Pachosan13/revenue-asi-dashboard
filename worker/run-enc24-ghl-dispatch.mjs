@@ -41,6 +41,7 @@ function pickFirst(...vals) {
 
 function buildGhlPayload(listingRow) {
   const url = String(listingRow.listing_url || "");
+  const listing_url_hash = pickFirst(listingRow.listing_url_hash);
   const external_id = pickFirst(listingRow.external_id, parseExternalId(url));
   const stage1 = listingRow.raw?.stage1 ?? {};
 
@@ -78,6 +79,7 @@ function buildGhlPayload(listingRow) {
     external_id,
     url, // backward-compatible alias
     listing_url: url,
+    listing_url_hash,
     make,
     model,
     year,
@@ -93,7 +95,7 @@ function buildGhlPayload(listingRow) {
 
 async function enqueueFromListings(db, accountId, limit) {
   // Insert only once per (account_id, listing_url_hash), and avoid replaying
-  // recently-sent templates by same external_id OR phone (24h window).
+  // recently-sent templates by same external_id (24h window).
   const q = `
     insert into lead_hunter.enc24_ghl_deliveries (account_id, listing_url, external_id, phone_e164, status)
     select
@@ -123,11 +125,6 @@ async function enqueueFromListings(db, accountId, limit) {
               nullif(d24.external_id, '') is not null
               and nullif(substring(l.listing_url from '/(\\d{6,})\\b'), '') is not null
               and d24.external_id = substring(l.listing_url from '/(\\d{6,})\\b')
-            )
-            or (
-              nullif(d24.phone_e164, '') is not null
-              and nullif(l.phone_e164, '') is not null
-              and d24.phone_e164 = l.phone_e164
             )
           )
       )
@@ -215,6 +212,53 @@ async function markFailed(db, deliveryId, attempts, payload, errMsg, resStatus, 
   await db.query(q, [deliveryId, JSON.stringify(payload ?? {}), resStatus ?? null, resText ?? null, String(errMsg || "failed"), nextIso]);
 }
 
+async function markBlocked(db, deliveryId, payload, errMsg) {
+  const q = `
+    update lead_hunter.enc24_ghl_deliveries
+    set status='failed',
+        payload=$2::jsonb,
+        response_status=null,
+        response_text=null,
+        last_error=$3::text,
+        next_attempt_at=now() + interval '30 days',
+        updated_at=now()
+    where id=$1::uuid;
+  `;
+  await db.query(q, [deliveryId, JSON.stringify(payload ?? {}), String(errMsg || "blocked")]);
+}
+
+async function wasListingDeliveredRecently(db, accountId, listingUrlHash, listingUrl, hours, deliveryId) {
+  const q = `
+    select 1
+    from lead_hunter.enc24_ghl_deliveries d
+    where d.account_id = $1::uuid
+      and d.id <> $2::uuid
+      and d.created_at >= now() - make_interval(hours => $3::int)
+      and (
+        (
+          nullif(d.payload->>'listing_url_hash', '') is not null
+          and nullif($4::text, '') is not null
+          and d.payload->>'listing_url_hash' = $4::text
+        )
+        or (
+          nullif(d.payload->>'listing_url_hash', '') is null
+          and nullif(coalesce(nullif(d.payload->>'listing_url', ''), nullif(d.payload->>'url', '')), '') is not null
+          and nullif($5::text, '') is not null
+          and coalesce(nullif(d.payload->>'listing_url', ''), nullif(d.payload->>'url', '')) = $5::text
+        )
+      )
+    limit 1;
+  `;
+  const { rows } = await db.query(q, [
+    accountId,
+    deliveryId,
+    Math.max(1, Number(hours || 72)),
+    String(listingUrlHash || ""),
+    String(listingUrl || ""),
+  ]);
+  return Boolean(rows?.[0]);
+}
+
 async function postJson(url, payload, timeoutMs) {
   const controller = new AbortController();
   const to = setTimeout(() => controller.abort(), timeoutMs);
@@ -233,7 +277,16 @@ async function postJson(url, payload, timeoutMs) {
 }
 
 async function runOnce(db, opts) {
-  const { accountId, webhookUrl, enqueueLimit, sendLimit, timeoutMs } = opts;
+  const {
+    accountId,
+    webhookUrl,
+    enqueueLimit,
+    sendLimit,
+    timeoutMs,
+    dedupeEnabled,
+    dedupeHours,
+    dedupeDryRun,
+  } = opts;
 
   const enq = await enqueueFromListings(db, accountId, enqueueLimit).catch(() => 0);
   const claimed = await claimDue(db, accountId, sendLimit);
@@ -257,6 +310,34 @@ async function runOnce(db, opts) {
       }
 
       const payload = buildGhlPayload(listing);
+      const listingKey = String(payload.listing_url_hash || payload.listing_url || payload.url || "").trim();
+      if (dedupeEnabled && listingKey) {
+        const found = await wasListingDeliveredRecently(
+          db,
+          accountId,
+          payload.listing_url_hash,
+          payload.listing_url || payload.url,
+          dedupeHours,
+          deliveryId
+        );
+        if (found) {
+          if (dedupeDryRun) {
+            console.log(`[${nowIso()}] event=dispatch_dedupe_dryrun listing_key=${listingKey}`);
+          } else {
+            await markBlocked(db, deliveryId, payload, "dispatch_blocked_dedupe_listing");
+            console.log(`[${nowIso()}] event=dispatch_dedupe_blocked listing_key=${listingKey}`);
+            failed++;
+            continue;
+          }
+        }
+      }
+      const phone = String(payload.phone_e164 || "").trim();
+      const hasValidPhone = Boolean(phone) && phone.startsWith("+");
+      if (!hasValidPhone) {
+        await markFailed(db, deliveryId, attempts, {}, "missing_listing_or_phone", null, null);
+        failed++;
+        continue;
+      }
       const r = await postJson(webhookUrl, payload, timeoutMs);
       if (r.ok) {
         await markSent(db, deliveryId, payload, r.status, r.text);
@@ -293,6 +374,9 @@ async function main() {
   const enqueueLimit = envNum("ENQUEUE_LIMIT", 10);
   const sendLimit = envNum("LIMIT", 5);
   const timeoutMs = envNum("ENC24_GHL_TIMEOUT_MS", 12_000);
+  const dedupeEnabled = envBool("ENC24_DEDUPE_ENABLED", true);
+  const dedupeHours = envNum("ENC24_DEDUPE_HOURS", 72);
+  const dedupeDryRun = envBool("ENC24_DEDUPE_DRYRUN", true);
 
   logPgConnect(pgConfig.meta);
   logPgSslObject(pgConfig.ssl);
@@ -302,7 +386,16 @@ async function main() {
   console.log(`[${nowIso()}] enc24-ghl-dispatch starting account_id=${accountId} loop=${LOOP} limit=${sendLimit}`);
 
   do {
-    const out = await runOnce(db, { accountId, webhookUrl, enqueueLimit, sendLimit, timeoutMs });
+    const out = await runOnce(db, {
+      accountId,
+      webhookUrl,
+      enqueueLimit,
+      sendLimit,
+      timeoutMs,
+      dedupeEnabled,
+      dedupeHours,
+      dedupeDryRun,
+    });
     console.log(`[${nowIso()}] enc24-ghl tick`, out);
     if (!LOOP) break;
     await sleep(intervalMs);
