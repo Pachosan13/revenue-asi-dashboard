@@ -259,11 +259,12 @@ async function tickOnce(state, phaseRef, accountId, settings) {
 
   // 4) Optional: dispatch revealed leads to GHL webhook (idempotent, separate queue)
   const GHL_URL = String(process.env.ENC24_GHL_WEBHOOK_URL || "").trim();
+  const GHL_SETTINGS_ENABLED = settings?.ghl_enabled === true;
   const GHL_ENABLED = String(process.env.ENC24_GHL_ENABLED || "").trim() !== "0";
-  const GHL_ACTIVE = GHL_ENABLED && Boolean(GHL_URL);
+  const GHL_ACTIVE = GHL_SETTINGS_ENABLED && GHL_ENABLED && Boolean(GHL_URL);
   let ghl = null;
-  setPhase(phaseRef, "ghl_dispatch_start", accountId);
   if (GHL_ACTIVE) {
+    setPhase(phaseRef, "ghl_dispatch_start", accountId);
     try {
       ghl = await withTimeout(
         execNode("worker/run-enc24-ghl-dispatch.mjs", {
@@ -292,8 +293,8 @@ async function tickOnce(state, phaseRef, accountId, settings) {
     console.log(
       `[${nowIso()}] ghl_child_exit account_id=${accountId} ok=${Boolean(ghl?.ok)} err=${String(ghl?.err ?? "")}`
     );
+    setPhase(phaseRef, "ghl_dispatch_done", accountId);
   }
-  setPhase(phaseRef, "ghl_dispatch_done", accountId);
 
   // 5) Promote to public.leads so Command OS / UI can "see" leads (optional but defaults ON).
   const PROMOTE_ENABLED = envBool("ENC24_PROMOTE_PUBLIC_LEADS", true);

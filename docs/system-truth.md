@@ -363,6 +363,8 @@ LeadGen routing is stored as JSON in `org_settings.leadgen_routing`:
 Server-side validation exists as a DB CHECK constraint (radius 1–50; if `active=true`, `dealer_address` is required).
 
 ## Changelog
+- ENC24 autopilot GHL gate follow-up: settings load for `lead_hunter.enc24_autopilot_settings` uses `select *` (so `ghl_enabled` is available), and `ghl_dispatch_start|ghl_dispatch_done` phase logs now emit only when GHL dispatch is active.
+- ENC24 autopilot GHL gate schema fix: added migration `supabase/migrations/20260304120000_enc24_autopilot_settings_add_ghl_enabled.sql` to add `lead_hunter.enc24_autopilot_settings.ghl_enabled boolean not null default true`; autopilot GHL dispatch gate in `worker/run-enc24-autos-autopilot.mjs` now requires both `settings.ghl_enabled` and env `ENC24_GHL_ENABLED` (plus webhook URL).
 - ENC24 autopilot observability-only update in `worker/run-enc24-autos-autopilot.mjs`: after the `run-enc24-ghl-dispatch.mjs` child returns, autopilot now emits `ghl_child_stdout`/`ghl_child_stderr` multiline passthrough logs when non-empty and always emits one-line `ghl_child_exit account_id=<id> ok=<bool> err=<string>`.
 - ENC24 GHL dispatch diagnostics (no logic change): `worker/run-enc24-ghl-dispatch.mjs` now logs `event=enc24_ghl_dispatch_entry` at script entry and `event=enc24_ghl_enqueue_candidates n=<count>` before enqueue inserts.
 - ENC24 GHL dispatch safety micro-update in `worker/run-enc24-ghl-dispatch.mjs`: blocked-delivery quarantine window changed from `100 years` to `30 days`; dedupe/dealer-cluster checks now run only when `phone_e164` is non-empty and starts with `+`; webhook observability adds single-line events `ghl_post_start`, `ghl_post_ok`, and `ghl_post_fail` around POST attempts without payload-body logging.
