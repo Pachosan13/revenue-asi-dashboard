@@ -1,6 +1,7 @@
 import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 // =========================
@@ -28,11 +29,14 @@ function isLikelyCommercialSellerName(name) {
   // Strong legal/entity signals
   if (/\b(s\.a\.|sa\b|corp\b|inc\b|ltd\b|s\.r\.l\.|srl\b)\b/i.test(name)) return true;
 
-  // Common dealership / business tokens (Spanish + common brandings)
+  // Common dealership / business tokens (Spanish + English brandings)
   const tokens = [
     "autos", "auto", "motors", "motor", "dealer", "agencia", "autolote", "showroom",
     "financiamiento", "compramos", "vendemos", "ventas", "importadora", "consignación", "consignacion",
     "rent a car", "rental", "flota", "stock", "super autos",
+    "cars", "car ", "gallery", "galería", "galeria", "group", "racing", "performance", "outlet", "premium",
+    "full cars", "trade", "wholesale", "lote", "multimarca",
+    "escudería", "escuderia", "grupo", "empresa", "compañía", "compania",
   ];
   for (const t of tokens) if (n.includes(t)) return true;
 
@@ -57,19 +61,27 @@ function extractListingId(listingUrl) {
 function toPanamaE164(phoneLike) {
   if (!phoneLike) return null;
   const s = String(phoneLike).trim();
-
-  if (/^\+\d{8,15}$/.test(s)) return s;
-
   const d = s.replace(/\D/g, "");
-  if (d.length === 8) return `+507${d}`;
-  if (d.length === 11 && d.startsWith("507")) return `+${d}`;
 
-  if (s.startsWith("00")) {
-    const d2 = s.replace(/\D/g, "");
-    return d2.length >= 8 ? `+${d2.slice(2)}` : null;
-  }
+  // Exactly 8 digits → Panama local number
+  if (d.length === 8 && /^[2-9]/.test(d)) return `+507${d}`;
+
+  // 11 digits starting with 507 → Panama E.164 without +
+  if (d.length === 11 && d.startsWith("507") && /^507[2-9]/.test(d)) return `+${d}`;
+
+  // Already in +507XXXXXXXX format (exactly 12 chars, 8-digit local starting with 2-9)
+  if (/^\+507[2-9]\d{7}$/.test(s)) return s;
+
+  // 00507 prefix (international dialing)
+  if (d.length === 13 && d.startsWith("00507") && /^00507[2-9]/.test(d)) return `+${d.slice(2)}`;
 
   return null;
+}
+
+function isSeedLikeValue(value) {
+  const s = String(value || "");
+  const d = s.replace(/\D/g, "");
+  return s.includes("+50767777777") || s.includes("6777-7777") || d.endsWith("67777777");
 }
 
 function looksLikeWa(url) {
@@ -198,10 +210,45 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
     return false;
   }
 
+  /**
+   * Detect suspicious phone numbers.
+   * In Panama, ALL mobile numbers start with 6 (+507 6xxx-xxxx).
+   * Digits 2/3 are landlines, 4/5/7/8/9 don't exist.
+   * For contacting car sellers we ONLY want mobile numbers (6xxx).
+   *
+   * @param {string} e164 - E.164 format like +50762322069
+   * @param {string} where - extraction source (net_text, dom_tel, etc.)
+   * @returns {boolean} true if the phone looks suspicious / not mobile
+   */
+  function isSuspiciousPhone(e164, where) {
+    if (!e164) return true;
+    const local = e164.replace(/^\+507/, "");
+    if (local.length !== 8) return true;
+
+    const firstDigit = local[0];
+
+    // ALL sources: only accept mobile numbers starting with 6
+    // Landlines (2xx, 3xx) are useless for contacting sellers via WhatsApp/call
+    // Digits 4,5,7,8,9 are not valid Panama ranges at all
+    if (firstDigit !== "6") return true;
+
+    // Trailing zeros: 3+ trailing zeros is almost always garbage
+    if (/0{3,}$/.test(local)) return true;
+
+    // Highly repetitive: same digit 5+ times (e.g. 66666666)
+    if (/(\d)\1{4,}/.test(local)) return true;
+
+    // Sequential ascending/descending
+    if (local === "12345678" || local === "87654321") return true;
+
+    return false;
+  }
+
   function considerPhone(phone, where, url) {
     const e164 = toPanamaE164(phone);
     if (!e164) return;
     if (isBannedE164(e164)) return;
+    if (isSuspiciousPhone(e164, where)) return;
     const wherePriority = (w) => {
       const s = String(w || "");
       if (s.includes("dom_tel_after_call_click")) return 100;
@@ -366,6 +413,7 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
 
       const launchBase = {
         headless,
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
         ...(chromeChannel ? { channel: chromeChannel } : {}),
         ...(chromeExecutablePath ? { executablePath: chromeExecutablePath } : {}),
         ...(ignoreAutomationArg ? { ignoreDefaultArgs: ["--enable-automation"] } : {}),
@@ -393,8 +441,10 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
         const st = res.status();
         if (st < 200 || st >= 400) return;
 
-        // Reduce garbage: only parse encuentra24 responses
+        // Reduce garbage: only parse actual encuentra24 responses.
+        // Block ad networks whose URLs include "encuentra24.com" in query params.
         if (!/encuentra24\.com/i.test(url)) return;
+        if (/doubleclick\.net|googlesyndication\.com|googleads\.g\.|adservice\.google|pagead|adsense|facebook\.com\/tr|analytics/i.test(url)) return;
 
         // Only parse after we start the "reveal window" (after form fill / clicks),
         // except for very specific hot endpoints that may appear slightly earlier.
@@ -450,655 +500,774 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
     await closeOverlays();
     await snap(page, "01b_after_overlays");
 
-    // ======== CONTACT PANEL SELECTORS (the real fix)
-    // panel header is "Enviar mensaje al vendedor"
-    step("locate_contact_panel");
-
-    const panel = page.locator("text=Enviar mensaje al vendedor").first();
-    await panel.waitFor({ timeout: delays.waitContactMs || 25000 }).catch(() => {});
-    await sleep(250);
-
-    // find inputs near the panel: we grab the closest container
-    const container = page.locator("text=Enviar mensaje al vendedor").first().locator("xpath=ancestor::*[self::div or self::section][1]");
-    // sometimes header is inside another wrapper; fallback: right card
-    const containerCount = await container.count().catch(() => 0);
-    const card = containerCount ? container : page.locator("[class*='contact' i], [class*='seller' i], form").first();
-
-    // Extract seller name from the top of the same card (matches what you see in the UI: "Yara Pereyra", "SUPER AUTOS / SAID ...")
-    step("extract_seller_meta");
-    // Determine the "real" contact card root by anchoring on:
-    // - the "Enviar mensaje al vendedor" heading
-    // - action buttons (Contactar/Llamar/WhatsApp)
-    // - email input
-    // This avoids picking up page-level navigation text or dropdown option lists.
-    const sellerMeta2 = await page
-      .evaluate(() => {
-        const norm = (s) => String(s || "").replace(/\s+/g, " ").trim();
-        const txt = (el) => norm(el?.textContent || "");
-        const isVisible = (el) => {
-          try {
-            const cs = window.getComputedStyle(el);
-            if (!cs) return false;
-            if (cs.display === "none" || cs.visibility === "hidden") return false;
-            if (Number(cs.opacity || "1") <= 0) return false;
-            const r = el.getBoundingClientRect?.();
-            if (!r) return false;
-            if (r.width <= 0 || r.height <= 0) return false;
-            return true;
-          } catch {
-            return false;
-          }
-        };
-
-        const heading = Array.from(document.querySelectorAll("h1,h2,h3,h4,div,span,p"))
-          .find((el) => /enviar mensaje al vendedor/i.test(txt(el)));
-        if (!heading) return { seller_name: null, seller_is_business: false, source: "no_heading" };
-
-        // Find the best "contact card" element by walking up from the heading and picking the
-        // smallest ancestor that contains inputs + textarea + action buttons.
-        const hasFormInputs = (root) => (root?.querySelectorAll?.("input")?.length ?? 0) >= 1;
-        const hasTextarea = (root) => !!root?.querySelector?.("textarea");
-        const hasActions = (root) => {
-          const t = (root.textContent || "").toLowerCase();
-          return t.includes("contactar") || t.includes("whatsapp") || t.includes("llamar");
-        };
-        const isCard = (root) => hasFormInputs(root) && hasTextarea(root) && hasActions(root);
-
-        // Prefer finding the *actual* contact card on the right side (not the whole page layout):
-        // climb from the textarea (if present) and pick the smallest card-like container with a reasonable width.
-        const nearRoot = heading.closest("section,div,aside,article,form");
-        const textareaEl = nearRoot?.querySelector?.("textarea") || null;
-
-        let best = null;
-        let node = textareaEl || heading;
-        for (let i = 0; i < 14 && node; i++) {
-          node = node.parentElement;
-          if (!node) break;
-          const tag = (node.tagName || "").toLowerCase();
-          if (!["section", "div", "aside", "article", "form"].includes(tag)) continue;
-          if (!isCard(node)) continue;
-          const r = node.getBoundingClientRect?.();
-          if (!r || r.width <= 0 || r.height <= 0) continue;
-
-          // Heuristic bounds for the right-side card (avoid selecting the full page container)
-          if (r.width < 240 || r.width > 900) continue;
-          if (r.height < 260 || r.height > 1400) continue;
-
-          const area = r.width * r.height;
-          const prevArea = best?.area ?? Infinity;
-          if (area < prevArea) best = { el: node, rect: r, area };
-        }
-
-        const cardEl = best?.el || nearRoot;
-        const cardRect = (best?.rect || cardEl?.getBoundingClientRect?.() || null);
-        if (!cardEl || !cardRect) return { seller_name: null, seller_is_business: false, source: "no_card" };
-
-        // Heading rect can be wrong if there are multiple/hidden headings on the page.
-        // We compute it for debugging, but we do NOT use it to clamp the header band.
-        const headingRect = heading.getBoundingClientRect?.() ?? null;
-
-        const isPersonish = (s) => {
-          const t = norm(s);
-          if (!t || t.length < 3 || t.length > 60) return false;
-          if (/\d/.test(t)) return false;
-          if (/[|]/.test(t)) return false;
-          const low = t.toLowerCase();
-          const banned = [
-            "enviar mensaje al vendedor",
-            "completa tus datos",
-            "anterior",
-            "siguiente",
-            "marketplace",
-            "vehículos",
-            "vehiculos",
-            "publicar",
-            "dirección de e-mail",
-            "direccion de e-mail",
-            "nombre*",
-            "reportar abuso",
-            "comparte este anuncio",
-            "inicio",
-            "autos usados",
-            "vehículos",
-          ];
-          for (const b of banned) if (low === b || low.includes(b)) return false;
-          const parts = t.split(" ").filter(Boolean);
-          if (parts.length < 2 || parts.length > 5) return false;
-          if (!parts.every((p) => /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'.-]{2,}$/.test(p))) return false;
-          return true;
-        };
-
-        // Rectangle scan: look for visible text elements in the header band ABOVE the inputs/textarea card.
-        // Keep X bounds tight to the card so we never pick up global nav.
-        const topY = Math.max(0, cardRect.top - 340);
-        let bottomY = cardRect.top - 8;
-        // If for any reason the band collapses, keep a small header band.
-        if (bottomY - topY < 40) bottomY = cardRect.top + 40;
-        const leftX = cardRect.left - 2;
-        const rightX = cardRect.right + 2;
-
-        const candidates = [];
-        const anyCandidates = [];
-        const rawHits = [];
-        const els = Array.from(document.querySelectorAll("h1,h2,h3,h4,strong,b,a,span,div,p"));
-        for (const el of els) {
-          if (!el) continue;
-          if (el.closest("input,textarea,button,select,option")) continue;
-          if (el.closest("[role='listbox'],[role='option'],[aria-hidden='true'],[hidden]")) continue;
-          if (!isVisible(el)) continue;
-          const r = el.getBoundingClientRect?.();
-          if (!r) continue;
-          if (r.bottom <= topY || r.top >= bottomY) continue;
-          if (r.left < leftX || r.right > rightX) continue;
-          const t = txt(el);
-          if (!t || t.length < 3 || t.length > 80) continue;
-          rawHits.push({ t, top: r.top });
-
-          const low = t.toLowerCase();
-          const uiBanned =
-            /^reportar abuso$/i.test(t) ||
-            /^comparte este anuncio$/i.test(t) ||
-            /^enviar mensaje al vendedor$/i.test(t) ||
-            /^anterior$/i.test(t) ||
-            /^siguiente$/i.test(t) ||
-            /^\d{1,4}\/\d{1,5}$/.test(t) ||
-            low === "inicio";
-
-          if (!uiBanned) {
-            anyCandidates.push({ t, top: r.top });
-            if (isPersonish(t)) candidates.push({ t, top: r.top });
-          }
-        }
-
-        const imgs = Array.from(document.querySelectorAll("img[alt]"));
-        for (const img of imgs) {
-          try {
-            if (!isVisible(img)) continue;
-            const r = img.getBoundingClientRect?.();
-            if (!r) continue;
-            if (r.bottom <= topY || r.top >= bottomY) continue;
-            if (r.left < leftX || r.right > rightX) continue;
-            const alt = norm(img.getAttribute("alt") || "");
-            if (!alt || alt.length < 3 || alt.length > 80) continue;
-            rawHits.push({ t: alt, top: r.top });
-            anyCandidates.push({ t: alt, top: r.top });
-            if (isPersonish(alt)) candidates.push({ t: alt, top: r.top });
-          } catch {}
-        }
-
-        candidates.sort((a, b) => a.top - b.top);
-        anyCandidates.sort((a, b) => a.top - b.top);
-
-        // Prefer person-like names, fallback to any non-UI text in the band (business names).
-        const seller_name = candidates[0]?.t ?? anyCandidates[0]?.t ?? null;
-
-        const text = (cardEl.textContent || "").toLowerCase();
-        const domHintsBusiness =
-          text.includes("sucursal") ||
-          text.includes("empresa") ||
-          text.includes("agencia") ||
-          text.includes("dealer");
-
-        return {
-          seller_name,
-          seller_is_business: domHintsBusiness,
-          source: best ? "card_ancestor_min_area" : "card_closest",
-          debug: {
-            card_rect: { left: cardRect.left, right: cardRect.right, top: cardRect.top, bottom: cardRect.bottom },
-            band: { topY, bottomY, leftX, rightX, headingTop: headingRect?.top ?? null },
-            candidates_count: candidates.length,
-            candidates_top: candidates.slice(0, 6).map((c) => c.t),
-            any_candidates_count: anyCandidates.length,
-            any_candidates_top: anyCandidates.slice(0, 10).map((c) => c.t),
-            raw_count: rawHits.length,
-            raw_top: rawHits
-              .sort((a, b) => a.top - b.top)
-              .slice(0, 10)
-              .map((c) => c.t),
-          },
-        };
-      })
-      .catch(() => null);
-
-    seller_name = normSpace(sellerMeta2?.seller_name || "") || null;
-    seller_is_business = Boolean(sellerMeta2?.seller_is_business) || isLikelyCommercialSellerName(seller_name);
-    debug.seller = { seller_name, seller_is_business, source: sellerMeta2?.source || "unknown", ...(sellerMeta2?.debug || {}) };
-
-    // Email input (required) — Encuentra24 sometimes uses type=text; don't assume type=email.
-    // We scope to the contact card to avoid grabbing search inputs elsewhere.
-    const emailLoc = card.locator(
-      [
-        "input[type='email']",
-        "input[placeholder*='mail' i]",
-        "input[placeholder*='e-mail' i]",
-        "input[name*='mail' i]",
-        "input[id*='mail' i]",
-        "input[autocomplete='email']",
-        "input[inputmode='email']",
-        // fallback: first input in the contact card (works when they omit types/attrs)
-        "input",
-      ].join(","),
-    ).first();
-
-    // The 2 side-by-side inputs: LEFT = name, RIGHT = phone.
-    // We force by placeholder: name placeholder contains "Nombre" on empty; once filled it shows value.
-    // Phone placeholder includes "Ej:" / "6123" / has country flag next to it; easiest is placeholder.
-    const nameLoc =
-      card.locator("input[placeholder*='Nombre' i]").first();
-
-    const phoneLoc =
-      card.locator("input[type='tel']").first()
-        .or(card.locator("input[placeholder*='Ej' i], input[placeholder*='6123' i], input[placeholder*='4567' i]").first());
-
-    const msgLoc = card.locator("textarea").first();
-
-    step("wait_inputs");
-    await emailLoc.waitFor({ timeout: delays.waitContactMs || 25000 });
-    await nameLoc.waitFor({ timeout: delays.waitContactMs || 25000 }).catch(() => {});
-    await phoneLoc.waitFor({ timeout: delays.waitContactMs || 25000 }).catch(() => {});
-    await snap(page, "02_contact_visible");
-
-    // ======== FILL (with verification)
-    step("fill_form_start");
-
-    // open network parsing window after we start filling (reduces false positives)
-    revealWindowOpenAt = Date.now();
-
-    const email = String(form.email || "pacho@pachosanchez.com");
-    const name = String(form.name || "Pacho");
-    const phone8 = String(form.phone8 || "67777777").replace(/\D/g, "");
-
-    // Email
-    await typeLikeHuman(emailLoc, email, delays.typingDelayMs || 90);
-    await sleep(rand(80, 200));
-    // Name (IMPORTANT: ensure it doesn't end up in phone)
-    await typeLikeHuman(nameLoc, name, delays.typingDelayMs || 90);
-    await sleep(rand(80, 200));
-    // Phone
-    await sleep(delays.beforePhoneTypeMs || 500);
-    await typeLikeHuman(phoneLoc, phone8, delays.typingDelayMs || 90);
-
-    // Message
-    if (await msgLoc.count().catch(() => 0)) {
-      await msgLoc.click({ timeout: 2000 }).catch(() => {});
-      await msgLoc.fill("Me interesa el anuncio. Por favor contáctame.").catch(() => {});
-    }
-
-    await sleep(delays.afterFillMs || 900);
-
-    // Verify values actually stuck (THIS is what you were missing)
-    const filled = await page.evaluate(() => {
-      const pick = (sels) => {
-        for (const s of sels) {
-          const el = document.querySelector(s);
-          if (el && (el.value ?? "").toString().trim().length >= 0) return el;
-        }
-        return null;
-      };
-      const emailEl =
-        pick([
-          "input[type='email']",
-          "input[placeholder*='mail' i]",
-          "input[placeholder*='e-mail' i]",
-          "input[name*='mail' i]",
-          "input[id*='mail' i]",
-          "input[autocomplete='email']",
-          "input",
-        ]) || null;
-
-      const nameInput = document.querySelector("input[placeholder*='Nombre' i]") || document.querySelectorAll("input")[1];
-      const phoneInput = document.querySelector("input[type='tel']") || document.querySelector("input[placeholder*='Ej' i]");
-      return {
-        email: emailEl?.value || "",
-        name: nameInput?.value || "",
-        phone: phoneInput?.value || "",
-      };
-    });
-
-    debug.fill = filled;
-
-    // If email didn’t stick, re-try once (common if overlay steals focus)
-    if (!String(filled.email || "").includes("@")) {
-      step("refill_email_retry", { filled });
-      await closeOverlays();
-      await typeLikeHuman(emailLoc, email, delays.typingDelayMs || 90);
-      await sleep(400);
-    }
-
-    // If name contains digits (your exact bug), refix: clear and type again
-    if (/\d/.test(String(filled.name || ""))) {
-      step("refill_name_fix_digits", { filled });
-      await nameLoc.fill("").catch(() => {});
-      await sleep(150);
-      await typeLikeHuman(nameLoc, name, delays.typingDelayMs || 90);
-      await sleep(250);
-    }
-
-    await snap(page, "03_filled");
-
-    // ========= OPTIONAL: submit "Contactar" to unlock phone/wa =========
-    // Many listings keep "Llamar/WhatsApp" visually present but inert until a message is submitted.
-    if (sendMessageBeforeReveal) {
-      step("pre_contactar_unlock");
-      await closeOverlays();
-      const contactBtn = locateActionByText("Contactar");
-      if (await contactBtn.count().catch(() => 0)) {
-        // try once; if it fails silently, we still continue to call/wa
-        await humanClick(contactBtn);
-        await sleep(1400);
-        didClickContactar = true;
-        await tryCapturePopup("after_contactar");
-        await scanDom("after_contactar");
-        await scanVisiblePhoneText("after_contactar");
-        await snap(page, "03b_after_contactar");
-      } else {
-        step("contactar_btn_not_found");
-      }
-    }
-
-    // ======== DOM scan STRICT
-    async function scanDom(where) {
-      const data = await page.evaluate(() => {
-        // Scope to the contact panel to avoid picking up footer/help numbers/ads.
-        const header = Array.from(document.querySelectorAll("h1,h2,h3,h4,div,section"))
-          .find((el) => (el.textContent || "").includes("Enviar mensaje al vendedor"));
-        const root = header ? (header.closest("section") || header.closest("div") || header) : document.body;
-
-        const telLinks = Array.from(root.querySelectorAll("a[href^='tel:']"))
-          .map((a) => a.getAttribute("href"))
-          .filter(Boolean);
-
-        const waLinks = Array.from(
-          root.querySelectorAll("a[href*='wa.me'],a[href*='whatsapp.com/send'],a[href*='api.whatsapp.com/send']"),
-        )
-          .map((a) => a.getAttribute("href"))
-          .filter(Boolean);
-
-        return { telLinks, waLinks };
-      });
-
-      for (const href of data.telLinks || []) {
-        const p = href.replace(/^tel:/i, "");
-        considerPhone(p, `dom_tel_${where}`, "DOM");
-      }
-      for (const href of data.waLinks || []) {
-        considerWa(href, `dom_wa_${where}`, "DOM");
-      }
-
-      debug.dom_hits.push({
-        where,
-        tel_n: (data.telLinks || []).length,
-        wa_n: (data.waLinks || []).length,
-      });
-    }
-
-    async function scanVisiblePhoneText(where) {
-      const data = await page.evaluate(() => {
-        const findFirstByText = (tag, needle) => {
-          const n = String(needle || "").toLowerCase();
-          const els = Array.from(document.querySelectorAll(tag));
-          for (const el of els) {
-            const t = (el.textContent || "").toLowerCase();
-            if (t.includes(n)) return el;
-          }
-          return null;
-        };
-
-        // Scope to the contact panel; after reveal the "Llamar" button text becomes a phone number
-        // and may no longer include the word "Llamar".
-        const header = Array.from(document.querySelectorAll("h1,h2,h3,h4,div,section"))
-          .find((el) => (el.textContent || "").includes("Enviar mensaje al vendedor"));
-        const root = header ? (header.closest("section") || header.closest("div") || header) : null;
-
-        const callEl =
-          (root ? root.querySelector("button, a, [role='button']") : null) ||
-          findFirstByText("button", "llamar") ||
-          findFirstByText("a", "llamar");
-
-        const call = callEl?.textContent || "";
-
-        // Collect all action button/link texts inside the panel (best signal for revealed phone)
-        const actionTexts = root
-          ? Array.from(root.querySelectorAll("button, a, [role='button']")).map((el) => (el.textContent || "").trim())
-          : [];
-        const actionsText = actionTexts.join(" | ");
-
-        // grab contact panel text (scoped), not whole page
-        const panelText = root ? (root.textContent || "") : "";
-
-        return { callText: call, actionsText, panelText };
-      });
-
-      for (const p of extractPhonesFromText(data.callText || "")) considerPhone(p, `visible_call_${where}`, "VISIBLE");
-      for (const p of extractPhonesFromText(data.actionsText || "")) considerPhone(p, `visible_actions_${where}`, "VISIBLE");
-      // panelText can be noisy; still useful if phone is shown as plain text. Seed phone is banned by isBannedE164.
-      for (const p of extractPhonesFromText(data.panelText || "")) considerPhone(p, `visible_panel_${where}`, "VISIBLE");
-
-      debug.dom_hits.push({
-        where: `visible_${where}`,
-        call_text_len: String(data.callText || "").length,
-        actions_text_len: String(data.actionsText || "").length,
-        panel_text_len: String(data.panelText || "").length,
-      });
-    }
-
-    async function tryCapturePopup(where) {
-      try {
-        const pop = await page.waitForEvent("popup", { timeout: 1200 });
-        const u = pop.url();
-        // Sometimes it navigates to wa.me or similar
-        for (const w of extractWaLinksFromText(u)) considerWa(w, `popup_${where}`, u);
-        // Sometimes it navigates to tel: (rare in desktop, but possible)
-        if (u && u.toLowerCase().startsWith("tel:")) {
-          considerPhone(u.replace(/^tel:/i, ""), `popup_${where}`, u);
-        }
-        await pop.close().catch(() => {});
-      } catch {
-        // no popup
-      }
-    }
-
-    // ======== CLICK CALL + WA (human)
-    step("click_llamar");
-    await closeOverlays();
-    const callBtn = locateActionByText("Llamar");
-    if (await callBtn.count().catch(() => 0)) {
-      const disabled = await isDisabled(callBtn);
-
-      // If disabled and we are allowed, try submitting "Contactar" first (often required to unlock call/wa).
-      if (disabled && sendMessageBeforeReveal) {
-        step("call_disabled_try_contactar");
-        const contactBtn = locateActionByText("Contactar");
-        if (await contactBtn.count().catch(() => 0)) {
-          await humanClick(contactBtn);
-          await sleep(1200);
-          didClickContactar = true;
-          await tryCapturePopup("after_contactar");
-          await scanDom("after_contactar");
-          await scanVisiblePhoneText("after_contactar");
-          await snap(page, "03b_after_contactar");
-        }
-      }
-
-      const beforeSnap = await getPanelSnapshot();
-      const beforePhoneN = phoneCandidates.size;
-      const beforeWaN = waCandidates.size;
-
-      let callRevealed = false;
-      for (let attempt = 1; attempt <= Math.max(1, maxCallClicks); attempt++) {
-        step("call_click_attempt", { attempt });
-        await closeOverlays();
-        await callBtn.scrollIntoViewIfNeeded().catch(() => {});
-        await sleep(rand(120, 260));
-        await humanClick(callBtn);
-        await sleep(delays.afterClickCallMs || 1800);
-        didClickCall = true;
-
-        await tryCapturePopup(`after_call_click_${attempt}`);
-        await scanDom(`after_call_click_${attempt}`);
-        await scanVisiblePhoneText(`after_call_click_${attempt}`);
-        await snap(page, `04_after_call_${attempt}`);
-
-        const afterSnap = await getPanelSnapshot();
-        const afterPhoneN = phoneCandidates.size;
-        const afterWaN = waCandidates.size;
-
-        const callTextChanged = String(afterSnap.callText || "") !== String(beforeSnap.callText || "");
-        const telIncreased = (afterSnap.telHrefs?.length || 0) > (beforeSnap.telHrefs?.length || 0);
-        const candidatesIncreased = afterPhoneN > beforePhoneN || afterWaN > beforeWaN;
-
-        if (callTextChanged || telIncreased || candidatesIncreased) {
-          callRevealed = true;
+    // Strict Stage-2 flow: contact box scoped only.
+    step("locate_contact_box");
+    const contactBoxTimeout = delays.waitContactMs || 25000;
+    const contactBoxCandidates = [
+      { selector: "form[id^='messageform_']", locator: page.locator("form[id^='messageform_']").first() },
+      { selector: ".d3-property-contact__form", locator: page.locator(".d3-property-contact__form").first() },
+      { selector: "[class*='contact' i]", locator: page.locator("[class*='contact' i]").first() },
+    ];
+    let contactBox = null;
+    let matchedContactBoxSelector = null;
+
+    // Race all selectors in parallel with a single shared timeout (not 25s × 3 serial).
+    const raceResult = await Promise.race(
+      contactBoxCandidates.map((candidate) =>
+        candidate.locator
+          .waitFor({ timeout: contactBoxTimeout })
+          .then(() => candidate)
+          .catch(() => null)
+      )
+    ).catch(() => null);
+
+    if (raceResult) {
+      contactBox = raceResult.locator;
+      matchedContactBoxSelector = raceResult.selector;
+    } else {
+      // All timed out; fast isVisible sweep in priority order.
+      for (const candidate of contactBoxCandidates) {
+        const visible = await candidate.locator.isVisible().catch(() => false);
+        if (visible) {
+          contactBox = candidate.locator;
+          matchedContactBoxSelector = candidate.selector;
           break;
         }
-
-        debug.soft_block = debug.soft_block || {};
-        debug.soft_block.inert_call_clicks = attempt;
-        step("call_inert_no_reveal", {
-          attempt,
-          before_call_text: beforeSnap.callText || "",
-          after_call_text: afterSnap.callText || "",
-          before_tel_n: beforeSnap.telHrefs?.length || 0,
-          after_tel_n: afterSnap.telHrefs?.length || 0,
-          before_candidates: { phone: beforePhoneN, wa: beforeWaN },
-          after_candidates: { phone: afterPhoneN, wa: afterWaN },
-        });
-
-        await sleep(rand(900, 1600));
       }
+    }
 
-      if (!callRevealed) {
-        debug.soft_block = debug.soft_block || {};
-        debug.soft_block.suspected = true;
-        debug.soft_block.kind = debug.soft_block.kind || "inert_call_reveal";
+    // If the broad selector won, prefer a more specific one if also visible.
+    if (matchedContactBoxSelector === "[class*='contact' i]") {
+      for (const candidate of contactBoxCandidates.slice(0, 2)) {
+        const visible = await candidate.locator.isVisible().catch(() => false);
+        if (visible) {
+          contactBox = candidate.locator;
+          matchedContactBoxSelector = candidate.selector;
+          break;
+        }
       }
-    } else {
-      step("call_btn_not_found");
     }
-
-    step("click_whatsapp");
-    await closeOverlays();
-    const waBtn = locateActionByText("WhatsApp");
-    if (await waBtn.count().catch(() => 0)) {
-      await humanClick(waBtn);
-      await sleep(1200);
-      didClickWa = true;
-      await tryCapturePopup("after_wa_click");
-      await scanDom("after_wa_click");
-      await scanVisiblePhoneText("after_wa_click");
-      await snap(page, "05_after_wa");
-    } else {
-      step("wa_btn_not_found");
-    }
-
-    step("wait_late_xhr");
-    await sleep(delays.waitTelMaxMs || 7000);
-    await scanDom("final_scan");
-    await scanVisiblePhoneText("final_scan");
-
-    // ======== Pick best (prefer revealed-after-click; avoid "support"/noise)
-    const phoneEntries = Array.from(phoneCandidates.entries()); // [e164, {where,url}]
-    const waEntries = Array.from(waCandidates.entries()); // [url, {where,url}]
-
-    const isTrustedPhoneWhere = (w) => {
-      const s = String(w || "");
-      // accept only after actual interactions; final_scan only if we clicked something
-      if (s.includes("after_call_click")) return true;
-      if (s.includes("after_contactar")) return true;
-      if (s.includes("after_wa_click")) return true;
-      if (s.includes("popup_after_call_click")) return true;
-      if (s.includes("popup_after_contactar")) return true;
-      if (s.includes("popup_after_wa_click")) return true;
-      if (s.includes("final_scan")) return didClickCall || didClickWa || didClickContactar;
-      return false;
-    };
-
-    const isTrustedWaWhere = (w) => {
-      const s = String(w || "");
-      if (s.includes("after_wa_click")) return true;
-      if (s.includes("popup_after_wa_click")) return true;
-      if (s.includes("after_contactar")) return true;
-      if (s.includes("final_scan")) return didClickWa || didClickContactar;
-      return false;
-    };
-
-    const pickPhone = () => {
-      const trusted = phoneEntries.filter(([_, meta]) => isTrustedPhoneWhere(meta?.where));
-      // Prefer DOM tel links specifically
-      const prefer = (arr) =>
-        arr.sort((a, b) => {
-          const aw = String(a[1]?.where || "");
-          const bw = String(b[1]?.where || "");
-          const aTel = aw.includes("dom_tel") ? 1 : 0;
-          const bTel = bw.includes("dom_tel") ? 1 : 0;
-          if (aTel !== bTel) return bTel - aTel;
-          const aAfter = aw.includes("after_call_click") ? 1 : 0;
-          const bAfter = bw.includes("after_call_click") ? 1 : 0;
-          if (aAfter !== bAfter) return bAfter - aAfter;
-          return 0;
-        });
-      const best = prefer(trusted)[0];
-      return best ? best[0] : null;
-    };
-
-    const pickWa = () => {
-      const trusted = waEntries.filter(([_, meta]) => isTrustedWaWhere(meta?.where));
-      return trusted[0]?.[0] ?? null;
-    };
-
-    const phone_e164 = pickPhone();
-    const wa_link = pickWa();
-
-    const ok = Boolean(phone_e164) || Boolean(wa_link);
-
-    const method =
-      phone_e164 ? "dom_tel_or_net" :
-      wa_link ? "dom_wa_or_net" :
-      "no_contact_revealed";
-
-    let reason = "";
-    if (!ok) {
-      if (debug?.soft_block?.suspected) reason = "soft_block_inert_reveal";
-      else reason = "no_phone_no_wa";
-    }
-
-    // dummy protection
-    if (phone_e164 && FORM_PHONE_E164 && phone_e164 === FORM_PHONE_E164) {
+    const contactBoxReady = Boolean(contactBox);
+    if (!contactBoxReady) {
+      step("contact_box_not_found");
       return {
         ok: false,
         stage: 2,
-        method: "dummy_phone_detected",
-        reason: "returned_phone_equals_form_phone",
-        phone_e164,
+        method: "contact_box_not_found",
+        reason: "contact_box_not_found",
+        phone_e164: null,
         wa_link: null,
         seller_name,
         seller_is_business,
         debug,
+        elapsed_ms: Date.now() - t0,
       };
     }
 
-    // listing id protection
-    if (phone_e164 && listing_id && String(phone_e164).includes(String(listing_id))) {
+    debug.contact_box_selector = matchedContactBoxSelector;
+    step("contact_box_found", { selector: matchedContactBoxSelector });
+
+    // Seller name + "Tipo de vendedor" via page.evaluate for reliability.
+    // The seller profile is in the sidebar near the contact form but often NOT inside it.
+    const sellerInfo = await page.evaluate(() => {
+      let name = null;
+      let nameSource = "none";
+
+      // Helper: get clean, short text from an element (only direct text, not deep descendants)
+      function cleanText(el) {
+        // Use innerText (visible text only) if short, or fall back to direct text nodes
+        const inner = (el.innerText || "").trim();
+        if (inner.length >= 3 && inner.length <= 80) return inner;
+        // Try direct child text nodes only (avoids dropdown/script text)
+        let direct = "";
+        for (const n of el.childNodes) {
+          if (n.nodeType === 3) direct += n.textContent;
+        }
+        direct = direct.trim();
+        if (direct.length >= 3 && direct.length <= 80) return direct;
+        return null;
+      }
+
+      // Strategy A: Look for a profile link near the contact panel
+      const contactPanel = document.querySelector("[class*='contact' i]");
+      if (contactPanel) {
+        let container = contactPanel.parentElement;
+        for (let i = 0; i < 3 && container; i++) {
+          const links = container.querySelectorAll("a[href]");
+          for (const link of links) {
+            const href = link.getAttribute("href") || "";
+            // Profile links on ENC24 are like /username or /moisesrnovoa
+            if (/^\/[a-zA-Z0-9_-]+$/.test(href) && !href.startsWith("/panama") && !href.startsWith("/login")) {
+              const text = cleanText(link);
+              if (text && text.length >= 3 && text.length <= 60) {
+                name = text;
+                nameSource = "profile_link";
+                break;
+              }
+            }
+          }
+          if (name) break;
+          container = container.parentElement;
+        }
+      }
+
+      // Strategy B: heading/strong near contact panel — only short text (skip garbage)
+      if (!name) {
+        const panels = document.querySelectorAll("[class*='contact' i]");
+        for (const panel of panels) {
+          const parent = panel.parentElement;
+          if (!parent) continue;
+          for (const el of parent.querySelectorAll("h1,h2,h3,h4,h5,strong,b")) {
+            const t = cleanText(el);
+            if (t && t.length >= 3 && t.length <= 60
+              && !/Enviar mensaje|Contactar|Llamar|WhatsApp|recaptcha|function |Afghanistan|results found/i.test(t)) {
+              name = t;
+              nameSource = "parent_heading";
+              break;
+            }
+          }
+          if (name) break;
+        }
+      }
+
+      // 2) "Tipo de vendedor" from listing details
+      let sellerType = null;
+      const allEls = document.querySelectorAll("dt, th, span, label, div, p");
+      for (const el of allEls) {
+        // Only check leaf-ish elements with short text
+        const t = (el.childNodes.length <= 2 && el.textContent.trim().length < 40)
+          ? el.textContent.trim() : null;
+        if (t && /^Tipo de vendedor$/i.test(t)) {
+          const next = el.nextElementSibling;
+          if (next) {
+            const nText = (next.innerText || next.textContent || "").trim();
+            if (nText.length <= 100) { sellerType = nText; break; }
+          }
+          const parent = el.parentElement;
+          if (parent) {
+            const p = parent.querySelector("dd, p, span");
+            if (p && p !== el) {
+              const pText = (p.innerText || p.textContent || "").trim();
+              if (pText.length <= 100) { sellerType = pText; break; }
+            }
+          }
+        }
+      }
+      return { name, nameSource, sellerType };
+    }).catch(() => ({ name: null, nameSource: "error", sellerType: null }));
+
+    // Safety: reject garbage seller names (dropdown text, recaptcha, scripts, etc.)
+    let rawSellerName = normSpace(sellerInfo.name || "") || null;
+    if (rawSellerName && (rawSellerName.length > 80 || /Afghanistan|recaptcha|function\s*\(|results found|\+\d{2,}/i.test(rawSellerName))) {
+      rawSellerName = null;
+    }
+    // Reject car-title-like names: contain a 4-digit year → not a real seller name
+    if (rawSellerName && /\b(20[1-3]\d|19\d{2})\b/.test(rawSellerName)) {
+      step("seller_name_looks_like_car_title", { rawSellerName });
+      rawSellerName = null;
+    }
+    // Reject names that are car brand/model (not a person's name)
+    if (rawSellerName && /\b(BMW|Toyota|Honda|Hyundai|Kia|Ford|Chevrolet|Nissan|Mazda|Mercedes|Audi|Volkswagen|VW|Lexus|Jeep|Suzuki|Mitsubishi|Subaru|Porsche|Volvo|Land Rover|Range Rover|Jaguar|Fiat|Peugeot|Renault|Chery|MG|BYD|Sportage|Tucson|Corolla|Civic|RAV4|CR-V|CRV|Hilux|Fortuner|Wrangler|Tacoma|Camry|Sentra|Versa)\b/i.test(rawSellerName) && !/\b[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]{2,}\s+[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]{2,}\b/.test(rawSellerName)) {
+      step("seller_name_looks_like_car_brand", { rawSellerName });
+      rawSellerName = null;
+    }
+    // Reject "Se Vende" / "En Venta" prefixed names (listing titles)
+    if (rawSellerName && /^(Se\s+Vende|En\s+Venta|Vendo|For\s+Sale)\b/i.test(rawSellerName)) {
+      step("seller_name_looks_like_listing_title", { rawSellerName });
+      rawSellerName = null;
+    }
+    // Reject "propietario propietario" (duplicated word)
+    if (rawSellerName && /^(\w+)\s+\1$/i.test(rawSellerName)) {
+      step("seller_name_duplicated_word", { rawSellerName });
+      rawSellerName = null;
+    }
+    // Also reject generic UI labels captured by mistake
+    if (rawSellerName && /^(Detalles|Descripci[oó]n|Contacto|Enviar|Publicado|Ubicaci[oó]n)$/i.test(rawSellerName)) {
+      rawSellerName = null;
+    }
+    seller_name = rawSellerName;
+    const sellerTypeIsDealer = /distribuidor|concesionario|profesional|agencia|dealer/i.test(sellerInfo.sellerType || "");
+    seller_is_business = isLikelyCommercialSellerName(seller_name) || sellerTypeIsDealer;
+    debug.seller = { seller_name, seller_is_business, source: sellerInfo.nameSource, seller_type: sellerInfo.sellerType || null };
+
+    const emailLocators = [
+      "input[type='email']",
+      "input[placeholder*='mail' i]",
+      "input[placeholder*='e-mail' i]",
+      "input[name*='mail' i]",
+      "input[id*='mail' i]",
+    ];
+    const nameLocators = [
+      "input[placeholder*='Nombre' i]",
+      "input[name*='name' i]",
+      "input[name*='nombre' i]",
+      "input[id*='name' i]",
+      "input[id*='nombre' i]",
+    ];
+    const phoneLocators = [
+      "input[placeholder*='Ej: 6123-4567' i]",
+      "input[type='tel']",
+    ];
+
+    const pickScoped = async (scopedRoot, selectors) => {
+      for (const selector of selectors) {
+        const candidate = scopedRoot.locator(selector).first();
+        const visible = await candidate.isVisible().catch(() => false);
+        if (visible) return { locator: candidate, selector };
+      }
+      return { locator: null, selector: null };
+    };
+
+    const emailPicked = await pickScoped(contactBox, emailLocators);
+    const namePicked = await pickScoped(contactBox, nameLocators);
+    const phonePicked = await pickScoped(contactBox, phoneLocators);
+    debug.matched_inputs = {
+      email: emailPicked.selector,
+      name: namePicked.selector,
+      phone: phonePicked.selector,
+    };
+    step("inputs_picked", debug.matched_inputs);
+
+    if (!emailPicked.locator || !namePicked.locator || !phonePicked.locator) {
+      step("contact_inputs_not_found", debug.matched_inputs);
       return {
         ok: false,
         stage: 2,
-        method: "listing_id_phone_detected",
-        reason: "returned_phone_contains_listing_id",
+        method: "contact_inputs_not_found",
+        reason: "contact_inputs_not_found",
         phone_e164: null,
-        wa_link,
+        wa_link: null,
         seller_name,
         seller_is_business,
         debug,
+        elapsed_ms: Date.now() - t0,
       };
     }
 
+    // Keep XHR payloads for strict fallback (only used if DOM has no tel/wa).
+    const xhrPayloadTexts = [];
+    page.on("response", async (res) => {
+      try {
+        const url = res.url();
+        // Only capture XHR from encuentra24.com to avoid false positives from ad/tracking pixels
+        if (!/encuentra24\.com/i.test(url)) return;
+
+        const req = res.request();
+        if (!req || req.resourceType() !== "xhr") return;
+        const st = res.status();
+        if (st < 200 || st >= 400) return;
+        const ct = String(res.headers()["content-type"] || "").toLowerCase();
+        if (!ct.includes("json") && !ct.includes("text")) return;
+        const body = await res.text().catch(() => null);
+        if (body) xhrPayloadTexts.push(body);
+      } catch {}
+    });
+
+    step("fill_form_start");
+    revealWindowOpenAt = Date.now();
+    const email = String(form.email || "pacho@pachosanchez.com");
+    const name = String(form.name || "Pacho");
+    const phone8 = "67777777";
+
+    await typeLikeHuman(emailPicked.locator, email, delays.typingDelayMs || 90);
+    await sleep(120);
+    await typeLikeHuman(namePicked.locator, name, delays.typingDelayMs || 90);
+    await sleep(delays.beforePhoneTypeMs || 600);
+    await typeLikeHuman(phonePicked.locator, phone8, delays.typingDelayMs || 90);
+    debug.fill = { email, name, phone: phone8 };
+    step("filled_form");
+
+    await sleep(delays.afterFillMs || 2000);
+
+    await closeOverlays();
+    // Early check: some listings already show wa.me links before form submission.
+    // IMPORTANT: only look INSIDE the contactBox — the site may have its own global WA button.
+    step("early_wa_check");
+    const earlyWaHref = await contactBox.locator("a[href*='wa.me'],a[href*='api.whatsapp.com/send']").first().getAttribute("href").catch(() => null);
+    if (earlyWaHref) {
+      debug.early_wa_href = earlyWaHref;
+      step("early_wa_found", { earlyWaHref });
+    }
+
+    step("click_llamar_start");
+    const callishSpecs = [
+      { label: "Llamar", re: /llamar/i },
+      { label: "Ver teléfono", re: /ver teléfono/i },
+      { label: "Ver telefono", re: /ver telefono/i },
+      { label: "Mostrar teléfono", re: /mostrar tel/i },
+      { label: "WhatsApp", re: /whatsapp/i },
+      { label: "Contactar", re: /contactar/i },
+    ];
+    const panelAncestor = contactBox.locator("xpath=ancestor::*[self::section or self::div or self::aside or self::article][1]").first();
+    const searchRoots = [
+      { name: "contactBox", root: contactBox },
+      { name: "ancestor_panel", root: panelAncestor },
+    ];
+    let callishBtn = null;
+    let callishLabel = null;
+    for (const searchRoot of searchRoots) {
+      for (const spec of callishSpecs) {
+        const candidate = searchRoot.root
+          .locator("button, a, span, div, [role='button']")
+          .filter({ hasText: spec.re })
+          .first();
+        const visible = await candidate.isVisible().catch(() => false);
+        if (visible) {
+          callishBtn = candidate;
+          callishLabel = spec.label;
+          break;
+        }
+      }
+      if (callishBtn) break;
+    }
+    const callishVisible = Boolean(callishBtn);
+    if (!callishVisible) {
+      debug.clicked_callish = false;
+      debug.callish_label = "";
+      step("llamar_not_found");
+      // Even without a Llamar button, if we found a WA link earlier, return it.
+      if (earlyWaHref && !isSeedLikeValue(earlyWaHref) && !(listing_id && String(earlyWaHref).includes(String(listing_id)))) {
+        step("early_wa_fallback");
+        return {
+          ok: true,
+          stage: 2,
+          method: "early_wa_link",
+          reason: "",
+          phone_e164: null,
+          wa_link: earlyWaHref,
+          seller_name,
+          seller_is_business,
+          debug,
+          elapsed_ms: Date.now() - t0,
+        };
+      }
+      return {
+        ok: false,
+        stage: 2,
+        method: "llamar_not_found",
+        reason: "llamar_not_found",
+        phone_e164: null,
+        wa_link: null,
+        seller_name,
+        seller_is_business,
+        debug,
+        elapsed_ms: Date.now() - t0,
+      };
+    }
+
+    await callishBtn.scrollIntoViewIfNeeded().catch(() => {});
+    await callishBtn.hover({ timeout: 2000 }).catch(() => {});
+    const callBox = await callishBtn.boundingBox().catch(() => null);
+    if (callBox) {
+      const x = callBox.x + callBox.width * 0.5;
+      const y = callBox.y + callBox.height * 0.5;
+      await page.mouse.move(x, y, { steps: rand(8, 16) }).catch(() => {});
+      await page.mouse.down().catch(() => {});
+      await sleep(100);
+      await page.mouse.up().catch(() => {});
+      debug.clicked_llamar = true;
+      debug.clicked_callish = true;
+      debug.callish_label = callishLabel || "";
+      step("clicked_llamar");
+    } else {
+      debug.clicked_llamar = false;
+      debug.clicked_callish = false;
+      debug.callish_label = callishLabel || "";
+      step("llamar_click_failed_no_bbox");
+    }
+    await sleep(delays.afterClickCallMs || 1800);
+
+    // Poll for DOM tel/wa appearance up to waitTelMaxMs (default 7s).
+    // afterClickCallMs is the minimum wait; poll for the remainder.
+    const waitTelMaxMs = delays.waitTelMaxMs || 7000;
+    const pollIntervalMs = 500;
+    const pollDeadline = Date.now() + Math.max(0, waitTelMaxMs - (delays.afterClickCallMs || 1800));
+    let polledTelHref = null;
+    let polledWaHref = null;
+    let polledTextPhone = null; // phone found as plain TEXT in span/button (not a tel: link)
+
+    while (Date.now() < pollDeadline) {
+      // 1) Check for tel: links
+      polledTelHref = await contactBox.locator("a[href^='tel:']").first().getAttribute("href").catch(() => null);
+      if (polledTelHref) break;
+
+      // 2) Check for wa.me links
+      polledWaHref = await contactBox
+        .locator("a[href*='wa.me'],a[href*='api.whatsapp.com/send']")
+        .first()
+        .getAttribute("href")
+        .catch(() => null);
+      if (polledWaHref) break;
+
+      // 3) Check for phone appearing as TEXT in the callish button/span area.
+      //    After clicking "Llamar", ENC24 replaces the button text with the actual
+      //    phone number (e.g. "📞 +50765774854") — NOT as a tel: href link.
+      if (callishBtn) {
+        const btnText = await callishBtn.textContent().catch(() => null);
+        if (btnText) {
+          const textPhones = extractPhonesFromText(btnText);
+          for (const tp of textPhones) {
+            if (!isSeedLikeValue(tp) && !isBannedE164(tp)) {
+              polledTextPhone = tp;
+              break;
+            }
+          }
+        }
+        // Also check the parent element (the button area might wrap the span)
+        if (!polledTextPhone) {
+          const parentText = await callishBtn.locator("xpath=..").textContent().catch(() => null);
+          if (parentText) {
+            const parentPhones = extractPhonesFromText(parentText);
+            for (const tp of parentPhones) {
+              if (!isSeedLikeValue(tp) && !isBannedE164(tp)) {
+                polledTextPhone = tp;
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (polledTextPhone) break;
+
+      // 4) Broader scan: any span/button/div inside contactBox with phone-like text
+      if (!polledTextPhone) {
+        const allBtnTexts = await contactBox
+          .locator("button, span, [role='button'], a, div.phone, div.tel")
+          .allTextContents()
+          .catch(() => []);
+        for (const txt of allBtnTexts) {
+          const phones = extractPhonesFromText(txt);
+          for (const tp of phones) {
+            if (!isSeedLikeValue(tp) && !isBannedE164(tp)) {
+              polledTextPhone = tp;
+              break;
+            }
+          }
+          if (polledTextPhone) break;
+        }
+      }
+      if (polledTextPhone) break;
+
+      await sleep(pollIntervalMs);
+    }
+    step("poll_dom_complete", {
+      polledTelHref: polledTelHref || null,
+      polledWaHref: polledWaHref || null,
+      polledTextPhone: polledTextPhone || null,
+    });
+
+    // Strict extraction order:
+    // A) contactBox tel:
+    const telHref = polledTelHref
+      || await contactBox.locator("a[href^='tel:']").first().getAttribute("href").catch(() => null);
+    if (telHref) {
+      step("extract_tel_dom", { telHref });
+      const e164 = toPanamaE164(String(telHref).replace(/^tel:/i, ""));
+      const seedRejected = isSeedLikeValue(e164 || telHref);
+      const banned = isBannedE164(e164);
+      debug.seed_rejected = seedRejected;
+      debug.banned_e164 = banned;
+      if (seedRejected || banned) {
+        step("extract_tel_dom_rejected", { seedRejected, banned, e164 });
+        // Don't return failed here — continue to other extraction paths.
+      } else if (e164) {
+        return {
+          ok: true,
+          stage: 2,
+          method: "dom_tel",
+          reason: "",
+          phone_e164: e164,
+          wa_link: null,
+          seller_name,
+          seller_is_business,
+          debug,
+          elapsed_ms: Date.now() - t0,
+        };
+      }
+    }
+
+    // A2) Phone found as TEXT in span/button after Llamar click.
+    //     ENC24 replaces "Llamar" text with the actual phone (e.g. "📞 +50765774854").
+    if (polledTextPhone) {
+      step("extract_text_phone", { polledTextPhone });
+      // polledTextPhone is already validated E.164 from extractPhonesFromText + toPanamaE164
+      // and was pre-filtered by isSeedLikeValue + isBannedE164 in the polling loop.
+      return {
+        ok: true,
+        stage: 2,
+        method: "dom_text_phone",
+        reason: "",
+        phone_e164: polledTextPhone,
+        wa_link: null,
+        seller_name,
+        seller_is_business,
+        debug,
+        elapsed_ms: Date.now() - t0,
+      };
+    }
+
+    // Also do a one-shot broader text scan of contactBox for phone numbers
+    // (catches cases where phone appears in any element as text, not just callish area)
+    if (!polledTextPhone && !telHref) {
+      const contactBoxText = await contactBox.textContent().catch(() => null);
+      if (contactBoxText) {
+        const cbPhones = extractPhonesFromText(contactBoxText);
+        for (const cbp of cbPhones) {
+          if (isSeedLikeValue(cbp) || isBannedE164(cbp)) continue;
+          step("extract_contactbox_text_phone", { phone: cbp });
+          return {
+            ok: true,
+            stage: 2,
+            method: "dom_text_phone",
+            reason: "",
+            phone_e164: cbp,
+            wa_link: null,
+            seller_name,
+            seller_is_business,
+            debug,
+            elapsed_ms: Date.now() - t0,
+          };
+        }
+      }
+    }
+
+    // B) contactBox wa:
+    const waHref = polledWaHref
+      || await contactBox
+        .locator("a[href*='wa.me'],a[href*='api.whatsapp.com/send']")
+        .first()
+        .getAttribute("href")
+        .catch(() => null);
+    if (waHref) {
+      step("extract_wa_dom", { waHref });
+      const seedRejected = isSeedLikeValue(waHref);
+      // Check if WA link contains listing ID (e.g. wa.me/50731854815 where 31854815 is listing ID)
+      const waContainsListingId = listing_id && String(waHref).includes(String(listing_id));
+      debug.seed_rejected = seedRejected;
+      if (seedRejected || waContainsListingId) {
+        step("extract_wa_dom_rejected", { seedRejected, waContainsListingId });
+      } else {
+        return {
+          ok: true,
+          stage: 2,
+          method: "dom_wa",
+          reason: "",
+          phone_e164: null,
+          wa_link: waHref,
+          seller_name,
+          seller_is_business,
+          debug,
+          elapsed_ms: Date.now() - t0,
+        };
+      }
+    }
+
+    // C) Panel snapshot fallback: broader DOM search via page.evaluate.
+    step("extract_panel_snapshot_start");
+    const panelSnap = await getPanelSnapshot();
+    if (panelSnap.ok) {
+      step("extract_panel_snapshot_result", {
+        telHrefs: panelSnap.telHrefs.length,
+        waHrefs: panelSnap.waHrefs.length,
+      });
+
+      for (const href of panelSnap.telHrefs) {
+        const e164 = toPanamaE164(String(href).replace(/^tel:/i, ""));
+        if (!e164) continue;
+        if (isSeedLikeValue(e164 || href)) continue;
+        if (isBannedE164(e164)) continue;
+        step("extract_panel_tel", { href, e164 });
+        return {
+          ok: true,
+          stage: 2,
+          method: "panel_tel",
+          reason: "",
+          phone_e164: e164,
+          wa_link: null,
+          seller_name,
+          seller_is_business,
+          debug,
+          elapsed_ms: Date.now() - t0,
+        };
+      }
+
+      for (const href of panelSnap.waHrefs) {
+        if (isSeedLikeValue(href)) continue;
+        if (listing_id && String(href).includes(String(listing_id))) continue;
+        step("extract_panel_wa", { href });
+        return {
+          ok: true,
+          stage: 2,
+          method: "panel_wa",
+          reason: "",
+          phone_e164: null,
+          wa_link: href,
+          seller_name,
+          seller_is_business,
+          debug,
+          elapsed_ms: Date.now() - t0,
+        };
+      }
+    } else {
+      step("extract_panel_snapshot_no_root");
+    }
+
+    // C2) early_wa fallback: if we found a wa.me link inside the contactBox before
+    //     Llamar click and all DOM paths failed, use it before falling to noisy net candidates.
+    //     (earlyWaHref is now scoped to contactBox so it's the seller's WA, not the site's.)
+    if (earlyWaHref && !isSeedLikeValue(earlyWaHref) && !(listing_id && String(earlyWaHref).includes(String(listing_id)))) {
+      step("early_wa_fallback_before_net", { earlyWaHref });
+      return {
+        ok: true,
+        stage: 2,
+        method: "early_wa_link",
+        reason: "",
+        phone_e164: null,
+        wa_link: earlyWaHref,
+        seller_name,
+        seller_is_business,
+        debug,
+        elapsed_ms: Date.now() - t0,
+      };
+    }
+
+    // D) Candidate maps from network responses (first handler populates these).
+    step("extract_candidate_maps_start", {
+      phone_candidates: phoneCandidates.size,
+      wa_candidates: waCandidates.size,
+    });
+
+    if (phoneCandidates.size > 0) {
+      let bestPhone = null;
+      let bestPhoneMeta = null;
+      const phonePrio = (w) => {
+        const s = String(w || "");
+        if (s.includes("dom_tel_after_call_click")) return 100;
+        if (s.includes("dom_tel_final_scan")) return 95;
+        if (s.includes("visible_call_after_call_click")) return 90;
+        if (s.includes("visible_panel_after_call_click")) return 85;
+        if (s.includes("popup_after_call_click")) return 80;
+        if (s.includes("after_call_click")) return 75;
+        if (s.includes("after_contactar")) return 60;
+        if (s.includes("after_wa_click")) return 55;
+        if (s.includes("net_key_")) return 40;
+        if (s.includes("net_json")) return 30;
+        if (s.includes("net_text")) return 10;
+        return 0;
+      };
+      for (const [e164, meta] of phoneCandidates.entries()) {
+        if (isSeedLikeValue(e164)) continue;
+        if (isBannedE164(e164)) continue;
+        if (isSuspiciousPhone(e164, meta.where)) continue;
+        if (!bestPhone || phonePrio(meta.where) > phonePrio(bestPhoneMeta.where)) {
+          bestPhone = e164;
+          bestPhoneMeta = meta;
+        }
+      }
+      if (bestPhone) {
+        step("extract_candidate_phone", { phone: bestPhone, where: bestPhoneMeta.where });
+        return {
+          ok: true,
+          stage: 2,
+          method: "net_candidate_phone",
+          reason: "",
+          phone_e164: bestPhone,
+          wa_link: null,
+          seller_name,
+          seller_is_business,
+          debug: { ...debug, candidate_where: bestPhoneMeta.where },
+          elapsed_ms: Date.now() - t0,
+        };
+      }
+    }
+
+    if (waCandidates.size > 0) {
+      const waPrio = (w) => {
+        const s = String(w || "");
+        if (s.includes("popup_after_wa_click")) return 100;
+        if (s.includes("dom_wa_after_wa_click")) return 90;
+        if (s.includes("after_wa_click")) return 80;
+        if (s.includes("after_contactar")) return 60;
+        if (s.includes("dom_wa_final_scan")) return 40;
+        if (s.includes("net_json")) return 30;
+        if (s.includes("net_text")) return 10;
+        return 0;
+      };
+      let bestWa = null;
+      let bestWaMeta = null;
+      for (const [wa, meta] of waCandidates.entries()) {
+        if (isSeedLikeValue(wa)) continue;
+        if (listing_id && String(wa).includes(String(listing_id))) continue;
+        if (!bestWa || waPrio(meta.where) > waPrio(bestWaMeta.where)) {
+          bestWa = wa;
+          bestWaMeta = meta;
+        }
+      }
+      if (bestWa) {
+        step("extract_candidate_wa", { wa: bestWa, where: bestWaMeta.where });
+        return {
+          ok: true,
+          stage: 2,
+          method: "net_candidate_wa",
+          reason: "",
+          phone_e164: null,
+          wa_link: bestWa,
+          seller_name,
+          seller_is_business,
+          debug: { ...debug, candidate_where: bestWaMeta.where },
+          elapsed_ms: Date.now() - t0,
+        };
+      }
+    }
+
+    // E) fallback from XHR text payloads only if no DOM tel/wa found.
+    step("extract_xhr_fallback_start", { xhr_payloads: xhrPayloadTexts.length });
+    for (const body of xhrPayloadTexts) {
+      const phones = extractPhonesFromText(body);
+      for (const p of phones) {
+        const e164 = toPanamaE164(p);
+        if (!e164) continue;
+        if (isSeedLikeValue(e164)) continue;
+        if (isBannedE164(e164)) continue;
+        return {
+          ok: true,
+          stage: 2,
+          method: "xhr_phone",
+          reason: "",
+          phone_e164: e164,
+          wa_link: null,
+          seller_name,
+          seller_is_business,
+          debug: { ...debug, seed_rejected: false },
+          elapsed_ms: Date.now() - t0,
+        };
+      }
+      const waLinks = extractWaLinksFromText(body);
+      for (const wa of waLinks) {
+        if (isSeedLikeValue(wa)) continue;
+        if (listing_id && String(wa).includes(String(listing_id))) continue;
+        return {
+          ok: true,
+          stage: 2,
+          method: "xhr_wa",
+          reason: "",
+          phone_e164: null,
+          wa_link: wa,
+          seller_name,
+          seller_is_business,
+          debug: { ...debug, seed_rejected: false },
+          elapsed_ms: Date.now() - t0,
+        };
+      }
+    }
+
     return {
-      ok,
+      ok: false,
       stage: 2,
-      method,
-      reason,
-      phone_e164,
-      wa_link,
+      method: "no_contact_revealed",
+      reason: "no_phone_no_wa",
+      phone_e164: null,
+      wa_link: null,
       seller_name,
       seller_is_business,
       debug,
@@ -1130,4 +1299,39 @@ export async function resolveEncuentra24PhoneFromListing(listingUrl, opts = {}) 
       }
     } catch {}
   }
+}
+
+const __filename = fileURLToPath(import.meta.url);
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  const listingUrl = process.argv[2] || process.env.ENC24_DEBUG_URL || "";
+  if (!listingUrl) {
+    console.error("ENC24_DEBUG missing listing URL");
+    process.exit(1);
+  }
+
+  const result = await resolveEncuentra24PhoneFromListing(listingUrl, {
+    headless: String(process.env.HEADLESS || "1") !== "0",
+    saveShots: Number(process.env.SAVE_SHOTS || 0),
+    delays: {
+      waitContactMs: Number(process.env.ENC24_WAIT_CONTACT_MS || 25000),
+      afterClickCallMs: Number(process.env.ENC24_AFTER_CLICK_CALL_MS || 1800),
+      typingDelayMs: Number(process.env.ENC24_TYPING_DELAY_MS || 90),
+    },
+    form: {
+      email: process.env.ENC24_FORM_EMAIL || "pacho@pachosanchez.com",
+      name: process.env.ENC24_FORM_NAME || "Pacho",
+      phone8: "67777777",
+    },
+  });
+
+  console.log("ENC24_DEBUG contactBox_selector=", result?.debug?.contact_box_selector || "");
+  console.log("ENC24_DEBUG email_selector=", result?.debug?.matched_inputs?.email || "");
+  console.log("ENC24_DEBUG name_selector=", result?.debug?.matched_inputs?.name || "");
+  console.log("ENC24_DEBUG phone_selector=", result?.debug?.matched_inputs?.phone || "");
+  console.log("ENC24_DEBUG clicked_llamar=", Boolean(result?.debug?.clicked_llamar));
+  console.log("ENC24_DEBUG clicked_callish=", Boolean(result?.debug?.clicked_callish), "label=", result?.debug?.callish_label || "");
+  console.log("ENC24_DEBUG tel_or_wa=", result?.phone_e164 || result?.wa_link || "");
+  console.log("ENC24_DEBUG seed_rejected=", Boolean(result?.debug?.seed_rejected));
+  console.log("ENC24_DEBUG final_ok=", Boolean(result?.ok), "method=", result?.method || "", "reason=", result?.reason || "");
+  console.log("ENC24_DEBUG_RESULT_JSON", JSON.stringify(result));
 }
