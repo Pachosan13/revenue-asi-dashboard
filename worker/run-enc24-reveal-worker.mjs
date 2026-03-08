@@ -25,6 +25,7 @@ function isValidEnc24ListingUrl(u) {
 }
 
 const WORKER_ID = process.env.WORKER_ID || "local-macbook-hunter";
+const ACCOUNT_ID = String(process.env.ACCOUNT_ID || "").trim();
 
 const LIMIT = Number(process.env.LIMIT || "1");
 const LOOP = String(process.env.LOOP || "1") === "1";
@@ -76,22 +77,39 @@ let emptyPolls = 0;
 // DB
 // ===============
 async function claimTasks(db) {
-  // usa la firma robusta (4 args) si existe; si no, cae al 2-args.
-  try {
-    const q4 = `
-      select id, listing_url, attempts, priority
-      from lead_hunter.claim_enc24_reveal_tasks($1::text, $2::int, $3::int, $4::int)
-    `;
-    const { rows } = await db.query(q4, [WORKER_ID, LIMIT, STALE_SECONDS, MAX_ATTEMPTS]);
-    return rows || [];
-  } catch (e) {
-    const q2 = `
-      select id, listing_url, attempts, priority
-      from lead_hunter.claim_enc24_reveal_tasks($1::text, $2::int)
-    `;
-    const { rows } = await db.query(q2, [WORKER_ID, LIMIT]);
-    return rows || [];
-  }
+  if (!ACCOUNT_ID) return [];
+  const q = `
+    with picked as (
+      select t.id
+      from lead_hunter.enc24_reveal_tasks t
+      join lead_hunter.enc24_listings l on l.listing_url = t.listing_url
+      where l.account_id = $1::uuid
+        and lead_hunter.is_valid_enc24_listing_url(t.listing_url)
+        and (
+          t.status = 'queued'
+          or (
+            t.status = 'claimed'
+            and t.claimed_at is not null
+            and t.claimed_at < now() - make_interval(secs => greatest($4::int, 30))
+          )
+        )
+        and t.attempts < greatest($5::int, 1)
+      order by t.priority desc, t.created_at
+      limit greatest($3::int, 1)
+      for update skip locked
+    )
+    update lead_hunter.enc24_reveal_tasks t
+    set status = 'claimed',
+        claimed_at = now(),
+        claimed_by = $2::text,
+        attempts = attempts + 1,
+        updated_at = now()
+    from picked
+    where t.id = picked.id
+    returning t.id, t.listing_url, t.attempts, t.priority;
+  `;
+  const { rows } = await db.query(q, [ACCOUNT_ID, WORKER_ID, LIMIT, STALE_SECONDS, MAX_ATTEMPTS]);
+  return rows || [];
 }
 
 async function heartbeatTask(db, task_id) {
@@ -113,7 +131,7 @@ async function applyResultToListing(db, listing_url, res) {
     update lead_hunter.enc24_listings
     set
       ok = $2::boolean,
-      stage = greatest(coalesce(stage,0), $3::int),
+      stage = $3::text,
       method = nullif($4::text,''),
       reason = nullif($5::text,''),
       -- Never erase previously captured contact data on a failed re-run.
@@ -127,7 +145,7 @@ async function applyResultToListing(db, listing_url, res) {
         when nullif($7::text,'') is not null then nullif($7::text,'')
         else wa_link
       end,
-      seller_name = case when nullif($9::text,'') is not null then nullif($9::text,'') else seller_name end,
+      seller_name = nullif($9::text,''),
       raw = coalesce(raw,'{}'::jsonb) || $8::jsonb,
       updated_at = now(),
       last_seen_at = now()
@@ -136,7 +154,7 @@ async function applyResultToListing(db, listing_url, res) {
   await db.query(q, [
     listing_url,
     Boolean(res.ok),
-    Number(res.stage ?? 2),
+    Boolean(res.ok) ? "reveal_ok" : "reveal_failed",
     String(res.method || ""),
     String(res.reason || ""),
     String(res.phone_e164 || ""),
@@ -203,7 +221,33 @@ async function processOne(db, t) {
 
     const isDummy = formE164 && r?.phone_e164 && String(r.phone_e164) === String(formE164);
 
-    const isCommercial = Boolean(r?.seller_is_business);
+    // Duplicate phone detection: check both ok=true listings AND GHL deliveries history
+    let isDuplicatePhone = false;
+    if (r?.phone_e164 && !isDummy) {
+      try {
+        // Check 1: 2+ other ok=true listings with same phone
+        const dupRes = await db.query(
+          "SELECT count(*)::int as cnt FROM lead_hunter.enc24_listings WHERE phone_e164 = $1 AND ok = true AND listing_url != $2",
+          [String(r.phone_e164), listing_url]
+        );
+        const existingOk = Number(dupRes.rows[0]?.cnt || 0);
+        // Check 2: 3+ GHL deliveries already sent with same phone (across all time)
+        const ghlRes = await db.query(
+          "SELECT count(*)::int as cnt FROM lead_hunter.enc24_ghl_deliveries WHERE phone_e164 = $1 AND status = 'sent'",
+          [String(r.phone_e164)]
+        );
+        const ghlSent = Number(ghlRes.rows[0]?.cnt || 0);
+        if (existingOk >= 2 || ghlSent >= 3) {
+          isDuplicatePhone = true;
+          console.log(`[${nowIso()}] duplicate_phone_detected task=${task_id} phone=${r.phone_e164} existing_ok=${existingOk} ghl_sent=${ghlSent}`);
+        }
+      } catch (e) {
+        console.warn(`[${nowIso()}] duplicate_phone_check_error task=${task_id}:`, e?.message);
+      }
+    }
+
+    const isCommercial = Boolean(r?.seller_is_business) || isDuplicatePhone;
+    console.log(`[${nowIso()}] seller_check task=${task_id} seller_name=${r?.seller_name || "-"} seller_is_business=${r?.seller_is_business} duplicate_phone=${isDuplicatePhone} seller_type=${r?.debug?.seller?.seller_type || "-"} method=${r?.method || "-"}`);
     const ok = Boolean(r?.ok) && !isCommercial && !isDummy && Boolean(r?.phone_e164 || r?.wa_link);
     const softBlocked = String(r?.reason || "").includes("soft_block");
 
@@ -211,7 +255,7 @@ async function processOne(db, t) {
       ok,
       stage: 2,
       method: isCommercial ? "filtered_commercial_seller" : (isDummy ? "dummy_phone_detected" : String(r?.method || "")),
-      reason: isCommercial ? "seller_name_commercial" : (isDummy ? "returned_phone_equals_form_phone" : String(r?.reason || "")),
+      reason: isCommercial ? (isDuplicatePhone ? "duplicate_phone_dealer" : "seller_name_commercial") : (isDummy ? "returned_phone_equals_form_phone" : String(r?.reason || "")),
       phone_e164: ok ? (r?.phone_e164 || null) : null,
       wa_link: ok ? (r?.wa_link || null) : null,
       seller_name: r?.seller_name || null,
@@ -219,6 +263,7 @@ async function processOne(db, t) {
         ...(r?.debug || {}),
         seller_name: r?.seller_name || null,
         seller_is_business: Boolean(r?.seller_is_business),
+        duplicate_phone: isDuplicatePhone,
         filtered_commercial: isCommercial,
         extracted_phone_e164: r?.phone_e164 || null,
         extracted_wa_link: r?.wa_link || null,
@@ -249,10 +294,32 @@ async function processOne(db, t) {
   }
 }
 
+async function sweepExhausted(db) {
+  if (!ACCOUNT_ID) return 0;
+  try {
+    const { rowCount } = await db.query(`
+      update lead_hunter.enc24_reveal_tasks t
+      set status = 'failed', last_error = 'max_attempts_exhausted', updated_at = now()
+      from lead_hunter.enc24_listings l
+      where l.listing_url = t.listing_url
+        and l.account_id = $1::uuid
+        and t.status in ('queued','claimed')
+        and t.attempts >= $2::int
+    `, [ACCOUNT_ID, MAX_ATTEMPTS]);
+    if (rowCount) console.log(`[${nowIso()}] event=sweep_exhausted count=${rowCount}`);
+    return rowCount || 0;
+  } catch (e) {
+    console.warn(`[${nowIso()}] sweep_exhausted_error:`, e?.message);
+    return 0;
+  }
+}
+
 async function mainOnce(db) {
+  await sweepExhausted(db);
   const tasks = await claimTasks(db);
+  console.log(`[${nowIso()}] event=reveal_worker_pick n=${tasks.length} status=queued`);
   if (!tasks.length) {
-    console.log(`[${nowIso()}] no tasks claimed by ${WORKER_ID}`);
+    console.log(`[${nowIso()}] event=reveal_worker_empty reason=no_tasks account_id=${ACCOUNT_ID}`);
     return { claimed: 0, done: 0, failed: 0 };
   }
 
@@ -291,8 +358,9 @@ async function main() {
   const db = new Client(pgConfig);
   await db.connect();
 
+  console.log(`[${nowIso()}] event=reveal_worker_start account_id=${ACCOUNT_ID} limit=${LIMIT}`);
   console.log(`[${nowIso()}] enc24 reveal worker starting`, {
-    WORKER_ID, LIMIT, LOOP, SLEEP_MS,
+    WORKER_ID, ACCOUNT_ID, LIMIT, LOOP, SLEEP_MS,
     STALE_SECONDS, MAX_ATTEMPTS, HEARTBEAT_MS,
     HEADLESS: RESOLVER_OPTS.headless,
     SAVE_SHOTS: RESOLVER_OPTS.saveShots,
@@ -312,8 +380,10 @@ async function main() {
   });
 
   try {
+    let last = { claimed: 0, done: 0, failed: 0 };
     do {
       const r = await mainOnce(db);
+      last = r;
       if (!LOOP) break;
       if (r.claimed === 0) {
         emptyPolls++;
@@ -328,6 +398,7 @@ async function main() {
         emptyPolls = 0;
       }
     } while (true);
+    console.log(`[${nowIso()}] event=reveal_worker_done ok=true processed=${last.done + last.failed} failed=${last.failed}`);
   } finally {
     await db.end().catch(() => {});
   }

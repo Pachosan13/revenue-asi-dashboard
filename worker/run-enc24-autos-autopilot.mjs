@@ -6,12 +6,12 @@ import { getPgConfig, logPgConnect, logPgSslObject } from "./lib/pg-config.mjs";
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function nowIso() { return new Date().toISOString(); }
 
-const TICK_TIMEOUT_MS = Number(process.env.ENC24_TICK_TIMEOUT_MS || "60000");
+const TICK_TIMEOUT_MS = Number(process.env.ENC24_TICK_TIMEOUT_MS || "330000");
 const COLLECT_TIMEOUT_MS = Number(process.env.ENC24_COLLECT_TIMEOUT_MS || "25000");
 const PG_QUERY_TIMEOUT_MS = Number(process.env.ENC24_PG_QUERY_TIMEOUT_MS || "20000");
-const REVEAL_TIMEOUT_MS = Number(process.env.ENC24_REVEAL_TIMEOUT_MS || "30000");
+const REVEAL_TIMEOUT_MS = Number(process.env.ENC24_REVEAL_TIMEOUT_MS || "240000");
 const GHL_TIMEOUT_MS = Number(process.env.ENC24_GHL_TIMEOUT_MS || "15000");
-const PROMOTE_TIMEOUT_MS = Number(process.env.ENC24_PROMOTE_TIMEOUT_MS || "20000");
+const PROMOTE_TIMEOUT_MS = Number(process.env.ENC24_PROMOTE_TIMEOUT_MS || "45000");
 
 function timeoutError(label, ms) {
   const e = new Error(label);
@@ -60,18 +60,40 @@ function envBool(name, def = false) {
 function panamaHourNow() {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Panama",
+    hourCycle: "h23",       // 0-23 range (avoids h24 where midnight = 24)
     hour: "2-digit",
     hour12: false,
   }).formatToParts(new Date());
-  return Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  return Number(parts.find((p) => p.type === "hour")?.value ?? "0") % 24;
 }
 
-function execNode(script, env) {
+function execNode(script, env, timeoutMs) {
   return new Promise((resolve) => {
-    execFile(process.execPath, [script], { env: { ...process.env, ...env } }, (err, stdout, stderr) => {
-      resolve({ ok: !err, err: err ? String(err.message || err) : null, stdout: String(stdout || ""), stderr: String(stderr || "") });
-    });
+    const child = execFile(
+      process.execPath,
+      [script],
+      { env: { ...process.env, ...env }, maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (timer) clearTimeout(timer);
+        resolve({ ok: !err, err: err ? String(err.message || err) : null, stdout: String(stdout || ""), stderr: String(stderr || "") });
+      },
+    );
+    let timer = null;
+    if (timeoutMs && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        try { child.kill("SIGTERM"); } catch {}
+        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000);
+      }, timeoutMs);
+    }
   });
+}
+
+function summarizeChildOut(s) {
+  const v = String(s || "");
+  const trimmed = v.trim();
+  const len = v.length;
+  const head = trimmed ? trimmed.slice(0, 200).replace(/\s+/g, " ") : "";
+  return { len, head };
 }
 
 function setPhase(phaseRef, phase, accountId) {
@@ -146,7 +168,7 @@ async function promoteEnc24ToPublicLeads(state, phaseRef, accountId, limit) {
     on conflict (account_id, phone) where phone is not null and length(phone) > 0
     do update set
       updated_at = now(),
-      contact_name = coalesce(nullif(excluded.contact_name,''), public.leads.contact_name),
+      contact_name = nullif(excluded.contact_name,''),
       status = coalesce(nullif(public.leads.status,''), excluded.status),
       enriched = coalesce(public.leads.enriched,'{}'::jsonb) || excluded.enriched
     returning id;
@@ -232,28 +254,37 @@ async function tickOnce(state, phaseRef, accountId, settings) {
   // 3) Reveal worker (soft) — reuse existing robust worker via a child process (LOOP=0)
   setPhase(phaseRef, "reveal_run_start", accountId);
   let r = { ok: false, err: "reveal_not_run" };
+  console.log(`[${nowIso()}] event=reveal_child_start account_id=${accountId} limit=${limit}`);
   try {
-    r = await withTimeout(
-      execNode("worker/run-enc24-reveal-worker.mjs", {
-        DATABASE_URL: process.env.DATABASE_URL,
-        WORKER_ID: process.env.WORKER_ID || "enc24-autopilot",
-        LIMIT: String(limit),
-        LOOP: "0",
-        // Default to headless so it doesn't interrupt local work; override with HEADLESS=0 if needed.
-        HEADLESS: typeof process.env.HEADLESS === "string" ? process.env.HEADLESS : "1",
-        SAVE_SHOTS: "0",
-        ENC24_CDP: process.env.ENC24_CDP || "0",
-        ENC24_CDP_URL: process.env.ENC24_CDP_URL || "",
-        EXIT_ON_EMPTY: "1",
-        EMPTY_POLLS_TO_EXIT: "1",
-        EMPTY_SLEEP_MS: "5000",
-      }),
-      REVEAL_TIMEOUT_MS,
-      "reveal_timeout_30s",
-    );
+    r = await execNode("worker/run-enc24-reveal-worker.mjs", {
+      DATABASE_URL: process.env.DATABASE_URL,
+      ACCOUNT_ID: String(accountId),
+      WORKER_ID: process.env.WORKER_ID || "enc24-autopilot",
+      LIMIT: String(limit),
+      LOOP: "0",
+      // Default to headless so it doesn't interrupt local work; override with HEADLESS=0 if needed.
+      HEADLESS: typeof process.env.HEADLESS === "string" ? process.env.HEADLESS : "1",
+      SAVE_SHOTS: "0",
+      ENC24_CDP: process.env.ENC24_CDP || "0",
+      ENC24_CDP_URL: process.env.ENC24_CDP_URL || "",
+      EXIT_ON_EMPTY: "1",
+      EMPTY_POLLS_TO_EXIT: "1",
+      EMPTY_SLEEP_MS: "5000",
+    }, REVEAL_TIMEOUT_MS);
   } catch (e) {
     r = { ok: false, err: String(e?.code || e?.message || e), stdout: "", stderr: "" };
     console.error(`[${nowIso()}] reveal_timeout_30s account_id=${accountId} err=${r.err}`);
+  }
+  const revealOut = summarizeChildOut(r.stdout);
+  const revealErr = summarizeChildOut(r.stderr);
+  console.log(
+    `[${nowIso()}] event=reveal_child_end account_id=${accountId} ok=${Boolean(r?.ok)} err=${String(r?.err ?? "")} stdout_len=${revealOut.len} stderr_len=${revealErr.len} stdout_head=${JSON.stringify(revealOut.head)} stderr_head=${JSON.stringify(revealErr.head)}`
+  );
+  if (/\S/.test(String(r?.stdout || ""))) {
+    console.log(`[${nowIso()}] reveal_child_stdout account_id=${accountId}\n${r.stdout}`);
+  }
+  if (/\S/.test(String(r?.stderr || ""))) {
+    console.error(`[${nowIso()}] reveal_child_stderr account_id=${accountId}\n${r.stderr}`);
   }
   setPhase(phaseRef, "reveal_run_done", accountId);
 
@@ -266,20 +297,16 @@ async function tickOnce(state, phaseRef, accountId, settings) {
   if (GHL_ACTIVE) {
     setPhase(phaseRef, "ghl_dispatch_start", accountId);
     try {
-      ghl = await withTimeout(
-        execNode("worker/run-enc24-ghl-dispatch.mjs", {
-          DATABASE_URL: process.env.DATABASE_URL,
-          ACCOUNT_ID: String(accountId),
-          ENC24_GHL_WEBHOOK_URL: GHL_URL,
-          ENC24_GHL_ENABLED: process.env.ENC24_GHL_ENABLED || "1",
-          LIMIT: String(limit),          // send up to N per tick
-          ENQUEUE_LIMIT: String(limit),  // enqueue up to N per tick
-          LOOP: "0",
-          SLEEP_MS: "1000",
-        }),
-        GHL_TIMEOUT_MS,
-        "ghl_timeout_15s",
-      );
+      ghl = await execNode("worker/run-enc24-ghl-dispatch.mjs", {
+        DATABASE_URL: process.env.DATABASE_URL,
+        ACCOUNT_ID: String(accountId),
+        ENC24_GHL_WEBHOOK_URL: GHL_URL,
+        ENC24_GHL_ENABLED: process.env.ENC24_GHL_ENABLED || "1",
+        LIMIT: String(limit),          // send up to N per tick
+        ENQUEUE_LIMIT: String(limit),  // enqueue up to N per tick
+        LOOP: "0",
+        SLEEP_MS: "1000",
+      }, GHL_TIMEOUT_MS);
     } catch (e) {
       ghl = { ok: false, err: String(e?.code || e?.message || e), stdout: "", stderr: "" };
       console.error(`[${nowIso()}] ghl_timeout_15s account_id=${accountId} err=${ghl.err}`);

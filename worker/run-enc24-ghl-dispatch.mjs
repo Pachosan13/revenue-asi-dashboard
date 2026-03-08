@@ -128,6 +128,14 @@ async function enqueueFromListings(db, accountId, limit) {
             )
           )
       )
+      -- Phone dedup: skip if this phone was already sent (any time, not just 24h)
+      and not exists (
+        select 1
+        from lead_hunter.enc24_ghl_deliveries dp
+        where dp.account_id = l.account_id
+          and dp.phone_e164 = l.phone_e164
+          and dp.status = 'sent'
+      )
     order by l.updated_at desc nulls last
     limit $2::int
     returning id;
@@ -288,8 +296,12 @@ async function runOnce(db, opts) {
     dedupeDryRun,
   } = opts;
 
-  const enq = await enqueueFromListings(db, accountId, enqueueLimit).catch(() => 0);
+  const enq = await enqueueFromListings(db, accountId, enqueueLimit).catch((e) => {
+    console.error(`[${nowIso()}] enqueue_error account=${accountId}:`, e?.message);
+    return 0;
+  });
   const claimed = await claimDue(db, accountId, sendLimit);
+  console.log(`[${nowIso()}] event=claim_due claimed=${claimed.length}`);
   if (!claimed.length) {
     return { enqueued: enq, sent: 0, failed: 0, claimed: 0 };
   }
